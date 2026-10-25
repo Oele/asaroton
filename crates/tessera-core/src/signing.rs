@@ -78,6 +78,11 @@ impl SigningKey {
         Self::from_seed(&seed, version)
     }
 
+    /// The underlying key pair, for ruma APIs that need it (request signing).
+    pub fn key_pair(&self) -> &Ed25519KeyPair {
+        &self.key_pair
+    }
+
     /// The key ID, e.g. `ed25519:a_XRhW`.
     pub fn key_id(&self) -> &OwnedServerSigningKeyId {
         &self.key_id

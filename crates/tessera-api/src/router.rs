@@ -59,6 +59,7 @@ where
 pub fn build_router(state: AppState) -> Router {
     let router = Router::new();
     let router = crate::client::routes(router);
+    let router = crate::federation::routes(router);
     router
         .route("/_matrix/client/{*rest}", axum::routing::any(unrecognized))
         .route("/_matrix/{*rest}", axum::routing::any(unrecognized))

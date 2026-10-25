@@ -1,8 +1,10 @@
-//! Startup wiring: logging, database, services, listeners.
+//! Startup wiring: logging, database, services, federation, listeners.
 
 use std::sync::Arc;
 
 use anyhow::Context;
+use tessera_api::App;
+use tessera_federation::{Federation, FederationConfig, hooks::Hooks};
 use tessera_service::Services;
 use tessera_store::{PostgresStore, Store};
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
@@ -37,6 +39,12 @@ fn service_config(config: &Config) -> tessera_service::Config {
     } else {
         format!("http://{}", config.listeners.client.bind)
     };
+    let mut trusted = config.federation.trusted_key_servers.clone();
+    if trusted.is_empty()
+        && let Ok(m) = ruma::OwnedServerName::try_from("matrix.org")
+    {
+        trusted.push(m);
+    }
     tessera_service::Config {
         server_name: config.server_name.clone(),
         default_room_version: config.rooms.default_version.clone(),
@@ -45,10 +53,27 @@ fn service_config(config: &Config) -> tessera_service::Config {
         registration_requires_token: config.registration.require_token,
         allow_guests: config.registration.allow_guests,
         federation_disabled: config.federation.disabled,
-        trusted_key_servers: config.federation.trusted_key_servers.clone(),
+        trusted_key_servers: trusted,
         rate_limiting: config.rate_limiting.enabled,
         public_base_url,
         software_version: env!("CARGO_PKG_VERSION").to_owned(),
+    }
+}
+
+fn federation_config(config: &Config) -> FederationConfig {
+    let mut extra = Vec::new();
+    for path in &config.federation.extra_ca_certs {
+        match std::fs::read(path) {
+            Ok(pem) => extra.push(pem),
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "could not read extra CA certificate");
+            }
+        }
+    }
+    FederationConfig {
+        extra_ca_certs_pem: extra,
+        insecure_http_servers: config.federation.insecure_http_servers.clone(),
+        danger_accept_invalid_certs: config.federation.danger_accept_invalid_certs,
     }
 }
 
@@ -78,7 +103,18 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     let services = Services::new(service_config(&config), store).await?;
     tracing::info!(server_name = %config.server_name, key = %services.signing_key.key_id(), "tessera starting");
 
-    let app = tessera_api::build_router(Arc::clone(&services));
+    let federation = if config.federation.disabled {
+        None
+    } else {
+        let fed = Federation::new(Arc::clone(&services), federation_config(&config))
+            .context("starting federation")?;
+        services.set_federation(Arc::new(Hooks(Arc::clone(&fed))));
+        Some(fed)
+    };
+    let app = tessera_api::build_router(Arc::new(App {
+        services: Arc::clone(&services),
+        federation,
+    }));
 
     let mut tasks = tokio::task::JoinSet::new();
     if config.listeners.client.enabled {

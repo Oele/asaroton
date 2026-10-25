@@ -3141,10 +3141,15 @@ dependencies = [
 name = "tessera-federation"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "bytes",
  "dashmap",
  "futures",
  "hickory-resolver",
+ "http",
  "parking_lot",
+ "rand 0.9.5",
  "reqwest",
  "ruma",
  "serde",
@@ -3155,12 +3160,14 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "url",
 ]
 
 [[package]]
 name = "tessera-service"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "base64 0.22.1",
  "dashmap",
  "futures",

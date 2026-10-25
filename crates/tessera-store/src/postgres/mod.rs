@@ -3,6 +3,7 @@
 mod account_data;
 mod e2ee;
 mod events;
+mod federation;
 mod keys;
 mod rooms;
 mod state;

@@ -286,6 +286,43 @@ pub struct Pusher {
     pub data: serde_json::Value,
 }
 
+// ------------------------------------------------------------------ federation
+
+/// A queued outbound federation item.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OutboxItem {
+    pub id: i64,
+    pub destination: OwnedServerName,
+    pub kind: OutboxKind,
+}
+
+/// What an outbox row carries.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OutboxKind {
+    Pdu(OwnedEventId),
+    Edu(serde_json::Value),
+}
+
+/// Retry state for a remote server.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DestinationState {
+    pub failure_ts: Option<Ts>,
+    pub retry_last_ts: Option<Ts>,
+    pub retry_interval_ms: i64,
+    pub last_successful_ts: Option<Ts>,
+}
+
+/// Cached server discovery result.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DiscoveryEntry {
+    pub server_name: OwnedServerName,
+    pub host: String,
+    pub port: u16,
+    pub host_header: String,
+    pub tls_name: String,
+    pub expires_ts: Ts,
+}
+
 /// Convert a `UInt` depth/timestamp into the `i64` the database wants.
 pub fn uint_to_i64(v: UInt) -> i64 {
     i64::try_from(u64::from(v)).unwrap_or(i64::MAX)

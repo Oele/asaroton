@@ -99,19 +99,54 @@ pub async fn join_by_id(
     req: Ruma<join_room_by_id::v3::Request>,
 ) -> Result<join_room_by_id::v3::Response> {
     let sender = req.sender()?;
-    if !services.store.room_exists(&req.body.room_id).await? {
-        return Err(Error::not_found(
-            "Unknown room (remote joins are not available yet).",
-        ));
+    join_room(
+        &services,
+        sender,
+        &req.body.room_id,
+        &[],
+        req.body.reason.as_deref(),
+    )
+    .await?;
+    Ok(join_room_by_id::v3::Response::new(req.body.room_id.clone()))
+}
+
+/// Join locally when we are already in the room, otherwise through federation.
+async fn join_room(
+    services: &AppState,
+    sender: &tessera_auth::Sender,
+    room_id: &ruma::RoomId,
+    via: &[ruma::OwnedServerName],
+    reason: Option<&str>,
+) -> Result<()> {
+    let local = services.store.room_exists(room_id).await?
+        && services
+            .store
+            .members(room_id, Some("join"))
+            .await?
+            .iter()
+            .any(|m| services.is_local(&m.user_id));
+    if local {
+        services
+            .join_local_room(room_id, &sender.user_id, reason)
+            .await?;
+        return Ok(());
+    }
+    // An invited user can join through the inviter's server even without `via`.
+    let mut via: Vec<ruma::OwnedServerName> = via.to_vec();
+    if let Some(m) = services
+        .store
+        .get_membership(room_id, &sender.user_id)
+        .await?
+        && m.membership == ruma::events::room::member::MembershipState::Invite
+        && !via.iter().any(|s| *s == m.sender.server_name())
+    {
+        via.push(m.sender.server_name().to_owned());
     }
     services
-        .join_local_room(
-            &req.body.room_id,
-            &sender.user_id,
-            req.body.reason.as_deref(),
-        )
+        .federation()
+        .remote_join(&sender.user_id, room_id, &via, reason)
         .await?;
-    Ok(join_room_by_id::v3::Response::new(req.body.room_id.clone()))
+    Ok(())
 }
 
 pub async fn join_by_id_or_alias(
@@ -119,27 +154,38 @@ pub async fn join_by_id_or_alias(
     req: Ruma<join_room_by_id_or_alias::v3::Request>,
 ) -> Result<join_room_by_id_or_alias::v3::Response> {
     let sender = req.sender()?;
+    let mut via = req.body.via.clone();
     let room_id: OwnedRoomId = match <&ruma::RoomId>::try_from(req.body.room_id_or_alias.as_str()) {
         Ok(id) => id.to_owned(),
         Err(_) => {
             let alias = <&ruma::RoomAliasId>::try_from(req.body.room_id_or_alias.as_str())
                 .map_err(|_| Error::invalid_param("Invalid room ID or alias."))?;
-            services
-                .store
-                .get_alias(alias)
-                .await?
-                .ok_or_else(|| Error::not_found("Room alias not found."))?
-                .room_id
+            if alias.server_name() == services.server_name() {
+                services
+                    .store
+                    .get_alias(alias)
+                    .await?
+                    .ok_or_else(|| Error::not_found("Room alias not found."))?
+                    .room_id
+            } else {
+                let (room_id, servers) = services.federation().resolve_alias(alias).await?;
+                for s in servers {
+                    if !via.contains(&s) {
+                        via.push(s);
+                    }
+                }
+                room_id
+            }
         }
     };
-    if !services.store.room_exists(&room_id).await? {
-        return Err(Error::not_found(
-            "Unknown room (remote joins are not available yet).",
-        ));
-    }
-    services
-        .join_local_room(&room_id, &sender.user_id, req.body.reason.as_deref())
-        .await?;
+    join_room(
+        &services,
+        sender,
+        &room_id,
+        &via,
+        req.body.reason.as_deref(),
+    )
+    .await?;
     Ok(join_room_by_id_or_alias::v3::Response::new(room_id))
 }
 
@@ -148,6 +194,31 @@ pub async fn leave(
     req: Ruma<leave_room::v3::Request>,
 ) -> Result<leave_room::v3::Response> {
     let sender = req.sender()?;
+    let in_room = services
+        .store
+        .members(&req.body.room_id, Some("join"))
+        .await?
+        .iter()
+        .any(|m| services.is_local(&m.user_id));
+    if !in_room
+        && let Some(m) = services
+            .store
+            .get_membership(&req.body.room_id, &sender.user_id)
+            .await?
+        && m.membership == ruma::events::room::member::MembershipState::Invite
+        && !services.is_local(&m.sender)
+    {
+        // Rejecting a remote invite: no local members to build on, go through the inviter.
+        services
+            .federation()
+            .remote_leave(
+                &sender.user_id,
+                &req.body.room_id,
+                &[m.sender.server_name().to_owned()],
+            )
+            .await?;
+        return Ok(leave_room::v3::Response::new());
+    }
     services
         .leave_room(
             &req.body.room_id,
@@ -729,7 +800,7 @@ pub async fn public_rooms_filtered(
     Ok(resp)
 }
 
-async fn public_rooms_chunk(
+pub async fn public_rooms_chunk(
     services: &AppState,
     limit: i64,
     offset: i64,

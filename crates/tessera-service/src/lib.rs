@@ -10,6 +10,7 @@ pub mod account;
 pub mod config;
 pub mod e2ee;
 mod error;
+pub mod federation_hooks;
 pub mod notifier;
 pub mod presence;
 pub mod profile;
@@ -41,6 +42,7 @@ pub struct Services {
     pub presence: presence::PresenceMap,
     /// Nonces handed out by the shared-secret registration endpoint.
     admin_nonces: dashmap::DashMap<String, std::time::Instant>,
+    federation_hooks: federation_hooks::HooksSlot,
     /// Process start, for uptime and `age` calculations.
     pub started_at: std::time::Instant,
     /// Per-room locks for local sends (see `rooms::pipeline`).
@@ -67,6 +69,7 @@ impl Services {
             typing: typing::TypingState::default(),
             presence: presence::PresenceMap::default(),
             admin_nonces: dashmap::DashMap::new(),
+            federation_hooks: federation_hooks::HooksSlot::default(),
             signing_key: Arc::new(signing_key),
             config,
             store,

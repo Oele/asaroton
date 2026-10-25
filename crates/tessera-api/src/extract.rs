@@ -14,6 +14,7 @@ use ruma::{
         IncomingRequest, IncomingRequestExt, OutgoingResponse, OutgoingResponseExt,
         auth_scheme::{AccessToken, AccessTokenOptional, AppserviceToken, AppserviceTokenOptional},
         error::{DeserializationError, ErrorKind, FromHttpRequestError},
+        federation::authentication::ServerSignatures,
     },
 };
 use tessera_auth::{AuthError, Sender};
@@ -43,6 +44,13 @@ impl<T> Ruma<T> {
     pub fn sender(&self) -> Result<&Sender, Error> {
         self.sender.as_ref().ok_or_else(Error::missing_token)
     }
+
+    /// The authenticated remote server (federation endpoints).
+    pub fn origin(&self) -> Result<&OwnedServerName, Error> {
+        self.origin
+            .as_ref()
+            .ok_or_else(|| Error::unauthorized("Missing server signature."))
+    }
 }
 
 /// What kind of authentication an endpoint declared.
@@ -53,6 +61,7 @@ enum Auth {
     Optional,
     Appservice,
     AppserviceOptional,
+    Server,
 }
 
 fn auth_kind<T: IncomingRequest>() -> Auth
@@ -68,6 +77,8 @@ where
         Auth::Appservice
     } else if id == TypeId::of::<AppserviceTokenOptional>() {
         Auth::AppserviceOptional
+    } else if id == TypeId::of::<ServerSignatures>() {
+        Auth::Server
     } else {
         Auth::None
     }
@@ -127,7 +138,7 @@ where
         let auth = auth_kind::<T>();
         let token = extract_token(&req);
         let sender = match (auth, token) {
-            (Auth::None, _) => None,
+            (Auth::None | Auth::Server, _) => None,
             (Auth::Required | Auth::Appservice, None) => return Err(Error::missing_token()),
             (Auth::Optional | Auth::AppserviceOptional, None) => None,
             (_, Some(token)) => match services.auth.authenticate(&token).await {

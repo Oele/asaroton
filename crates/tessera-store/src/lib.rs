@@ -13,8 +13,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ruma::{
-    DeviceId, EventId, OwnedDeviceId, OwnedEventId, OwnedRoomId, OwnedUserId, RoomAliasId, RoomId,
-    ServerName, UserId, events::StateEventType,
+    DeviceId, EventId, OwnedDeviceId, OwnedEventId, OwnedRoomId, OwnedServerName, OwnedUserId,
+    RoomAliasId, RoomId, ServerName, UserId, events::StateEventType,
 };
 use tessera_core::Pdu;
 
@@ -429,9 +429,69 @@ pub trait E2eeStore: Send + Sync {
     async fn pushers(&self, user_id: &UserId) -> Result<Vec<Pusher>>;
 }
 
+/// Federation queues and caches.
+#[async_trait]
+pub trait FederationStore: Send + Sync {
+    /// Queue a PDU for every destination; returns the first new row id.
+    async fn enqueue_pdu(&self, destinations: &[OwnedServerName], event_id: &EventId)
+    -> Result<()>;
+    async fn enqueue_edu(
+        &self,
+        destinations: &[OwnedServerName],
+        edu: &serde_json::Value,
+    ) -> Result<()>;
+    /// Oldest pending items for a destination.
+    async fn outbox_for(&self, destination: &ServerName, limit: usize) -> Result<Vec<OutboxItem>>;
+    async fn delete_outbox_items(&self, ids: &[i64]) -> Result<()>;
+    /// Destinations that have anything queued.
+    async fn outbox_destinations(&self) -> Result<Vec<OwnedServerName>>;
+    async fn destination_state(&self, destination: &ServerName) -> Result<DestinationState>;
+    async fn set_destination_state(
+        &self,
+        destination: &ServerName,
+        state: &DestinationState,
+    ) -> Result<()>;
+
+    async fn received_transaction(
+        &self,
+        origin: &ServerName,
+        txn_id: &str,
+    ) -> Result<Option<serde_json::Value>>;
+    async fn store_received_transaction(
+        &self,
+        origin: &ServerName,
+        txn_id: &str,
+        response: &serde_json::Value,
+    ) -> Result<()>;
+
+    async fn get_discovery(&self, server_name: &ServerName) -> Result<Option<DiscoveryEntry>>;
+    async fn set_discovery(&self, entry: &DiscoveryEntry) -> Result<()>;
+
+    /// Stripped state from a remote invite.
+    async fn set_invite_state(
+        &self,
+        room_id: &RoomId,
+        user_id: &UserId,
+        state: &[serde_json::Value],
+    ) -> Result<()>;
+    async fn get_invite_state(
+        &self,
+        room_id: &RoomId,
+        user_id: &UserId,
+    ) -> Result<Option<Vec<serde_json::Value>>>;
+    async fn delete_invite_state(&self, room_id: &RoomId, user_id: &UserId) -> Result<()>;
+}
+
 /// The full store.
 pub trait Store:
-    UserStore + RoomStore + EventStore + StateStore + AccountDataStore + KeyStore + E2eeStore
+    UserStore
+    + RoomStore
+    + EventStore
+    + StateStore
+    + AccountDataStore
+    + KeyStore
+    + E2eeStore
+    + FederationStore
 {
     /// Run pending migrations.
     fn migrate(&self) -> futures::future::BoxFuture<'_, Result<()>>;

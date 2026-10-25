@@ -96,6 +96,9 @@ pub struct FederationConfig {
     /// Allow federation over plain HTTP to these servers (testing only).
     #[serde(default)]
     pub insecure_http_servers: Vec<OwnedServerName>,
+    /// Skip TLS certificate verification for federation (testing only).
+    #[serde(default)]
+    pub danger_accept_invalid_certs: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]

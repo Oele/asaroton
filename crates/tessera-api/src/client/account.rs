@@ -358,8 +358,24 @@ pub async fn delete_devices(
 
 async fn local_user(services: &Services, user_id: &OwnedUserId) -> Result<tessera_store::User> {
     if !services.is_local(user_id) {
-        // Remote profiles are fetched over federation in Phase 3.
-        return Err(Error::not_found("Profile not found."));
+        // Remote profile over federation, mapped into our user shape.
+        let v = services.federation().remote_profile(user_id).await?;
+        return Ok(tessera_store::User {
+            user_id: user_id.clone(),
+            display_name: v
+                .get("displayname")
+                .and_then(|d| d.as_str())
+                .map(str::to_owned),
+            avatar_url: v
+                .get("avatar_url")
+                .and_then(|d| d.as_str())
+                .map(str::to_owned),
+            is_admin: false,
+            is_guest: false,
+            is_deactivated: false,
+            appservice_id: None,
+            created_ts: 0,
+        });
     }
     services
         .store

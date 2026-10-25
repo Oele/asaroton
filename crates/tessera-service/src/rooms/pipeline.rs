@@ -161,6 +161,12 @@ impl Services {
         ctx: &mut RoomContext,
         ev: LocalEvent,
     ) -> Result<StoredEvent> {
+        let pdu = self.build_local_event_locked(ctx, ev).await?;
+        self.persist_built_event_locked(ctx, pdu).await
+    }
+
+    /// Build and authorise an event against the context without persisting it.
+    pub async fn build_local_event_locked(&self, ctx: &RoomContext, ev: LocalEvent) -> Result<Pdu> {
         let rules = ctx.rules.clone();
 
         // prev events and depth
@@ -236,7 +242,16 @@ impl Services {
             tessera_core::Error::Auth(msg) => Error::forbidden(msg),
             other => other.into(),
         })?;
+        Ok(pdu)
+    }
 
+    /// Persist an already-built event (from [`Services::build_local_event_locked`] or signed
+    /// by a remote server), update the context and fan out.
+    pub async fn persist_built_event_locked(
+        &self,
+        ctx: &mut RoomContext,
+        pdu: Pdu,
+    ) -> Result<StoredEvent> {
         // state bookkeeping
         let (state, delta) = match pdu.state_tuple() {
             Some((ty, key)) => {
@@ -300,6 +315,10 @@ impl Services {
             room_id: ctx.room_id.clone(),
             stream_ordering: persisted.stream_ordering,
         });
+        // Fan out to the other servers in the room.
+        let hooks = self.federation();
+        let fanout = pdu.clone();
+        tokio::spawn(async move { hooks.on_new_event(&fanout).await });
 
         Ok(StoredEvent {
             pdu,

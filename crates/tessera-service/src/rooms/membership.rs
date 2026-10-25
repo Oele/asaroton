@@ -87,7 +87,11 @@ impl Services {
     }
 
     /// Whether `user` is joined to one of the rooms named by the restricted join rule.
-    async fn satisfies_restricted_allow(&self, ctx: &RoomContext, user: &UserId) -> Result<bool> {
+    pub async fn satisfies_restricted_allow(
+        &self,
+        ctx: &RoomContext,
+        user: &UserId,
+    ) -> Result<bool> {
         let Some(jr) = ctx.get(StateEventType::RoomJoinRules, "") else {
             return Ok(false);
         };
@@ -116,7 +120,7 @@ impl Services {
 
     /// A joined local user with enough power to invite, to put in
     /// `join_authorised_via_users_server`.
-    async fn find_join_authoriser(&self, ctx: &RoomContext) -> Result<Option<OwnedUserId>> {
+    pub async fn find_join_authoriser(&self, ctx: &RoomContext) -> Result<Option<OwnedUserId>> {
         let members = self.store.members(&ctx.room_id, Some("join")).await?;
         Ok(members
             .into_iter()
@@ -181,14 +185,7 @@ impl Services {
         reason: Option<&str>,
         is_direct: bool,
     ) -> Result<StoredEvent> {
-        if !self.is_local(invitee) {
-            return Err(Error::matrix(
-                ruma::api::error::ErrorKind::Unknown,
-                http::StatusCode::BAD_GATEWAY,
-                "Inviting remote users is not available yet.",
-            ));
-        }
-        if self.store.get_user(invitee).await?.is_none() {
+        if self.is_local(invitee) && self.store.get_user(invitee).await?.is_none() {
             return Err(Error::not_found("Invitee does not exist."));
         }
         match ctx.membership(invitee) {
@@ -207,17 +204,24 @@ impl Services {
         if is_direct {
             content["is_direct"] = json!(true);
         }
-        self.send_local_event_locked(
-            ctx,
-            LocalEvent::new(
-                ctx.room_id.clone(),
-                inviter.to_owned(),
-                TimelineEventType::RoomMember,
-            )
-            .state_key(invitee.as_str())
-            .content(&content)?,
+        let ev = LocalEvent::new(
+            ctx.room_id.clone(),
+            inviter.to_owned(),
+            TimelineEventType::RoomMember,
         )
-        .await
+        .state_key(invitee.as_str())
+        .content(&content)?;
+        if self.is_local(invitee) {
+            return self.send_local_event_locked(ctx, ev).await;
+        }
+        // Remote invitee: build the event, have their server sign it, then persist that copy.
+        let built = self.build_local_event_locked(ctx, ev).await?;
+        let stripped = Self::stripped_state_for_invite(ctx);
+        let signed = self
+            .federation()
+            .remote_invite(&built, &ctx.version, stripped)
+            .await?;
+        self.persist_built_event_locked(ctx, signed).await
     }
 
     /// Kick, ban or unban (`membership` is `leave` or `ban`; unban is `leave` from `ban`).
@@ -314,4 +318,36 @@ fn join_rule(ctx: &RoomContext) -> String {
                 .map(str::to_owned)
         })
         .unwrap_or_else(|| "invite".to_owned())
+}
+
+impl Services {
+    /// Stripped state for a remote invite, from the in-memory room context.
+    fn stripped_state_for_invite(ctx: &RoomContext) -> Vec<Value> {
+        let mut out = Vec::new();
+        for pdu in ctx.state.values() {
+            let keep = matches!(
+                pdu.state_tuple(),
+                Some((
+                    StateEventType::RoomCreate
+                        | StateEventType::RoomJoinRules
+                        | StateEventType::RoomName
+                        | StateEventType::RoomAvatar
+                        | StateEventType::RoomCanonicalAlias
+                        | StateEventType::RoomTopic
+                        | StateEventType::RoomEncryption,
+                    _
+                ))
+            );
+            if keep {
+                let mut v = pdu.to_client_json();
+                if let Value::Object(o) = &mut v {
+                    o.retain(|k, _| {
+                        matches!(k.as_str(), "type" | "state_key" | "content" | "sender")
+                    });
+                }
+                out.push(v);
+            }
+        }
+        out
+    }
 }
