@@ -3224,6 +3224,7 @@ dependencies = [
  "hex",
  "hmac 0.12.1",
  "http",
+ "rand 0.9.5",
  "ruma",
  "serde",
  "serde_json",

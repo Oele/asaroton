@@ -58,40 +58,98 @@ pub fn routes(router: Router<AppState>) -> Router<AppState> {
     let r = route::<get_keys::v1::Request, _, _>(r, user_keys_query);
     let r = route::<claim_keys::v1::Request, _, _>(r, user_keys_claim);
     let r = route::<get_public_rooms::v1::Request, _, _>(r, public_rooms);
-    let r = route::<fed_media::get_content::v1::Request, _, _>(r, media_download);
-    route::<fed_media::get_content_thumbnail::v1::Request, _, _>(r, media_thumbnail)
+    // Media responses are hand-built multipart bodies, so these bypass the typed route helper.
+    r.route(
+        "/_matrix/federation/v1/media/download/{media_id}",
+        axum::routing::get(media_download_handler),
+    )
+    .route(
+        "/_matrix/federation/v1/media/thumbnail/{media_id}",
+        axum::routing::get(media_thumbnail_handler),
+    )
+}
+
+async fn media_download_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    req: Ruma<fed_media::get_content::v1::Request>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    match media_download(state, req).await {
+        Ok(resp) => resp,
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn media_thumbnail_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    req: Ruma<fed_media::get_content_thumbnail::v1::Request>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    match media_thumbnail(state, req).await {
+        Ok(resp) => resp,
+        Err(e) => e.into_response(),
+    }
 }
 
 // ---------------------------------------------------------------- media
 
-fn fed_content(file: tessera_service::media::MediaFile) -> fed_media::FileOrLocation {
-    let c = fed_media::Content::new(
-        file.bytes,
-        file.content_type,
-        ruma::http_headers::ContentDisposition::new(
-            ruma::http_headers::ContentDispositionType::Attachment,
-        )
-        .with_filename(file.filename),
+/// The `multipart/mixed` body of an authenticated-media response: an empty JSON metadata part
+/// followed by the file, terminated with a closing boundary.
+fn multipart_media_response(file: tessera_service::media::MediaFile) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    use rand::{Rng, distr::Alphanumeric};
+    let tessera_service::media::MediaFile {
+        bytes,
+        content_type,
+        filename,
+    } = file;
+    let boundary: String = rand::rng()
+        .sample_iter(&Alphanumeric)
+        .take(30)
+        .map(char::from)
+        .collect();
+    let disposition = ruma::http_headers::ContentDisposition::new(
+        ruma::http_headers::ContentDispositionType::Attachment,
+    )
+    .with_filename(filename);
+    let mut body: Vec<u8> = Vec::with_capacity(bytes.len() + 256);
+    body.extend_from_slice(
+        format!("--{boundary}\r\nContent-Type: application/json\r\n\r\n{{}}\r\n").as_bytes(),
     );
-    fed_media::FileOrLocation::File(c)
+    body.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Type: {content_type}\r\nContent-Disposition: {disposition}\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(&bytes);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    let mut resp = (
+        http::StatusCode::OK,
+        [(
+            http::header::CONTENT_TYPE,
+            format!("multipart/mixed; boundary={boundary}"),
+        )],
+        body,
+    )
+        .into_response();
+    crate::extract::add_cors(resp.headers_mut());
+    resp
 }
 
 pub async fn media_download(
     app: AppState,
     req: Ruma<fed_media::get_content::v1::Request>,
-) -> Result<fed_media::get_content::v1::Response> {
+) -> Result<axum::response::Response> {
     let _ = req.origin()?;
     let file = app.get_media(app.server_name(), &req.body.media_id).await?;
-    Ok(fed_media::get_content::v1::Response::new(
-        fed_media::ContentMetadata::new(),
-        fed_content(file),
-    ))
+    Ok(multipart_media_response(file))
 }
 
 pub async fn media_thumbnail(
     app: AppState,
     req: Ruma<fed_media::get_content_thumbnail::v1::Request>,
-) -> Result<fed_media::get_content_thumbnail::v1::Response> {
+) -> Result<axum::response::Response> {
     let _ = req.origin()?;
     let method = req
         .body
@@ -110,10 +168,7 @@ pub async fn media_thumbnail(
             &method,
         )
         .await?;
-    Ok(fed_media::get_content_thumbnail::v1::Response::new(
-        fed_media::ContentMetadata::new(),
-        fed_content(file),
-    ))
+    Ok(multipart_media_response(file))
 }
 
 fn fed_err(e: tessera_federation::Error) -> Error {
@@ -424,14 +479,11 @@ pub async fn backfill(
         .store
         .backfill_from(&req.body.room_id, &req.body.v, limit)
         .await?;
-    let events = filter_visible_to_server(&app, &origin, events).await?;
+    let events = filter_visible_to_server(&app, &origin, events, &rules).await?;
     Ok(get_backfill::v1::Response::new(
         app.config.server_name.clone(),
         ruma::MilliSecondsSinceUnixEpoch::now(),
-        events
-            .iter()
-            .filter_map(|e| raw_pdu(&e.pdu, &rules))
-            .collect(),
+        events.iter().filter_map(|e| raw_pdu(e, &rules)).collect(),
     ))
 }
 
@@ -456,19 +508,16 @@ pub async fn missing_events(
             min_depth,
         )
         .await?;
-    // Newest first, as the reference implementation returns them.
+    // Oldest first, so the receiver can process each event after its prev events.
     events.sort_by(|a, b| {
-        b.pdu
+        a.pdu
             .depth()
-            .cmp(&a.pdu.depth())
-            .then(b.stream_ordering.cmp(&a.stream_ordering))
+            .cmp(&b.pdu.depth())
+            .then(a.stream_ordering.cmp(&b.stream_ordering))
     });
-    let events = filter_visible_to_server(&app, &origin, events).await?;
+    let events = filter_visible_to_server(&app, &origin, events, &rules).await?;
     Ok(get_missing_events::v1::Response::new(
-        events
-            .iter()
-            .filter_map(|e| raw_pdu(&e.pdu, &rules))
-            .collect(),
+        events.iter().filter_map(|e| raw_pdu(e, &rules)).collect(),
     ))
 }
 
@@ -693,13 +742,15 @@ pub async fn public_rooms(
 #[allow(dead_code)]
 fn _versions(_: RoomVersionId) {}
 
-/// History-visibility filtering for events served to another server: an event is visible if
-/// the room's visibility at that point allows it for the origin's members at that point.
+/// History-visibility filtering for events served to another server: an event the origin's
+/// members could not see at that point is served in redacted form (as Synapse does), so the
+/// receiver still gets a complete DAG.
 async fn filter_visible_to_server(
     app: &AppState,
     origin: &ruma::ServerName,
     events: Vec<tessera_store::StoredEvent>,
-) -> Result<Vec<tessera_store::StoredEvent>> {
+    rules: &RoomVersionRules,
+) -> Result<Vec<tessera_core::Pdu>> {
     use ruma::events::StateEventType;
     let suffix = format!(":{origin}");
     let mut out = Vec::with_capacity(events.len());
@@ -710,7 +761,7 @@ async fn filter_visible_to_server(
             ev.state_group
         };
         let Some(group) = group else {
-            out.push(ev);
+            out.push(ev.pdu);
             continue;
         };
         let state = app.store.state_at_group(group).await?;
@@ -765,7 +816,9 @@ async fn filter_visible_to_server(
             _ => best == "join",
         };
         if visible {
-            out.push(ev);
+            out.push(ev.pdu);
+        } else if let Ok(redacted) = tessera_core::redaction::redact_pdu(&ev.pdu, rules, None) {
+            out.push(redacted);
         }
     }
     Ok(out)

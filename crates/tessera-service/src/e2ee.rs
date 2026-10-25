@@ -478,16 +478,20 @@ impl Services {
             return Ok(());
         }
         let stream_id = self.store.max_device_list_stream_id().await?;
-        for (device_id, keys) in self.store.all_device_keys(user).await? {
+        let keys: std::collections::HashMap<_, _> = self
+            .store
+            .all_device_keys(user)
+            .await?
+            .into_iter()
+            .collect();
+        for device in self.store.list_devices(user).await? {
             let mut content = json!({
-                "user_id": user, "device_id": device_id, "stream_id": stream_id, "prev_id": [], "keys": keys,
+                "user_id": user, "device_id": device.device_id, "stream_id": stream_id, "prev_id": [],
             });
-            if let Some(n) = self
-                .store
-                .get_device(user, &device_id)
-                .await?
-                .and_then(|d| d.display_name)
-            {
+            if let Some(k) = keys.get(&device.device_id) {
+                content["keys"] = k.clone();
+            }
+            if let Some(n) = device.display_name {
                 content["device_display_name"] = json!(n);
             }
             self.send_edu_to(

@@ -185,7 +185,10 @@ impl Federation {
 
         let _guard = services.lock_room(room_id).await;
         self.persist_joined_room(room_id, &version, &rules, auth_chain, state_events, join)
-            .await
+            .await?;
+        let servers = services.remote_servers_in_room(room_id).await?;
+        let _ = services.send_device_lists_to(user_id, servers).await;
+        Ok(())
     }
 
     /// Store the auth chain and state from a join (or an invite's resolved state), compute the

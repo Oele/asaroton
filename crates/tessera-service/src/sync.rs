@@ -421,7 +421,7 @@ impl Services {
             // Members of newly joined rooms need their device lists fetched.
             for room in &newly_joined {
                 for m in self.store.members(room, Some("join")).await? {
-                    if m.user_id != *user && !changed.contains(&m.user_id) {
+                    if !changed.contains(&m.user_id) {
                         changed.push(m.user_id);
                     }
                 }

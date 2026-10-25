@@ -260,6 +260,8 @@ impl Federation {
         let mut rejected_reason: Option<String> = None;
         if let Err(e) = auth::check_state_independent(&pdu, rules, fetch) {
             rejected_reason = Some(e.to_string());
+        } else if self.auth_events_rejected(&pdu) {
+            rejected_reason = Some("event references a rejected auth event".into());
         } else if let Err(e) =
             auth::check_against_auth_events(&pdu, rules, |id| self.cached_event(id))
         {
@@ -270,17 +272,31 @@ impl Federation {
 
         if let Some(reason) = rejected_reason {
             tracing::info!(event_id = %pdu.event_id(), %reason, "rejecting event");
+            // A rejected event leaves the state as it was; keeping that state group lets later
+            // events that build on it be processed without fetching state remotely.
+            let state = match before_group {
+                Some(g) => EventState::Existing(g),
+                None if state_before.is_empty() => EventState::Outlier,
+                None => EventState::New {
+                    prev: None,
+                    delta: state::state_map_from_pdus(state_before.values())
+                        .into_iter()
+                        .collect(),
+                },
+            };
+            let stored = pdu.with_rejected(true);
             services
                 .store
                 .persist_event(PersistEvent {
-                    pdu: pdu.with_rejected(true),
-                    state: EventState::Outlier,
+                    pdu: stored.clone(),
+                    state,
                     soft_failed: false,
                     backfilled,
                     current_state_delta: None,
                     forward_extremities: None,
                 })
                 .await?;
+            self.event_cache.insert(pdu.event_id().to_owned(), stored);
             return Ok(Outcome::Rejected(reason));
         }
 
@@ -419,13 +435,25 @@ impl Federation {
             needed.push(create_id);
         }
         self.warm_cache(&needed).await?;
-        let have: HashSet<OwnedEventId> = self
+        let mut have: HashSet<OwnedEventId> = self
             .services
             .store
             .have_events(&needed)
             .await?
             .into_iter()
             .collect();
+        if depth == 0 && needed.iter().any(|id| !have.contains(id)) {
+            // Ask for the whole auth chain in one go; servers that cannot serve arbitrary
+            // events over /event usually can serve /event_auth.
+            self.fetch_auth_chain(origin, room_id, pdu, rules).await;
+            have = self
+                .services
+                .store
+                .have_events(&needed)
+                .await?
+                .into_iter()
+                .collect();
+        }
         for id in needed {
             if have.contains(&id) {
                 continue;
@@ -433,8 +461,9 @@ impl Federation {
             let fetched = self.fetch_event(origin, &id, rules).await?;
             // Recurse first so its own auth events exist, then persist as an outlier.
             Box::pin(self.ensure_auth_events(origin, room_id, &fetched, rules, depth + 1)).await?;
-            let rejected =
-                auth::check_against_auth_events(&fetched, rules, |i| self.cached_event(i)).is_err();
+            let rejected = self.auth_events_rejected(&fetched)
+                || auth::check_against_auth_events(&fetched, rules, |i| self.cached_event(i))
+                    .is_err();
             self.services
                 .store
                 .persist_event(PersistEvent {
@@ -452,6 +481,82 @@ impl Federation {
             );
         }
         Ok(())
+    }
+
+    /// `GET /event_auth/{room}/{event}`: store every event of the auth chain we lack, each
+    /// checked against its own auth events (oldest first). Failures are logged, not fatal.
+    async fn fetch_auth_chain(
+        &self,
+        origin: &ServerName,
+        room_id: &RoomId,
+        pdu: &Pdu,
+        rules: &RoomVersionRules,
+    ) {
+        let req = ruma::api::federation::authorization::get_event_authorization::v1::Request::new(
+            room_id.to_owned(),
+            pdu.event_id().to_owned(),
+        );
+        let resp = match self.client.send(origin, req).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::debug!(%origin, error = %e, "event_auth failed");
+                return;
+            }
+        };
+        let mut chain: Vec<Pdu> = Vec::new();
+        for raw in resp.auth_chain {
+            if let Ok(obj) = tessera_core::canonical::from_str(raw.get())
+                && let Ok(p) = self.parse_and_verify(origin, obj, rules).await
+                && p.room_id() == room_id
+            {
+                chain.push(p);
+            }
+        }
+        chain.sort_by_key(|p| u64::from(p.depth()));
+        let ids: Vec<OwnedEventId> = chain.iter().map(|p| p.event_id().to_owned()).collect();
+        if self.warm_cache(&ids).await.is_err() {
+            return;
+        }
+        let have: HashSet<OwnedEventId> = self
+            .services
+            .store
+            .have_events(&ids)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        for p in chain {
+            if have.contains(p.event_id()) {
+                continue;
+            }
+            let rejected = self.auth_events_rejected(&p)
+                || auth::check_against_auth_events(&p, rules, |i| self.cached_event(i)).is_err();
+            let stored = p.with_rejected(rejected);
+            if let Err(e) = self
+                .services
+                .store
+                .persist_event(PersistEvent {
+                    pdu: stored.clone(),
+                    state: EventState::Outlier,
+                    soft_failed: false,
+                    backfilled: false,
+                    current_state_delta: None,
+                    forward_extremities: None,
+                })
+                .await
+            {
+                tracing::warn!(event_id = %p.event_id(), error = %e, "storing auth chain event failed");
+                continue;
+            }
+            self.event_cache.insert(p.event_id().to_owned(), stored);
+        }
+    }
+
+    /// Whether any of an event's auth events is itself rejected (which rejects the event).
+    fn auth_events_rejected(&self, pdu: &Pdu) -> bool {
+        pdu.auth_events()
+            .iter()
+            .any(|id| self.cached_event(id).is_some_and(|e| e.rejected()))
     }
 
     /// `GET /event/{id}` from a server, verified.

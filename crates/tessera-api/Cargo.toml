@@ -12,6 +12,7 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
+rand.workspace = true
 tessera-core.workspace = true
 tessera-store.workspace = true
 tessera-auth.workspace = true
