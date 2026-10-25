@@ -139,14 +139,36 @@ async fn join_room(
             .await?
             .iter()
             .any(|m| services.is_local(&m.user_id));
+    let mut via: Vec<ruma::OwnedServerName> = via.to_vec();
     if local {
-        services
+        match services
             .join_local_room_with(room_id, &sender.user_id, reason, extra.as_ref())
-            .await?;
-        return Ok(());
+            .await
+        {
+            Ok(_) => return Ok(()),
+            // A restricted room no local member can vouch for: another server in the room
+            // may be able to.
+            Err(tessera_service::Error::Matrix {
+                kind: ruma::api::error::ErrorKind::UnableToGrantJoin,
+                ..
+            }) => {
+                for s in services.remote_servers_in_room(room_id).await? {
+                    if !via.contains(&s) {
+                        via.push(s);
+                    }
+                }
+                if via.is_empty() {
+                    return Err(Error::Service(tessera_service::Error::matrix(
+                        ruma::api::error::ErrorKind::UnableToGrantJoin,
+                        http::StatusCode::FORBIDDEN,
+                        "No server can authorise this join.",
+                    )));
+                }
+            }
+            Err(e) => return Err(e.into()),
+        }
     }
     // An invited user can join through the inviter's server even without `via`.
-    let mut via: Vec<ruma::OwnedServerName> = via.to_vec();
     if let Some(m) = services
         .store
         .get_membership(room_id, &sender.user_id)

@@ -573,6 +573,19 @@ impl Services {
                 }
             }
         }
+        // Our own leave (or a kick/rejection) of a room we never had state for is an outlier,
+        // which the timeline query skips; the client still needs to see it.
+        if leave_at.is_some()
+            && !events.iter().any(|e| {
+                e.pdu.event_type() == &ruma::events::TimelineEventType::RoomMember
+                    && e.pdu.state_key() == Some(user.as_str())
+            })
+            && let Some(m) = self.store.get_membership(room_id, user).await?
+            && let Some(ev) = self.store.get_event(&m.event_id).await?
+            && ev.outlier
+        {
+            events.push(ev);
+        }
         room.timeline = events;
 
         // State.

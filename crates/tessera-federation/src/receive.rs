@@ -1002,14 +1002,17 @@ impl Federation {
                 Err(e) => tracing::warn!(%id, error = %e, "could not fetch state event"),
             }
         }
-        // Persist in dependency order (auth events first) as outliers.
+        // Persist in dependency order (auth events first) as outliers. An event whose auth
+        // events are missing or themselves rejected is rejected too.
         fetched.sort_by_key(|p| u64::from(p.depth()));
-        for p in &fetched {
-            self.event_cache.insert(p.event_id().to_owned(), p.clone());
-        }
         for p in fetched {
-            let rejected =
-                auth::check_against_auth_events(&p, rules, |i| self.cached_event(i)).is_err();
+            let rejected = self.auth_events_rejected(&p)
+                || p.auth_events()
+                    .iter()
+                    .any(|id| self.cached_event(id).is_none())
+                || auth::check_against_auth_events(&p, rules, |i| self.cached_event(i)).is_err();
+            self.event_cache
+                .insert(p.event_id().to_owned(), p.with_rejected(rejected));
             self.services
                 .store
                 .persist_event(PersistEvent {
@@ -1027,6 +1030,7 @@ impl Federation {
         let mut map = StateMap::new();
         for id in &resp.pdu_ids {
             if let Some(p) = self.cached_event(id)
+                && !p.rejected()
                 && let Some((ty, key)) = p.state_tuple()
             {
                 map.insert((ty, key.to_owned()), id.clone());

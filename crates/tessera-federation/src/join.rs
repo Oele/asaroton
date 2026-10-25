@@ -60,8 +60,8 @@ impl Federation {
             .filter(|s| **s != services.config.server_name)
             .cloned()
             .collect();
-        if let Some(server) = room_id.server_name()
-            && !candidates.iter().any(|c| c == server)
+        if candidates.is_empty()
+            && let Some(server) = room_id.server_name()
             && server != services.config.server_name
         {
             candidates.push(server.to_owned());
@@ -624,6 +624,10 @@ impl Federation {
         {
             return Err(Error::Rejected(reason));
         }
+        // Like the reference implementation, the resident server sends the accepted event to
+        // the other servers on the origin's behalf (the origin itself already has it).
+        self.fan_out_own_event(room_id, pdu.event_id(), origin)
+            .await;
         services
             .stripped_state_full(room_id)
             .await
@@ -801,6 +805,8 @@ impl Federation {
         {
             return Err(Error::Rejected(reason));
         }
+        self.fan_out_own_event(room_id, pdu.event_id(), origin)
+            .await;
 
         // Respond with the state and auth chain *before* the join (its state group's parent).
         let state_before = match services.store.state_group_before(pdu.event_id()).await? {
@@ -905,6 +911,10 @@ impl Federation {
         {
             return Err(Error::Rejected(reason));
         }
+        // Like the reference implementation, the resident server sends the accepted event to
+        // the other servers on the origin's behalf (the origin itself already has it).
+        self.fan_out_own_event(room_id, pdu.event_id(), origin)
+            .await;
         Ok(())
     }
 

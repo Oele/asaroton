@@ -35,7 +35,12 @@ async fn persist_one(conn: &mut PgConnection, ev: PersistEvent) -> Result<Persis
                     .fetch_one(&mut *conn)
                     .await?
                     .get(0),
-                None => existing.stream_ordering,
+                // A fresh position: sync tokens handed out meanwhile are already past the
+                // one the outlier was given, so keeping it would hide the event from them.
+                None => sqlx::query("SELECT nextval('events_stream_seq')")
+                    .fetch_one(&mut *conn)
+                    .await?
+                    .get(0),
             };
             sqlx::query(
                 "UPDATE events SET outlier = FALSE, state_group = $2, soft_failed = $3, stream_ordering = $4

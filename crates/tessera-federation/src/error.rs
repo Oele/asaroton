@@ -68,6 +68,11 @@ impl From<Error> for tessera_service::Error {
                                 "M_UNSUPPORTED_ROOM_VERSION" | "M_INCOMPATIBLE_ROOM_VERSION" => {
                                     ErrorKind::UnsupportedRoomVersion
                                 }
+                                "M_MISSING_PARAM" => ErrorKind::MissingParam,
+                                "M_INVALID_PARAM" => ErrorKind::InvalidParam,
+                                "M_BAD_JSON" => ErrorKind::BadJson,
+                                "M_UNABLE_TO_GRANT_JOIN" => ErrorKind::UnableToGrantJoin,
+                                "M_UNABLE_TO_AUTHORISE_JOIN" => ErrorKind::UnableToAuthorizeJoin,
                                 _ => ErrorKind::Unknown,
                             };
                             (kind, format!("{server}: {msg}"))
