@@ -188,12 +188,24 @@ where
         };
 
         let http_req = http::Request::from_parts(parts, bytes.as_ref());
+        let origin = if auth == Auth::Server {
+            let fed = services.fed()?;
+            Some(fed.authenticate_request(&http_req).await.map_err(|e| {
+                Error::matrix(
+                    ErrorKind::Unauthorized,
+                    StatusCode::UNAUTHORIZED,
+                    e.to_string(),
+                )
+            })?)
+        } else {
+            None
+        };
         let body = T::try_from_http_request(http_req, &path_args).map_err(map_request_error)?;
 
         Ok(Self {
             body,
             sender,
-            origin: None,
+            origin,
             json,
         })
     }

@@ -548,11 +548,23 @@ impl Federation {
             return Err(Error::Rejected(reason));
         }
 
-        // Respond with the state and auth chain before the join.
-        let state_before = {
-            let mut s = services.store.current_state_pdus(room_id).await?;
-            s.retain(|e| e.pdu.event_id() != pdu.event_id());
-            s
+        // Respond with the state and auth chain *before* the join (its state group's parent).
+        let state_before = match services.store.state_group_before(pdu.event_id()).await? {
+            Some(group) => {
+                let ids: Vec<OwnedEventId> = services
+                    .store
+                    .state_at_group(group)
+                    .await?
+                    .into_iter()
+                    .map(|e| e.event_id)
+                    .collect();
+                services.store.get_events(&ids).await?
+            }
+            None => {
+                let mut s = services.store.current_state_pdus(room_id).await?;
+                s.retain(|e| e.pdu.event_id() != pdu.event_id());
+                s
+            }
         };
         let state_ids: Vec<OwnedEventId> = state_before
             .iter()

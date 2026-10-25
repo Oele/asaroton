@@ -323,6 +323,34 @@ pub struct DiscoveryEntry {
     pub expires_ts: Ts,
 }
 
+// ------------------------------------------------------------------ media
+
+/// Stored media metadata.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MediaInfo {
+    pub server_name: OwnedServerName,
+    pub media_id: String,
+    pub user_id: Option<OwnedUserId>,
+    pub content_type: Option<String>,
+    pub size: Option<i64>,
+    pub upload_name: Option<String>,
+    pub sha256: Option<String>,
+    pub created_ts: Ts,
+    /// `None` while an async upload is still pending.
+    pub uploaded_ts: Option<Ts>,
+    pub quarantined: bool,
+}
+
+/// A generated thumbnail.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ThumbnailInfo {
+    pub width: u32,
+    pub height: u32,
+    pub method: String,
+    pub content_type: String,
+    pub size: i64,
+}
+
 /// Convert a `UInt` depth/timestamp into the `i64` the database wants.
 pub fn uint_to_i64(v: UInt) -> i64 {
     i64::try_from(u64::from(v)).unwrap_or(i64::MAX)

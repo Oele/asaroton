@@ -176,4 +176,50 @@ impl FederationHooks for Hooks {
         }
         Ok(serde_json::json!({ "one_time_keys": one_time_keys, "failures": failures }))
     }
+
+    async fn remote_media(
+        &self,
+        server_name: &ruma::ServerName,
+        media_id: &str,
+    ) -> tessera_service::Result<(Vec<u8>, String, Option<String>)> {
+        use ruma::api::federation::authenticated_media::{FileOrLocation, get_content};
+        let req = get_content::v1::Request::new(media_id.to_owned());
+        let resp = self
+            .0
+            .client
+            .send_long(server_name, req)
+            .await
+            .map_err(tessera_service::Error::from)?;
+        match resp.content {
+            FileOrLocation::File(c) => {
+                let filename = c
+                    .content_disposition
+                    .as_ref()
+                    .and_then(|d| d.filename.clone());
+                Ok((
+                    c.file,
+                    c.content_type
+                        .unwrap_or_else(|| "application/octet-stream".into()),
+                    filename,
+                ))
+            }
+            FileOrLocation::Location(url) => {
+                let r = reqwest::get(&url)
+                    .await
+                    .map_err(|e| tessera_service::Error::internal(e.to_string()))?;
+                let ct = r
+                    .headers()
+                    .get(http::header::CONTENT_TYPE)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("application/octet-stream")
+                    .to_owned();
+                let bytes = r
+                    .bytes()
+                    .await
+                    .map_err(|e| tessera_service::Error::internal(e.to_string()))?;
+                Ok((bytes.to_vec(), ct, None))
+            }
+            _ => Err(tessera_service::Error::internal("unknown media response")),
+        }
+    }
 }

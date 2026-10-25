@@ -163,10 +163,14 @@ pub async fn typing(
         .await?;
     match &req.body.state {
         create_typing_event::v3::Typing::Yes(info) => {
-            services.set_typing(&req.body.room_id, &sender.user_id, true, info.timeout);
+            services
+                .set_typing(&req.body.room_id, &sender.user_id, true, info.timeout)
+                .await;
         }
         create_typing_event::v3::Typing::No => {
-            services.set_typing(&req.body.room_id, &sender.user_id, false, Duration::ZERO);
+            services
+                .set_typing(&req.body.room_id, &sender.user_id, false, Duration::ZERO)
+                .await;
         }
     }
     Ok(create_typing_event::v3::Response::new())
@@ -295,11 +299,13 @@ pub async fn set_presence(
     if sender.user_id != req.body.user_id {
         return Err(Error::forbidden("Cannot set presence for another user."));
     }
-    services.set_presence(
-        &sender.user_id,
-        req.body.presence.clone(),
-        Some(req.body.status_msg.clone()),
-    );
+    services
+        .set_presence(
+            &sender.user_id,
+            req.body.presence.clone(),
+            Some(req.body.status_msg.clone()),
+        )
+        .await;
     Ok(set_presence::v3::Response::new())
 }
 

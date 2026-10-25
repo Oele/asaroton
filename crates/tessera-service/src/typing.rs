@@ -75,7 +75,13 @@ impl TypingState {
 
 impl Services {
     /// Client request to start/stop typing.
-    pub fn set_typing(&self, room_id: &RoomId, user_id: &UserId, typing: bool, timeout: Duration) {
+    pub async fn set_typing(
+        &self,
+        room_id: &RoomId,
+        user_id: &UserId,
+        typing: bool,
+        timeout: Duration,
+    ) {
         if self.typing.set(
             room_id,
             user_id,
@@ -85,6 +91,17 @@ impl Services {
             self.notifier.notify(Notification::RoomEphemeral {
                 room_id: room_id.to_owned(),
             });
+            if self.is_local(user_id)
+                && let Ok(servers) = self.remote_servers_in_room(room_id).await
+            {
+                self.send_edu_to(
+                    servers,
+                    serde_json::json!({
+                        "edu_type": "m.typing",
+                        "content": { "room_id": room_id, "user_id": user_id, "typing": typing },
+                    }),
+                );
+            }
         }
     }
 }

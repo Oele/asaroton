@@ -551,8 +551,33 @@ impl Federation {
                     );
                     groups.push(g);
                 }
-                _ => {
-                    // Unknown prev or outlier: ask the origin for the state at that point.
+                Some(prev) => {
+                    // Known but without state (rejected or outlier): use the state after its own
+                    // prev events instead, which is what the event would have seen.
+                    let mut found = false;
+                    for pp in prev.pdu.prev_events() {
+                        if let Some(ppe) = self.services.store.get_event(pp).await?
+                            && let Some(g) = ppe.state_group
+                        {
+                            let entries = self.services.store.state_at_group(g).await?;
+                            state_maps.push(
+                                entries
+                                    .into_iter()
+                                    .map(|e| ((e.event_type, e.state_key), e.event_id))
+                                    .collect(),
+                            );
+                            groups.push(None);
+                            found = true;
+                        }
+                    }
+                    if !found {
+                        let (map, _) = self.fetch_state_at(origin, room_id, prev_id, rules).await?;
+                        state_maps.push(map);
+                        groups.push(None);
+                    }
+                }
+                None => {
+                    // Unknown prev: ask the origin for the state at that point.
                     let (map, _) = self.fetch_state_at(origin, room_id, prev_id, rules).await?;
                     state_maps.push(map);
                     groups.push(None);
@@ -826,12 +851,14 @@ impl Federation {
                     return Ok(());
                 }
                 if services.is_joined(&t.room_id, &t.user_id).await? {
-                    services.set_typing(
-                        &t.room_id,
-                        &t.user_id,
-                        t.typing,
-                        std::time::Duration::from_secs(30),
-                    );
+                    services
+                        .set_typing(
+                            &t.room_id,
+                            &t.user_id,
+                            t.typing,
+                            std::time::Duration::from_secs(30),
+                        )
+                        .await;
                 }
             }
             Edu::Receipt(r) => {
@@ -875,11 +902,9 @@ impl Federation {
                     if update.user_id.server_name() != origin {
                         continue;
                     }
-                    services.set_presence(
-                        &update.user_id,
-                        update.presence,
-                        Some(update.status_msg),
-                    );
+                    services
+                        .set_presence(&update.user_id, update.presence, Some(update.status_msg))
+                        .await;
                 }
             }
             Edu::DeviceListUpdate(d) => {

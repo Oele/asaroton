@@ -3,6 +3,7 @@
 pub mod account;
 pub mod discovery;
 pub mod keys;
+pub mod media;
 pub mod misc;
 pub mod push;
 pub mod rooms;
@@ -148,6 +149,35 @@ pub fn routes(router: Router<AppState>) -> Router<AppState> {
     let r = route::<c::user_directory::search_users::v3::Request, _, _>(r, misc::search_users);
     let r = route::<c::thirdparty::get_protocols::v3::Request, _, _>(r, misc::thirdparty_protocols);
     let r = route::<c::voip::get_turn_server_info::v3::Request, _, _>(r, misc::turn_server);
+    // media
+    #[allow(deprecated)]
+    let r = route::<c::media::get_media_config::v3::Request, _, _>(r, media::config);
+    let r =
+        route::<c::authenticated_media::get_media_config::v1::Request, _, _>(r, media::config_v1);
+    let r = route::<c::media::create_content::v3::Request, _, _>(r, media::upload);
+    let r = route::<c::media::create_mxc_uri::v1::Request, _, _>(r, media::create);
+    let r = r.route(
+        "/_matrix/media/v3/upload/{server_name}/{media_id}",
+        axum::routing::put(upload_async_handler),
+    );
+    let r = route::<c::authenticated_media::get_content::v1::Request, _, _>(r, media::download_v1);
+    let r = route::<c::authenticated_media::get_content_as_filename::v1::Request, _, _>(
+        r,
+        media::download_v1_named,
+    );
+    let r = route::<c::authenticated_media::get_content_thumbnail::v1::Request, _, _>(
+        r,
+        media::thumbnail_v1,
+    );
+    #[allow(deprecated)]
+    let r = route::<c::media::get_content::v3::Request, _, _>(r, media::download_legacy);
+    #[allow(deprecated)]
+    let r = route::<c::media::get_content_as_filename::v3::Request, _, _>(
+        r,
+        media::download_legacy_named,
+    );
+    #[allow(deprecated)]
+    let r = route::<c::media::get_content_thumbnail::v3::Request, _, _>(r, media::thumbnail_legacy);
     // e2ee keys & to-device
     let r = route::<c::keys::upload_keys::v3::Request, _, _>(r, keys::upload);
     let r = route::<c::keys::get_keys::v3::Request, _, _>(r, keys::query);
@@ -188,6 +218,17 @@ async fn joined_members_handler(
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
     match rooms::joined_members(state, req).await {
+        Ok(resp) => resp,
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn upload_async_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    req: crate::Ruma<ruma::api::client::media::create_content_async::v3::Request>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    match media::upload_async(state, req).await {
         Ok(resp) => resp,
         Err(e) => e.into_response(),
     }

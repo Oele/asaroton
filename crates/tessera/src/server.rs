@@ -57,6 +57,7 @@ fn service_config(config: &Config) -> tessera_service::Config {
         rate_limiting: config.rate_limiting.enabled,
         public_base_url,
         software_version: env!("CARGO_PKG_VERSION").to_owned(),
+        media_dir: config.data_dir.join("media"),
     }
 }
 

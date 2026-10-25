@@ -90,16 +90,35 @@ pub fn presence_event(user: &UserId, e: &PresenceEntry) -> Value {
 
 impl Services {
     /// Client-initiated presence change.
-    pub fn set_presence(
+    pub async fn set_presence(
         &self,
         user: &UserId,
         state: PresenceState,
         status_msg: Option<Option<String>>,
     ) {
-        if self.presence.set(user, state, status_msg) {
+        if self.presence.set(user, state.clone(), status_msg) {
             self.notifier.notify(Notification::Presence {
                 user_id: user.to_owned(),
             });
+            if self.is_local(user)
+                && let Some(entry) = self.presence.get(user)
+                && let Ok(servers) = self.remote_servers_sharing_rooms_with(user).await
+            {
+                let now = now_ts();
+                let mut update = json!({
+                    "user_id": user,
+                    "presence": entry.state,
+                    "last_active_ago": (now - entry.last_active_ts).max(0),
+                    "currently_active": entry.state == PresenceState::Online,
+                });
+                if let Some(m) = &entry.status_msg {
+                    update["status_msg"] = json!(m);
+                }
+                self.send_edu_to(
+                    servers,
+                    json!({ "edu_type": "m.presence", "content": { "push": [update] } }),
+                );
+            }
         }
     }
 }

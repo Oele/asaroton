@@ -56,6 +56,12 @@ pub trait FederationHooks: Send + Sync {
     ) -> Result<Value>;
     /// Claim remote one-time keys.
     async fn remote_claim_keys(&self, by_server: Vec<(OwnedServerName, Value)>) -> Result<Value>;
+    /// Download remote media: `(bytes, content_type, filename)`.
+    async fn remote_media(
+        &self,
+        server_name: &ruma::ServerName,
+        media_id: &str,
+    ) -> Result<(Vec<u8>, String, Option<String>)>;
 }
 
 /// Used when federation is disabled: every remote operation fails cleanly.
@@ -104,6 +110,13 @@ impl FederationHooks for NoFederation {
     async fn remote_claim_keys(&self, _: Vec<(OwnedServerName, Value)>) -> Result<Value> {
         Ok(Value::Object(serde_json::Map::new()))
     }
+    async fn remote_media(
+        &self,
+        _: &ruma::ServerName,
+        _: &str,
+    ) -> Result<(Vec<u8>, String, Option<String>)> {
+        Err(disabled())
+    }
 }
 
 /// Holder for the installed hooks.
@@ -129,5 +142,43 @@ impl Services {
             .get()
             .cloned()
             .unwrap_or_else(|| Arc::new(NoFederation))
+    }
+}
+
+impl Services {
+    /// Remote servers with a joined member in the room.
+    pub async fn remote_servers_in_room(&self, room_id: &RoomId) -> Result<Vec<OwnedServerName>> {
+        Ok(self
+            .store
+            .servers_in_room(room_id)
+            .await?
+            .into_iter()
+            .filter(|s| *s != self.config.server_name)
+            .collect())
+    }
+
+    /// Remote servers that share at least one room with the user.
+    pub async fn remote_servers_sharing_rooms_with(
+        &self,
+        user_id: &UserId,
+    ) -> Result<Vec<OwnedServerName>> {
+        let mut out: Vec<OwnedServerName> = Vec::new();
+        for room in self.store.rooms_for_user(user_id, "join").await? {
+            for s in self.remote_servers_in_room(&room).await? {
+                if !out.contains(&s) {
+                    out.push(s);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Queue an EDU to the given servers (no-op when there are none).
+    pub fn send_edu_to(&self, destinations: Vec<OwnedServerName>, edu: Value) {
+        if destinations.is_empty() {
+            return;
+        }
+        let hooks = self.federation();
+        tokio::spawn(async move { hooks.send_edu(destinations, edu).await });
     }
 }

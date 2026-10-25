@@ -221,7 +221,8 @@ impl Services {
     pub async fn sync(&self, req: SyncRequest) -> Result<SyncResult> {
         // Syncing marks the user active with the requested presence.
         if req.set_presence != PresenceState::Offline || self.presence.get(&req.user_id).is_some() {
-            self.set_presence(&req.user_id, req.set_presence.clone(), None);
+            self.set_presence(&req.user_id, req.set_presence.clone(), None)
+                .await;
         }
         self.presence.touch(&req.user_id);
 

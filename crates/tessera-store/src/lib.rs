@@ -482,6 +482,29 @@ pub trait FederationStore: Send + Sync {
     async fn delete_invite_state(&self, room_id: &RoomId, user_id: &UserId) -> Result<()>;
 }
 
+/// Media metadata.
+#[async_trait]
+pub trait MediaStore: Send + Sync {
+    async fn create_media(&self, info: &MediaInfo) -> Result<()>;
+    async fn update_media(&self, info: &MediaInfo) -> Result<()>;
+    async fn get_media(
+        &self,
+        server_name: &ServerName,
+        media_id: &str,
+    ) -> Result<Option<MediaInfo>>;
+    async fn add_thumbnail(
+        &self,
+        server_name: &ServerName,
+        media_id: &str,
+        thumb: &ThumbnailInfo,
+    ) -> Result<()>;
+    async fn thumbnails(
+        &self,
+        server_name: &ServerName,
+        media_id: &str,
+    ) -> Result<Vec<ThumbnailInfo>>;
+}
+
 /// The full store.
 pub trait Store:
     UserStore
@@ -492,6 +515,7 @@ pub trait Store:
     + KeyStore
     + E2eeStore
     + FederationStore
+    + MediaStore
 {
     /// Run pending migrations.
     fn migrate(&self) -> futures::future::BoxFuture<'_, Result<()>>;

@@ -5,6 +5,7 @@ mod e2ee;
 mod events;
 mod federation;
 mod keys;
+mod media;
 mod rooms;
 mod state;
 mod users;

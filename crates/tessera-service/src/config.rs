@@ -18,4 +18,6 @@ pub struct Config {
     pub public_base_url: String,
     /// Software version string reported in `/versions`.
     pub software_version: String,
+    /// Directory for media files.
+    pub media_dir: std::path::PathBuf,
 }

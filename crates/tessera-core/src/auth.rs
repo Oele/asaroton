@@ -25,7 +25,25 @@ use crate::{Error, Pdu, Result, state::StateMap};
 
 /// Check the PDU's shape and size limits for its room version.
 pub fn check_format(pdu: &Pdu, rules: &RoomVersionRules) -> Result<()> {
-    check_pdu_format(pdu.raw(), &rules.event_format).map_err(Error::InvalidPdu)
+    check_pdu_format(pdu.raw(), &rules.event_format).map_err(Error::InvalidPdu)?;
+    // Size limits the spec puts on individual fields (bytes).
+    let too_long = |what: &str, len: usize, max: usize| -> Result<()> {
+        if len > max {
+            Err(Error::InvalidPdu(format!(
+                "`{what}` is too long ({len} > {max} bytes)"
+            )))
+        } else {
+            Ok(())
+        }
+    };
+    too_long("sender", pdu.sender().as_str().len(), 255)?;
+    too_long("room_id", pdu.room_id().as_str().len(), 255)?;
+    too_long("event_id", pdu.event_id().as_str().len(), 255)?;
+    too_long("type", pdu.event_type().to_string().len(), 255)?;
+    if let Some(key) = pdu.state_key() {
+        too_long("state_key", key.len(), 255)?;
+    }
+    Ok(())
 }
 
 /// The `(type, state_key)` pairs that must make up the event's `auth_events`.

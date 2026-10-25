@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use ruma::{DeviceId, OwnedDeviceId, OwnedUserId, UserId};
+use ruma::{DeviceId, OwnedDeviceId, OwnedServerName, OwnedUserId, UserId};
 use serde_json::{Value, json};
 use tessera_store::OneTimeKeyRow;
 
@@ -319,12 +319,54 @@ impl Services {
         user_id: &UserId,
         device_id: Option<&DeviceId>,
     ) -> Result<()> {
-        self.store
+        let stream_id = self
+            .store
             .add_device_list_change(user_id, device_id)
             .await?;
         self.notifier.notify(Notification::DeviceLists {
             user_id: user_id.to_owned(),
         });
+        if self.is_local(user_id) {
+            let servers = self.remote_servers_sharing_rooms_with(user_id).await?;
+            match device_id {
+                Some(device_id) => {
+                    let keys = self.store.get_device_keys(user_id, device_id).await?;
+                    let device = self.store.get_device(user_id, device_id).await?;
+                    let deleted = keys.is_none() && device.is_none();
+                    let mut content = json!({
+                        "user_id": user_id, "device_id": device_id, "stream_id": stream_id, "prev_id": [],
+                        "deleted": deleted,
+                    });
+                    if let Some(n) = device.and_then(|d| d.display_name) {
+                        content["device_display_name"] = json!(n);
+                    }
+                    if let Some(k) = keys {
+                        content["keys"] = k;
+                    }
+                    self.send_edu_to(
+                        servers,
+                        json!({ "edu_type": "m.device_list_update", "content": content }),
+                    );
+                }
+                None => {
+                    let mut content = json!({ "user_id": user_id });
+                    if let Some(k) = self.store.get_cross_signing_key(user_id, "master").await? {
+                        content["master_key"] = k;
+                    }
+                    if let Some(k) = self
+                        .store
+                        .get_cross_signing_key(user_id, "self_signing")
+                        .await?
+                    {
+                        content["self_signing_key"] = k;
+                    }
+                    self.send_edu_to(
+                        servers,
+                        json!({ "edu_type": "m.signing_key_update", "content": content }),
+                    );
+                }
+            }
+        }
         Ok(())
     }
 
@@ -362,9 +404,17 @@ impl Services {
         event_type: &str,
         messages: &BTreeMap<OwnedUserId, BTreeMap<String, Value>>,
     ) -> Result<()> {
+        // Remote recipients get one m.direct_to_device EDU per server.
+        let mut by_server: BTreeMap<OwnedServerName, serde_json::Map<String, Value>> =
+            BTreeMap::new();
         for (user, per_device) in messages {
             if !self.is_local(user) {
-                // Remote recipients: federation EDU, later phase.
+                let entry = by_server.entry(user.server_name().to_owned()).or_default();
+                let devices: serde_json::Map<String, Value> = per_device
+                    .iter()
+                    .map(|(d, c)| (d.clone(), c.clone()))
+                    .collect();
+                entry.insert(user.to_string(), Value::Object(devices));
                 continue;
             }
             for (device, content) in per_device {
@@ -387,6 +437,19 @@ impl Services {
             self.notifier.notify(Notification::User {
                 user_id: user.clone(),
             });
+        }
+        for (server, msgs) in by_server {
+            self.send_edu_to(
+                vec![server],
+                json!({
+                    "edu_type": "m.direct_to_device",
+                    "content": {
+                        "sender": sender, "type": event_type,
+                        "message_id": tessera_auth::token::generate_session_id(),
+                        "messages": msgs,
+                    },
+                }),
+            );
         }
         Ok(())
     }

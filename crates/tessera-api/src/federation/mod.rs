@@ -4,6 +4,7 @@ use axum::{Json, Router, extract::State, response::IntoResponse};
 use ruma::{
     OwnedEventId, RoomVersionId, UInt,
     api::federation::{
+        authenticated_media as fed_media,
         authorization::get_event_authorization,
         backfill::get_backfill,
         device::get_devices,
@@ -56,7 +57,63 @@ pub fn routes(router: Router<AppState>) -> Router<AppState> {
     let r = route::<get_devices::v1::Request, _, _>(r, user_devices);
     let r = route::<get_keys::v1::Request, _, _>(r, user_keys_query);
     let r = route::<claim_keys::v1::Request, _, _>(r, user_keys_claim);
-    route::<get_public_rooms::v1::Request, _, _>(r, public_rooms)
+    let r = route::<get_public_rooms::v1::Request, _, _>(r, public_rooms);
+    let r = route::<fed_media::get_content::v1::Request, _, _>(r, media_download);
+    route::<fed_media::get_content_thumbnail::v1::Request, _, _>(r, media_thumbnail)
+}
+
+// ---------------------------------------------------------------- media
+
+fn fed_content(file: tessera_service::media::MediaFile) -> fed_media::FileOrLocation {
+    let c = fed_media::Content::new(
+        file.bytes,
+        file.content_type,
+        ruma::http_headers::ContentDisposition::new(
+            ruma::http_headers::ContentDispositionType::Attachment,
+        )
+        .with_filename(file.filename),
+    );
+    fed_media::FileOrLocation::File(c)
+}
+
+pub async fn media_download(
+    app: AppState,
+    req: Ruma<fed_media::get_content::v1::Request>,
+) -> Result<fed_media::get_content::v1::Response> {
+    let _ = req.origin()?;
+    let file = app.get_media(app.server_name(), &req.body.media_id).await?;
+    Ok(fed_media::get_content::v1::Response::new(
+        fed_media::ContentMetadata::new(),
+        fed_content(file),
+    ))
+}
+
+pub async fn media_thumbnail(
+    app: AppState,
+    req: Ruma<fed_media::get_content_thumbnail::v1::Request>,
+) -> Result<fed_media::get_content_thumbnail::v1::Response> {
+    let _ = req.origin()?;
+    let method = req
+        .body
+        .method
+        .as_ref()
+        .map_or("scale", |m| m.as_str())
+        .to_owned();
+    let width = u32::try_from(u64::from(req.body.width)).unwrap_or(u32::MAX);
+    let height = u32::try_from(u64::from(req.body.height)).unwrap_or(u32::MAX);
+    let file = app
+        .get_thumbnail(
+            app.server_name(),
+            &req.body.media_id,
+            width,
+            height,
+            &method,
+        )
+        .await?;
+    Ok(fed_media::get_content_thumbnail::v1::Response::new(
+        fed_media::ContentMetadata::new(),
+        fed_content(file),
+    ))
 }
 
 fn fed_err(e: tessera_federation::Error) -> Error {
@@ -413,10 +470,17 @@ pub async fn event_auth(
     let origin = req.origin()?.clone();
     require_in_room(&app, &origin, &req.body.room_id).await?;
     let rules = rules_for(&app, &req.body.room_id).await?;
-    let chain_ids = app
+    let mut chain_ids = app
         .store
         .auth_chain(std::slice::from_ref(&req.body.event_id))
         .await?;
+    // Room v12: the create event is implied by the room ID rather than listed in auth_events.
+    if !rules.event_format.allow_room_create_in_auth_events
+        && let Ok(create_id) = tessera_core::pdu::create_event_id_for_room(&req.body.room_id)
+        && !chain_ids.contains(&create_id)
+    {
+        chain_ids.push(create_id);
+    }
     let chain = app.store.get_events(&chain_ids).await?;
     Ok(get_event_authorization::v1::Response::new(
         chain
@@ -441,11 +505,17 @@ pub async fn query_profile(
         .get_user(&req.body.user_id)
         .await?
         .ok_or_else(|| Error::not_found("User not found."))?;
+    let wanted = req.body.field.as_ref().map(ToString::to_string);
+    let include = |f: &str| wanted.as_deref().is_none_or(|w| w == f);
     let mut data = ruma::profile::UserProfile::new();
-    if let Some(name) = user.display_name {
+    if include("displayname")
+        && let Some(name) = user.display_name
+    {
         data.set("displayname".to_owned(), json!(name));
     }
-    if let Some(url) = user.avatar_url {
+    if include("avatar_url")
+        && let Some(url) = user.avatar_url
+    {
         data.set("avatar_url".to_owned(), json!(url));
     }
     let mut resp = get_profile_information::v1::Response::new();

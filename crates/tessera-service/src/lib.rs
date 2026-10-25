@@ -11,6 +11,7 @@ pub mod config;
 pub mod e2ee;
 mod error;
 pub mod federation_hooks;
+pub mod media;
 pub mod notifier;
 pub mod presence;
 pub mod profile;
