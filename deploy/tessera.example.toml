@@ -1,0 +1,42 @@
+# tessera configuration. Every section has defaults; the first three settings are required.
+
+# Appears in all user, room and event IDs. Cannot be changed later.
+server_name = "example.org"
+database_url = "postgres://tessera:tessera@postgres/tessera"
+# Signing keys and media are stored here.
+data_dir = "/data"
+
+[listeners.client]
+bind = "0.0.0.0:8008"
+# tls = { cert = "/data/fullchain.pem", key = "/data/privkey.pem" }
+
+[listeners.federation]
+bind = "0.0.0.0:8448"
+# Federation must be reachable over HTTPS; terminate TLS here or in a reverse proxy.
+# tls = { cert = "/data/fullchain.pem", key = "/data/privkey.pem" }
+
+[registration]
+enabled = false
+# Synapse-compatible shared-secret registration (/_synapse/admin/v1/register):
+# shared_secret = "change-me"
+
+[rate_limiting]
+enabled = true
+# trust_x_forwarded_for = true   # behind a reverse proxy
+# messages = { per_second = 0.2, burst = 10 }
+
+[retention]
+enabled = false
+# default_max_lifetime_ms = 31536000000   # one year, for rooms without m.room.retention
+
+[server_notices]
+enabled = false
+
+# Delegate authentication to Matrix Authentication Service (MSC3861).
+[mas]
+enabled = false
+# endpoint = "http://mas:8080"
+# secret = "shared secret, matrix.secret in the MAS config"
+
+# User IDs made server admins at startup.
+admins = []

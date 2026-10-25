@@ -310,6 +310,15 @@ pub trait EventStore: Send + Sync {
         direction: Direction,
         limit: usize,
     ) -> Result<Vec<StoredEvent>>;
+    /// The newest events of a room at or before `upto`, in topological order (depth, then
+    /// stream position), newest first. Initial syncs show history this way, like the
+    /// reference implementation, so state that arrived late sits in `state`, not the timeline.
+    async fn room_events_topological(
+        &self,
+        room_id: &RoomId,
+        upto: StreamOrdering,
+        limit: usize,
+    ) -> Result<Vec<StoredEvent>>;
     /// Latest stream ordering of any event, i.e. the current sync position.
     async fn max_stream_ordering(&self) -> Result<StreamOrdering>;
     /// Rooms that had events in `(from, to]`.

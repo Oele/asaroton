@@ -1,0 +1,44 @@
+# Deployment
+
+## Container
+
+`docker build -t tessera .` builds a distroless image with the release binary. It expects a
+configuration file at `/data/tessera.toml` and keeps signing keys and media under `/data`.
+`deploy/docker-compose.yml` runs it next to PostgreSQL 18; copy `deploy/tessera.example.toml`
+to `deploy/data/tessera.toml` and set `server_name` before `docker compose up -d`.
+
+## Federation
+
+Other servers reach `https://<server_name>:8448` (or the address given by
+`/.well-known/matrix/server` or an SRV record). Either give the federation listener a
+certificate (`listeners.federation.tls`) or terminate TLS in a reverse proxy in front of it.
+The client listener is plain HTTP by default and is normally proxied with TLS as well.
+
+## First admin
+
+Register the first user (enable `registration` temporarily, or use the shared-secret
+registration endpoint with `registration.shared_secret`), then list the user ID under
+`admins` and restart, or set `is_admin` through the admin API from an existing admin. Admins use
+the Synapse-compatible API under `/_synapse/admin/` (users, rooms, deletion, history purge,
+server notices).
+
+## Authentication service
+
+With `[mas] enabled = true` tessera validates access tokens through Matrix Authentication
+Service and MAS provisions users and devices through `/_synapse/mas/*`. In the MAS
+configuration set `matrix.kind: synapse`, `matrix.homeserver` to the server name,
+`matrix.endpoint` to tessera's client listener and `matrix.secret` to the same value as
+`mas.secret`. Route `/_matrix/client/*/login`, `/logout` and `/refresh` to MAS in the reverse
+proxy; tessera answers them with an error when delegation is on. Clients discover MAS through
+`/_matrix/client/v1/auth_metadata` and `/.well-known/matrix/client`.
+
+## Operations
+
+- `rate_limiting`: token buckets per client address (logins, registration) and per access
+  token (sends, joins, invites), returning `M_LIMIT_EXCEEDED` with `retry_after_ms`.
+- `retention`: a periodic job purges non-state events older than a room's
+  `m.room.retention` `max_lifetime` (or the configured default).
+- Logs go to standard output; `RUST_LOG` selects the level (`info` by default,
+  `tessera_federation=debug` is useful when debugging federation).
+- `scripts/loadtest.py` is a synthetic client swarm for capacity checks and
+  `scripts/fuzz.sh` runs the fuzz targets under `fuzz/` (needs the nightly toolchain).

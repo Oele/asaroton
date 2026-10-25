@@ -723,6 +723,26 @@ impl EventStore for PostgresStore {
         rows.into_iter().map(StoredEvent::try_from).collect()
     }
 
+    async fn room_events_topological(
+        &self,
+        room_id: &RoomId,
+        upto: StreamOrdering,
+        limit: usize,
+    ) -> Result<Vec<StoredEvent>> {
+        let sql = format!(
+            "SELECT {EVENT_COLUMNS} FROM events e JOIN rooms r ON r.room_id = e.room_id
+             WHERE e.room_id = $1 AND e.stream_ordering <= $2 AND NOT e.rejected AND NOT e.outlier
+             ORDER BY e.depth DESC, e.stream_ordering DESC LIMIT $3"
+        );
+        let rows: Vec<EventRow> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
+            .bind(room_id.as_str())
+            .bind(upto)
+            .bind(i64::try_from(limit).unwrap_or(i64::MAX))
+            .fetch_all(&self.pool)
+            .await?;
+        rows.into_iter().map(StoredEvent::try_from).collect()
+    }
+
     async fn max_stream_ordering(&self) -> Result<StreamOrdering> {
         let row = sqlx::query("SELECT COALESCE(MAX(stream_ordering), 0) FROM events")
             .fetch_one(&self.pool)

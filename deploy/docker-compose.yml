@@ -1,0 +1,42 @@
+# tessera with PostgreSQL. Copy deploy/tessera.example.toml to ./data/tessera.toml, set
+# server_name, then: docker compose up -d
+services:
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: tessera
+      POSTGRES_PASSWORD: tessera
+      POSTGRES_DB: tessera
+    volumes:
+      - postgres:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tessera"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  tessera:
+    build: ..
+    image: tessera:latest
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./data:/data
+    ports:
+      - "8008:8008"
+      - "8448:8448"
+    restart: unless-stopped
+
+  # Optional: Matrix Authentication Service (enable [mas] in tessera.toml and point its
+  # matrix.endpoint at http://tessera:8008). See docs/deployment.md.
+  # mas:
+  #   image: ghcr.io/element-hq/matrix-authentication-service:latest
+  #   command: ["server"]
+  #   volumes:
+  #     - ./mas:/data
+  #   ports:
+  #     - "8080:8080"
+
+volumes:
+  postgres:

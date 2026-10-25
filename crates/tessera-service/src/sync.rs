@@ -448,6 +448,31 @@ impl Services {
         let mut cursor = upper + 1;
         let mut exhausted = false;
         let mut scanned = 0usize;
+        // Set when the topological window ended before the room's history did.
+        let mut more_beyond = false;
+        if lower.is_none() {
+            // A first view of the room: the newest events in topological order, so a state
+            // event that arrived late (on a fork) is reported in `state` rather than
+            // displacing the recent timeline.
+            let want = (limit * 3).clamp(50, 1000);
+            let candidates = self
+                .store
+                .room_events_topological(room_id, upper, want)
+                .await?;
+            exhausted = candidates.len() < want;
+            for ev in candidates {
+                if filter.timeline_allows(&ev)
+                    && (ev.pdu.is_state() || !ignored.contains(ev.pdu.sender()))
+                {
+                    events.push(ev);
+                    if events.len() > limit {
+                        break;
+                    }
+                }
+            }
+            more_beyond = !exhausted && events.len() <= limit;
+            exhausted = true;
+        }
         while events.len() <= limit && !exhausted && scanned < 5000 {
             let batch = self
                 .store
@@ -481,7 +506,7 @@ impl Services {
                 }
             }
         }
-        let mut limited = events.len() > limit;
+        let mut limited = events.len() > limit || more_beyond;
         events.truncate(limit);
         events.reverse();
         // A gap (events arrived whose history we do not have) cuts the timeline: only the
@@ -496,9 +521,8 @@ impl Services {
         }
         let timeline_start = events.first().map(|e| e.stream_ordering);
         room.limited = limited || newly_joined;
-        if let Some(first) = events.first() {
-            room.prev_batch =
-                Some(super::rooms::timeline::StreamToken(first.stream_ordering - 1).to_string());
+        if let Some(oldest) = events.iter().map(|e| e.stream_ordering).min() {
+            room.prev_batch = Some(super::rooms::timeline::StreamToken(oldest - 1).to_string());
         }
         if let Some(device_id) = &req.device_id {
             for ev in &events {
