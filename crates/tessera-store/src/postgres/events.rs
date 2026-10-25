@@ -218,9 +218,8 @@ impl EventStore for PostgresStore {
     }
 
     async fn redact_event(&self, event_id: &EventId, redacted: &Pdu) -> Result<()> {
-        let mut obj = redacted.raw().clone();
-        obj.remove("unsigned");
-        let json = tessera_core::canonical::to_string(&obj);
+        // The redacted form carries `unsigned.redacted_because`, which clients need; keep it.
+        let json = tessera_core::canonical::to_string(redacted.raw());
         sqlx::query(
             "UPDATE events SET original_json = COALESCE(original_json, json), json = $2 WHERE event_id = $1",
         )

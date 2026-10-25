@@ -67,8 +67,7 @@ impl TryFrom<MembershipRow> for Membership {
 }
 
 const ROOM_COLUMNS: &str = "room_id, room_version, creator, is_public, created_ts";
-pub(crate) const MEMBERSHIP_COLUMNS: &str =
-    "room_id, user_id, membership, event_id, sender, display_name, avatar_url, stream_ordering, forgotten";
+pub(crate) const MEMBERSHIP_COLUMNS: &str = "room_id, user_id, membership, event_id, sender, display_name, avatar_url, stream_ordering, forgotten";
 
 #[async_trait]
 impl RoomStore for PostgresStore {
@@ -239,7 +238,11 @@ impl RoomStore for PostgresStore {
         rows.into_iter().map(Membership::try_from).collect()
     }
 
-    async fn memberships_changed_since(&self, user_id: &UserId, since: i64) -> Result<Vec<Membership>> {
+    async fn memberships_changed_since(
+        &self,
+        user_id: &UserId,
+        since: i64,
+    ) -> Result<Vec<Membership>> {
         let rows: Vec<MembershipRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "SELECT {MEMBERSHIP_COLUMNS} FROM room_memberships WHERE user_id = $1 AND stream_ordering > $2 ORDER BY stream_ordering"
         )))
@@ -250,28 +253,48 @@ impl RoomStore for PostgresStore {
         rows.into_iter().map(Membership::try_from).collect()
     }
 
-    async fn set_forgotten(&self, room_id: &RoomId, user_id: &UserId, forgotten: bool) -> Result<()> {
-        sqlx::query("UPDATE room_memberships SET forgotten = $3 WHERE room_id = $1 AND user_id = $2")
-            .bind(room_id.as_str())
-            .bind(user_id.as_str())
-            .bind(forgotten)
-            .execute(&self.pool)
-            .await?;
+    async fn set_forgotten(
+        &self,
+        room_id: &RoomId,
+        user_id: &UserId,
+        forgotten: bool,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE room_memberships SET forgotten = $3 WHERE room_id = $1 AND user_id = $2",
+        )
+        .bind(room_id.as_str())
+        .bind(user_id.as_str())
+        .bind(forgotten)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
-    async fn get_txn_event(&self, user_id: &UserId, device_id: Option<&ruma::DeviceId>, txn_id: &str) -> Result<Option<OwnedEventId>> {
+    async fn get_txn_event(
+        &self,
+        user_id: &UserId,
+        device_id: Option<&ruma::DeviceId>,
+        txn_id: &str,
+    ) -> Result<Option<OwnedEventId>> {
         let row = sqlx::query("SELECT event_id FROM event_txn_ids WHERE user_id = $1 AND device_id = $2 AND txn_id = $3")
             .bind(user_id.as_str())
             .bind(device_id.map_or("", ruma::DeviceId::as_str))
             .bind(txn_id)
             .fetch_optional(&self.pool)
             .await?;
-        row.map(|r| OwnedEventId::try_from(r.get::<String, _>(0)).map_err(|e| Error::Corrupt(e.to_string())))
-            .transpose()
+        row.map(|r| {
+            OwnedEventId::try_from(r.get::<String, _>(0)).map_err(|e| Error::Corrupt(e.to_string()))
+        })
+        .transpose()
     }
 
-    async fn set_txn_event(&self, user_id: &UserId, device_id: Option<&ruma::DeviceId>, txn_id: &str, event_id: &ruma::EventId) -> Result<()> {
+    async fn set_txn_event(
+        &self,
+        user_id: &UserId,
+        device_id: Option<&ruma::DeviceId>,
+        txn_id: &str,
+        event_id: &ruma::EventId,
+    ) -> Result<()> {
         sqlx::query(
             "INSERT INTO event_txn_ids (user_id, device_id, txn_id, event_id, created_ts) VALUES ($1, $2, $3, $4, $5)
              ON CONFLICT DO NOTHING",
@@ -319,11 +342,18 @@ impl RoomStore for PostgresStore {
                 let corrupt = |e: ruma::IdParseError| Error::Corrupt(e.to_string());
                 let thread: String = r.get("thread_id");
                 Ok(crate::Receipt {
-                    room_id: OwnedRoomId::try_from(r.get::<String, _>("room_id")).map_err(corrupt)?,
-                    user_id: OwnedUserId::try_from(r.get::<String, _>("user_id")).map_err(corrupt)?,
+                    room_id: OwnedRoomId::try_from(r.get::<String, _>("room_id"))
+                        .map_err(corrupt)?,
+                    user_id: OwnedUserId::try_from(r.get::<String, _>("user_id"))
+                        .map_err(corrupt)?,
                     receipt_type: r.get("receipt_type"),
-                    thread_id: if thread.is_empty() { None } else { Some(thread) },
-                    event_id: OwnedEventId::try_from(r.get::<String, _>("event_id")).map_err(corrupt)?,
+                    thread_id: if thread.is_empty() {
+                        None
+                    } else {
+                        Some(thread)
+                    },
+                    event_id: OwnedEventId::try_from(r.get::<String, _>("event_id"))
+                        .map_err(corrupt)?,
                     data: r.get("data"),
                     stream_id: r.get("stream_id"),
                 })
@@ -332,7 +362,9 @@ impl RoomStore for PostgresStore {
     }
 
     async fn max_receipt_stream_id(&self) -> Result<i64> {
-        let row = sqlx::query("SELECT COALESCE(MAX(stream_id), 0) FROM receipts").fetch_one(&self.pool).await?;
+        let row = sqlx::query("SELECT COALESCE(MAX(stream_id), 0) FROM receipts")
+            .fetch_one(&self.pool)
+            .await?;
         Ok(row.get::<i64, _>(0))
     }
 

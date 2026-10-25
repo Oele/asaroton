@@ -22,9 +22,27 @@ where
     H: Fn(AppState, Ruma<T>) -> Fut + Clone + Send + Sync + 'static,
     Fut: Future<Output = Result<T::OutgoingResponse, Error>> + Send + 'static,
 {
+    route_with_extra_paths::<T, H, Fut>(router, &[], handler)
+}
+
+/// Like [`route`], plus additional path templates ruma does not list (for example the
+/// state-key-less forms of the `/state/{event_type}` endpoints).
+pub fn route_with_extra_paths<T, H, Fut>(
+    router: Router<AppState>,
+    extra: &[&'static str],
+    handler: H,
+) -> Router<AppState>
+where
+    T: IncomingRequest + Send + 'static,
+    T::Authentication: 'static,
+    T::OutgoingResponse: OutgoingResponse + Send,
+    H: Fn(AppState, Ruma<T>) -> Fut + Clone + Send + Sync + 'static,
+    Fut: Future<Output = Result<T::OutgoingResponse, Error>> + Send + 'static,
+{
     let method = T::METHOD;
     let filter = MethodFilter::try_from(method.clone()).unwrap_or(MethodFilter::GET);
-    let paths: BTreeSet<&'static str> = T::PATH_BUILDER.all_paths().collect();
+    let mut paths: BTreeSet<&'static str> = T::PATH_BUILDER.all_paths().collect();
+    paths.extend(extra.iter().copied());
     let mut router = router;
     for path in paths {
         let handler = handler.clone();

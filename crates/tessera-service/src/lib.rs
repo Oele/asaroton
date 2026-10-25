@@ -11,7 +11,10 @@ pub mod config;
 mod error;
 pub mod notifier;
 pub mod profile;
+pub mod rooms;
 pub mod signing;
+pub mod sync;
+pub mod typing;
 
 use std::sync::Arc;
 
@@ -31,8 +34,11 @@ pub struct Services {
     pub auth: Authenticator,
     pub uia: UiaSessions,
     pub notifier: Notifier,
+    pub typing: typing::TypingState,
     /// Process start, for uptime and `age` calculations.
     pub started_at: std::time::Instant,
+    /// Per-room locks for local sends (see `rooms::pipeline`).
+    pub(crate) room_locks: dashmap::DashMap<ruma::OwnedRoomId, Arc<tokio::sync::Mutex<()>>>,
 }
 
 impl std::fmt::Debug for Services {
@@ -52,10 +58,12 @@ impl Services {
             auth: Authenticator::new(Arc::clone(&store)),
             uia: UiaSessions::default(),
             notifier: Notifier::new(),
+            typing: typing::TypingState::default(),
             signing_key: Arc::new(signing_key),
             config,
             store,
             started_at: std::time::Instant::now(),
+            room_locks: dashmap::DashMap::new(),
         }))
     }
 

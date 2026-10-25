@@ -70,6 +70,8 @@ pub async fn show_key(config: Config) -> anyhow::Result<()> {
 }
 
 pub async fn serve(config: Config) -> anyhow::Result<()> {
+    // Several dependencies enable both rustls backends; pick one explicitly or TLS panics.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     std::fs::create_dir_all(&config.data_dir)
         .with_context(|| format!("creating data dir {}", config.data_dir.display()))?;
     let store = connect_store(&config).await?;

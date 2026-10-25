@@ -82,6 +82,7 @@ impl Listener {
 
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[allow(dead_code)]
 pub struct FederationConfig {
     /// Disable all federation (the server becomes an island).
     #[serde(default)]

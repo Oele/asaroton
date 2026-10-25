@@ -238,7 +238,7 @@ pub async fn whoami(
 ) -> Result<whoami::v3::Response> {
     let s = req.sender()?;
     let mut resp = whoami::v3::Response::new(s.user_id.clone(), s.is_guest);
-    resp.device_id = s.device_id.clone();
+    resp.device_id.clone_from(&s.device_id);
     Ok(resp)
 }
 
@@ -404,7 +404,7 @@ pub async fn get_avatar_url(
 ) -> Result<get_avatar_url::v3::Response> {
     let user = local_user(&services, &req.body.user_id).await?;
     Ok(get_avatar_url::v3::Response::new(
-        user.avatar_url.and_then(|u| u.try_into().ok()),
+        user.avatar_url.map(ruma::OwnedMxcUri::from),
     ))
 }
 

@@ -1,5 +1,7 @@
 //! The tessera Matrix homeserver binary.
 
+#![allow(unreachable_pub)]
+
 mod config;
 mod server;
 

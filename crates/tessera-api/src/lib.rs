@@ -17,7 +17,7 @@ use tessera_service::Services;
 
 pub use error::{Error, Result};
 pub use extract::{Ruma, RumaResponse};
-pub use router::{build_router, route};
+pub use router::{build_router, route, route_with_extra_paths};
 
 /// Shared application state for all handlers.
 pub type AppState = Arc<Services>;

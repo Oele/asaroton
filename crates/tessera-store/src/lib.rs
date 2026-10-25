@@ -114,12 +114,32 @@ pub trait RoomStore: Send + Sync {
     /// All memberships of a user (any state), for sync.
     async fn memberships_for_user(&self, user_id: &UserId) -> Result<Vec<Membership>>;
     /// Memberships of a user whose current membership event is newer than `since`.
-    async fn memberships_changed_since(&self, user_id: &UserId, since: StreamOrdering) -> Result<Vec<Membership>>;
-    async fn set_forgotten(&self, room_id: &RoomId, user_id: &UserId, forgotten: bool) -> Result<()>;
+    async fn memberships_changed_since(
+        &self,
+        user_id: &UserId,
+        since: StreamOrdering,
+    ) -> Result<Vec<Membership>>;
+    async fn set_forgotten(
+        &self,
+        room_id: &RoomId,
+        user_id: &UserId,
+        forgotten: bool,
+    ) -> Result<()>;
 
     /// Transaction-ID de-duplication for client sends.
-    async fn get_txn_event(&self, user_id: &UserId, device_id: Option<&DeviceId>, txn_id: &str) -> Result<Option<OwnedEventId>>;
-    async fn set_txn_event(&self, user_id: &UserId, device_id: Option<&DeviceId>, txn_id: &str, event_id: &EventId) -> Result<()>;
+    async fn get_txn_event(
+        &self,
+        user_id: &UserId,
+        device_id: Option<&DeviceId>,
+        txn_id: &str,
+    ) -> Result<Option<OwnedEventId>>;
+    async fn set_txn_event(
+        &self,
+        user_id: &UserId,
+        device_id: Option<&DeviceId>,
+        txn_id: &str,
+        event_id: &EventId,
+    ) -> Result<()>;
 
     /// Receipts.
     async fn set_receipt(&self, receipt: Receipt) -> Result<i64>;
