@@ -1,6 +1,6 @@
 # Spec coverage
 
-Target: Matrix v1.18. Updated at the end of each phase.
+Target: Matrix v1.19. Updated at the end of each phase.
 
 | Area | Status |
 |---|---|
