@@ -264,7 +264,7 @@ impl Services {
     pub async fn logout(&self, sender: &Sender) -> Result<()> {
         self.store.delete_access_token(&sender.token).await?;
         if let Some(device_id) = &sender.device_id {
-            self.store.delete_device(&sender.user_id, device_id).await?;
+            self.delete_device_fully(&sender.user_id, device_id).await?;
         }
         Ok(())
     }
@@ -328,4 +328,14 @@ fn unknown_token_data(soft_logout: bool) -> ruma::api::error::UnknownTokenErrorD
     let mut data = ruma::api::error::UnknownTokenErrorData::new();
     data.soft_logout = soft_logout;
     data
+}
+
+impl Services {
+    /// Delete a device, its tokens and keys, and announce the device-list change.
+    pub async fn delete_device_fully(&self, user_id: &UserId, device_id: &DeviceId) -> Result<()> {
+        self.store.delete_device(user_id, device_id).await?;
+        self.store.delete_device_keys(user_id, device_id).await?;
+        self.notify_device_list_change(user_id, Some(device_id))
+            .await
+    }
 }

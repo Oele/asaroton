@@ -126,6 +126,13 @@ impl Services {
             _ => RoomPreset::PrivateChat,
         });
         let mut pl = default_power_levels(&creator, &rules);
+        // Like Synapse: private rooms let every member invite.
+        if matches!(
+            preset,
+            RoomPreset::PrivateChat | RoomPreset::TrustedPrivateChat
+        ) {
+            pl["invite"] = json!(0);
+        }
         if preset == RoomPreset::TrustedPrivateChat {
             for u in &req.invite {
                 pl["users"][u.as_str()] = json!(100);

@@ -49,6 +49,8 @@ pub struct Federation {
     /// Recently seen events, so auth checks and state resolution can look events up
     /// synchronously. Bounded by periodic clearing.
     event_cache: dashmap::DashMap<ruma::OwnedEventId, tessera_core::Pdu>,
+    /// Weak handle to ourselves, for code paths that need an `Arc<Federation>`.
+    weak_self: std::sync::OnceLock<std::sync::Weak<Federation>>,
 }
 
 impl std::fmt::Debug for Federation {
@@ -71,7 +73,9 @@ impl Federation {
             joins_in_progress: dashmap::DashMap::new(),
             sender: sender::SenderHandle::default(),
             event_cache: dashmap::DashMap::new(),
+            weak_self: std::sync::OnceLock::new(),
         });
+        let _ = fed.weak_self.set(Arc::downgrade(&fed));
         sender::start(Arc::clone(&fed));
         // Keep the event cache bounded.
         let cache_owner = Arc::clone(&fed);
@@ -84,6 +88,14 @@ impl Federation {
             }
         });
         Ok(fed)
+    }
+
+    /// A strong handle to this federation instance.
+    pub fn self_arc(&self) -> Arc<Self> {
+        self.weak_self
+            .get()
+            .and_then(std::sync::Weak::upgrade)
+            .unwrap_or_else(|| unreachable!("federation dropped while in use"))
     }
 
     /// Our own server name.

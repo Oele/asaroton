@@ -326,7 +326,13 @@ pub async fn update_device(
         )
         .await
     {
-        Ok(()) => Ok(update_device::v3::Response::new()),
+        Ok(()) => {
+            // Display names travel with device keys, so this is a device-list change.
+            services
+                .notify_device_list_change(user_id, Some(&req.body.device_id))
+                .await?;
+            Ok(update_device::v3::Response::new())
+        }
         Err(tessera_store::Error::NotFound(_)) => Err(Error::not_found("Device not found.")),
         Err(e) => Err(e.into()),
     }
@@ -339,8 +345,7 @@ pub async fn delete_device(
     let sender = req.sender()?;
     uia_for_sender(&services, sender, req.body.auth.as_ref()).await?;
     services
-        .store
-        .delete_device(&sender.user_id, &req.body.device_id)
+        .delete_device_fully(&sender.user_id, &req.body.device_id)
         .await?;
     Ok(delete_device::v3::Response::new())
 }
@@ -352,7 +357,7 @@ pub async fn delete_devices(
     let sender = req.sender()?;
     uia_for_sender(&services, sender, req.body.auth.as_ref()).await?;
     for d in &req.body.devices {
-        services.store.delete_device(&sender.user_id, d).await?;
+        services.delete_device_fully(&sender.user_id, d).await?;
     }
     Ok(delete_devices::v3::Response::new())
 }
