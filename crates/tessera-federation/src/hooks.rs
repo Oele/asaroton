@@ -135,6 +135,13 @@ impl FederationHooks for Hooks {
             .map_err(tessera_service::Error::from)
     }
 
+    async fn preview_url(&self, url: &str) -> tessera_service::Result<Value> {
+        self.0
+            .preview_url(url)
+            .await
+            .map_err(tessera_service::Error::from)
+    }
+
     async fn remote_query_keys(
         &self,
         by_server: Vec<(OwnedServerName, Vec<OwnedUserId>)>,

@@ -20,6 +20,7 @@ pub mod join;
 pub mod keys;
 pub mod receive;
 pub mod sender;
+pub mod url_preview;
 
 use std::sync::Arc;
 

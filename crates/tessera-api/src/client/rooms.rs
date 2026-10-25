@@ -549,12 +549,11 @@ pub async fn messages(
     let mut resp = get_message_events::v3::Response::new();
     resp.start = page.start.to_string();
     resp.end = page.end.map(|t| t.to_string());
-    resp.chunk = services
+    let mut chunk = services
         .client_events(&page.events, Some(&sender.user_id))
-        .await?
-        .iter()
-        .map(raw)
-        .collect::<Result<Vec<_>>>()?;
+        .await?;
+    add_txn_ids(&services, sender, &page.events, &mut chunk).await?;
+    resp.chunk = chunk.iter().map(raw).collect::<Result<Vec<_>>>()?;
     // Lazy-loaded membership: the member events of everyone who sent something in the chunk.
     if matches!(
         req.body.filter.lazy_load_options,
@@ -588,9 +587,15 @@ pub async fn context(
     if !services.event_visible_to(&ev, &sender.user_id).await? {
         return Err(Error::not_found("Event not found."));
     }
-    Ok(get_room_event::v3::Response::new(raw(&services
-        .client_event(&ev, Some(&sender.user_id))
-        .await?)?))
+    let mut v = services.client_event(&ev, Some(&sender.user_id)).await?;
+    add_txn_ids(
+        &services,
+        sender,
+        std::slice::from_ref(&ev),
+        std::slice::from_mut(&mut v),
+    )
+    .await?;
+    Ok(get_room_event::v3::Response::new(raw(&v)?))
 }
 
 pub async fn event_context(
@@ -627,7 +632,15 @@ pub async fn event_context(
         .iter()
         .map(raw)
         .collect::<Result<Vec<_>>>()?;
-    resp.event = Some(raw(&services.client_event(&ev, user).await?)?);
+    let mut anchor = services.client_event(&ev, user).await?;
+    add_txn_ids(
+        &services,
+        sender,
+        std::slice::from_ref(&ev),
+        std::slice::from_mut(&mut anchor),
+    )
+    .await?;
+    resp.event = Some(raw(&anchor)?);
     resp.events_after = services
         .client_events(&after, user)
         .await?
@@ -1268,4 +1281,57 @@ pub async fn search(
     }
     categories.room_events = room_events;
     Ok(search::search_events::v3::Response::new(categories))
+}
+
+/// `unsigned.transaction_id` for events the requesting device sent itself.
+async fn add_txn_ids(
+    services: &AppState,
+    sender: &tessera_auth::Sender,
+    events: &[StoredEvent],
+    values: &mut [Value],
+) -> Result<()> {
+    let Some(device_id) = &sender.device_id else {
+        return Ok(());
+    };
+    for (ev, v) in events.iter().zip(values.iter_mut()) {
+        if ev.pdu.sender() != sender.user_id {
+            continue;
+        }
+        if let Some(txn) = services
+            .store
+            .get_event_txn_id(ev.pdu.event_id(), &sender.user_id, Some(device_id))
+            .await?
+            && let Some(u) = v.get_mut("unsigned").and_then(Value::as_object_mut)
+        {
+            u.insert("transaction_id".into(), serde_json::json!(txn));
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------- URL previews
+
+pub async fn preview_url(
+    services: AppState,
+    req: Ruma<ruma::api::client::authenticated_media::get_media_preview::v1::Request>,
+) -> Result<ruma::api::client::authenticated_media::get_media_preview::v1::Response> {
+    let _ = req.sender()?;
+    let data = services.federation().preview_url(&req.body.url).await?;
+    let mut resp = ruma::api::client::authenticated_media::get_media_preview::v1::Response::new();
+    resp.data =
+        Some(serde_json::value::to_raw_value(&data).map_err(|e| Error::internal(e.to_string()))?);
+    Ok(resp)
+}
+
+#[allow(deprecated)]
+pub async fn preview_url_legacy(
+    services: AppState,
+    req: Ruma<ruma::api::client::media::get_media_preview::v3::Request>,
+) -> Result<ruma::api::client::media::get_media_preview::v3::Response> {
+    let _ = req.sender()?;
+    let data = services.federation().preview_url(&req.body.url).await?;
+    let mut resp = ruma::api::client::media::get_media_preview::v3::Response::new();
+    resp.data =
+        Some(serde_json::value::to_raw_value(&data).map_err(|e| Error::internal(e.to_string()))?);
+    Ok(resp)
 }

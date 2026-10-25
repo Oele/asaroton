@@ -304,7 +304,15 @@ impl Services {
                         newly_joined.push(m.room_id.clone());
                     }
                     if let Some(room) = self
-                        .sync_room(req, &m.room_id, since, now, full, None)
+                        .sync_room(
+                            req,
+                            &m.room_id,
+                            since,
+                            now,
+                            full,
+                            None,
+                            changed_in_window && since.is_some(),
+                        )
                         .await?
                     {
                         out.join.insert(m.room_id.clone(), room);
@@ -328,6 +336,7 @@ impl Services {
                             now,
                             since.is_none(),
                             Some(m.stream_ordering),
+                            false,
                         )
                         .await?
                     {
@@ -435,6 +444,7 @@ impl Services {
     }
 
     /// One room's delta. `leave_at` bounds the timeline for rooms the user left.
+    #[allow(clippy::too_many_arguments)]
     async fn sync_room(
         &self,
         req: &SyncRequest,
@@ -443,6 +453,7 @@ impl Services {
         now: SyncToken,
         full_state: bool,
         leave_at: Option<i64>,
+        newly_joined: bool,
     ) -> Result<Option<RoomSync>> {
         let user = &req.user_id;
         let filter = &req.filter;
@@ -452,7 +463,13 @@ impl Services {
 
         // Timeline: newest `limit` matching events in (since, upper], oldest first.
         let upper = leave_at.unwrap_or(now.events);
-        let lower = since.map(|s| s.events);
+        // A room joined inside this window shows its recent history from the start, and is
+        // always marked limited so clients paginate (as the reference implementation does).
+        let lower = if newly_joined {
+            None
+        } else {
+            since.map(|s| s.events)
+        };
         let mut events: Vec<StoredEvent> = Vec::new();
         let mut cursor = upper + 1;
         let mut exhausted = false;
@@ -494,7 +511,7 @@ impl Services {
         events.truncate(limit);
         events.reverse();
         let timeline_start = events.first().map(|e| e.stream_ordering);
-        room.limited = limited;
+        room.limited = limited || newly_joined;
         if let Some(first) = events.first() {
             room.prev_batch =
                 Some(super::rooms::timeline::StreamToken(first.stream_ordering).to_string());

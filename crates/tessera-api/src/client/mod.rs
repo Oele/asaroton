@@ -103,7 +103,16 @@ pub fn routes(router: Router<AppState>) -> Router<AppState> {
         ],
         rooms::state_key,
     );
-    let r = route::<c::message::get_message_events::v3::Request, _, _>(r, rooms::messages);
+    // `/messages` defaults `dir` to backwards, as the reference implementation does.
+    let r = r
+        .route(
+            "/_matrix/client/v3/rooms/{room_id}/messages",
+            axum::routing::get(messages_handler),
+        )
+        .route(
+            "/_matrix/client/r0/rooms/{room_id}/messages",
+            axum::routing::get(messages_handler),
+        );
     let r = route::<c::room::get_room_event::v3::Request, _, _>(r, rooms::context);
     let r = route::<c::context::get_context::v3::Request, _, _>(r, rooms::event_context);
     let r = route::<c::relations::get_relating_events::v1::Request, _, _>(r, rooms::relations);
@@ -174,6 +183,12 @@ pub fn routes(router: Router<AppState>) -> Router<AppState> {
     let r =
         route::<c::authenticated_media::get_media_config::v1::Request, _, _>(r, media::config_v1);
     let r = route::<c::media::create_content::v3::Request, _, _>(r, media::upload);
+    #[allow(deprecated)]
+    let r = route::<c::media::get_media_preview::v3::Request, _, _>(r, rooms::preview_url_legacy);
+    let r = route::<c::authenticated_media::get_media_preview::v1::Request, _, _>(
+        r,
+        rooms::preview_url,
+    );
     let r = route::<c::media::create_mxc_uri::v1::Request, _, _>(r, media::create);
     let r = r.route(
         "/_matrix/media/v3/upload/{server_name}/{media_id}",
@@ -260,6 +275,35 @@ async fn capabilities_handler(
     use axum::response::IntoResponse;
     match discovery::capabilities(&state, &req) {
         Ok(resp) => resp,
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn messages_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    mut req: axum::extract::Request,
+) -> axum::response::Response {
+    use axum::{extract::FromRequest, response::IntoResponse};
+    let has_dir = req
+        .uri()
+        .query()
+        .is_some_and(|q| q.split('&').any(|kv| kv.starts_with("dir=")));
+    if !has_dir {
+        let path = req.uri().path().to_owned();
+        let query = match req.uri().query() {
+            Some(q) if !q.is_empty() => format!("{q}&dir=b"),
+            _ => "dir=b".to_owned(),
+        };
+        if let Ok(uri) = format!("{path}?{query}").parse::<http::Uri>() {
+            *req.uri_mut() = uri;
+        }
+    }
+    let ruma = match crate::Ruma::<ruma::api::client::message::get_message_events::v3::Request>::from_request(req, &state).await {
+        Ok(r) => r,
+        Err(e) => return e.into_response(),
+    };
+    match rooms::messages(state, ruma).await {
+        Ok(resp) => crate::extract::RumaResponse(resp).into_response(),
         Err(e) => e.into_response(),
     }
 }

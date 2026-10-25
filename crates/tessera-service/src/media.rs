@@ -168,6 +168,42 @@ impl Services {
         Ok(OwnedMxcUri::from(format!("mxc://{server}/{media_id}")))
     }
 
+    /// Store server-generated local media (URL preview images) under a fresh ID.
+    pub async fn store_local_media(
+        &self,
+        bytes: &[u8],
+        content_type: &str,
+        filename: Option<&str>,
+    ) -> Result<OwnedMxcUri> {
+        let server = self.config.server_name.clone();
+        let media_id = random_media_id();
+        let path = self.media_path(&server, &media_id);
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| Error::internal(format!("media dir: {e}")))?;
+        }
+        tokio::fs::write(&path, bytes)
+            .await
+            .map_err(|e| Error::internal(format!("writing media: {e}")))?;
+        let now = now_ts();
+        self.store
+            .create_media(&MediaInfo {
+                server_name: server.clone(),
+                media_id: media_id.clone(),
+                user_id: None,
+                content_type: Some(content_type.to_owned()),
+                size: Some(i64::try_from(bytes.len()).unwrap_or(i64::MAX)),
+                upload_name: filename.map(str::to_owned),
+                sha256: Some(hex::encode(Sha256::digest(bytes))),
+                created_ts: now,
+                uploaded_ts: Some(now),
+                quarantined: false,
+            })
+            .await?;
+        Ok(OwnedMxcUri::from(format!("mxc://{server}/{media_id}")))
+    }
+
     /// Fetch media bytes. Remote media is fetched over federation and cached (later phase).
     pub async fn get_media(&self, server_name: &ServerName, media_id: &str) -> Result<MediaFile> {
         let Some(info) = self.store.get_media(server_name, media_id).await? else {
