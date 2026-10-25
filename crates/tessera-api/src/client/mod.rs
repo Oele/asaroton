@@ -162,11 +162,15 @@ pub fn routes(router: Router<AppState>) -> Router<AppState> {
     let r = route::<c::room::aliases::v3::Request, _, _>(r, rooms::room_aliases);
     let r = route::<c::directory::get_room_visibility::v3::Request, _, _>(r, rooms::get_visibility);
     let r = route::<c::directory::set_room_visibility::v3::Request, _, _>(r, rooms::set_visibility);
-    let r = route::<c::directory::get_public_rooms::v3::Request, _, _>(r, rooms::public_rooms);
-    let r = route::<c::directory::get_public_rooms_filtered::v3::Request, _, _>(
-        r,
-        rooms::public_rooms_filtered,
-    );
+    let r = r
+        .route(
+            "/_matrix/client/v3/publicRooms",
+            axum::routing::get(public_rooms_handler).post(public_rooms_filtered_handler),
+        )
+        .route(
+            "/_matrix/client/r0/publicRooms",
+            axum::routing::get(public_rooms_handler).post(public_rooms_filtered_handler),
+        );
     // sync & misc
     let r = r
         .route("/_matrix/client/r0/sync", axum::routing::get(sync_handler))
@@ -399,6 +403,48 @@ async fn room_summary_handler(
     use axum::response::IntoResponse;
     match rooms::room_summary(state, req).await {
         Ok(resp) => resp,
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn public_rooms_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    req: crate::Ruma<ruma::api::client::directory::get_public_rooms::v3::Request>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    match rooms::public_rooms(state, req).await {
+        Ok(resp) => {
+            let body = rooms::public_rooms_json(
+                &resp.chunk,
+                resp.total_room_count_estimate,
+                resp.next_batch.as_deref(),
+                resp.prev_batch.as_deref(),
+            );
+            let mut r = axum::Json(body).into_response();
+            crate::extract::add_cors(r.headers_mut());
+            r
+        }
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn public_rooms_filtered_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    req: crate::Ruma<ruma::api::client::directory::get_public_rooms_filtered::v3::Request>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    match rooms::public_rooms_filtered(state, req).await {
+        Ok(resp) => {
+            let body = rooms::public_rooms_json(
+                &resp.chunk,
+                resp.total_room_count_estimate,
+                resp.next_batch.as_deref(),
+                resp.prev_batch.as_deref(),
+            );
+            let mut r = axum::Json(body).into_response();
+            crate::extract::add_cors(r.headers_mut());
+            r
+        }
         Err(e) => e.into_response(),
     }
 }

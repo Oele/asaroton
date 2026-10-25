@@ -57,4 +57,5 @@ enabled = true
 user_localpart = "_server"
 CFG
 
+export RUST_LOG="${RUST_LOG:-info,tessera_federation=debug}"
 exec tessera --config /etc/tessera/tessera.toml

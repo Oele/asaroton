@@ -1605,3 +1605,34 @@ pub async fn room_summary(
     crate::extract::add_cors(resp.headers_mut());
     Ok(resp)
 }
+
+/// The public rooms response as explicit JSON: the typed response drops a `public` join rule
+/// as a default, but clients expect it.
+pub fn public_rooms_json(
+    chunk: &[ruma::directory::PublicRoomsChunk],
+    total: Option<UInt>,
+    next_batch: Option<&str>,
+    prev_batch: Option<&str>,
+) -> Value {
+    let rooms: Vec<Value> = chunk
+        .iter()
+        .map(|c| {
+            let mut v = serde_json::to_value(c).unwrap_or_default();
+            if v.get("join_rule").is_none() {
+                v["join_rule"] = json!("public");
+            }
+            v
+        })
+        .collect();
+    let mut body = json!({ "chunk": rooms });
+    if let Some(t) = total {
+        body["total_room_count_estimate"] = json!(t);
+    }
+    if let Some(n) = next_batch {
+        body["next_batch"] = json!(n);
+    }
+    if let Some(p) = prev_batch {
+        body["prev_batch"] = json!(p);
+    }
+    body
+}

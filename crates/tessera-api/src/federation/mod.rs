@@ -59,7 +59,10 @@ pub fn routes(router: Router<AppState>) -> Router<AppState> {
     let r = route::<get_devices::v1::Request, _, _>(r, user_devices);
     let r = route::<get_keys::v1::Request, _, _>(r, user_keys_query);
     let r = route::<claim_keys::v1::Request, _, _>(r, user_keys_claim);
-    let r = route::<get_public_rooms::v1::Request, _, _>(r, public_rooms);
+    let r = r.route(
+        "/_matrix/federation/v1/publicRooms",
+        axum::routing::get(public_rooms_handler).post(public_rooms_handler),
+    );
     let r = route::<ruma::api::federation::event::get_event_by_timestamp::v1::Request, _, _>(
         r,
         timestamp_to_event,
@@ -383,6 +386,21 @@ pub async fn send_knock(
     let origin = req.origin()?.clone();
     let fed = app.fed()?;
     let raw = tessera_core::canonical::from_str(req.body.pdu.get())?;
+    // Shape checks are a client error, not a rejection.
+    let get = |k: &str| raw.get(k).and_then(|v| v.as_str()).map(str::to_owned);
+    let membership = raw
+        .get("content")
+        .and_then(|c| c.as_object())
+        .and_then(|c| c.get("membership"))
+        .and_then(|m| m.as_str())
+        .map(str::to_owned);
+    if get("type").as_deref() != Some("m.room.member")
+        || membership.as_deref() != Some("knock")
+        || get("state_key").is_none()
+        || get("state_key") != get("sender")
+    {
+        return Err(Error::bad_json("Not a knock membership event."));
+    }
     let stripped = fed
         .send_knock(&origin, &req.body.room_id, raw)
         .await
@@ -780,6 +798,28 @@ pub async fn public_rooms(
         UInt::try_from(app.store.list_public_rooms(i64::MAX, 0).await?.len()).unwrap_or(UInt::MAX),
     );
     Ok(resp)
+}
+
+/// Federation `/publicRooms` as explicit JSON (join rules included even when public).
+async fn public_rooms_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    req: Ruma<get_public_rooms::v1::Request>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    match public_rooms(state, req).await {
+        Ok(resp) => {
+            let body = crate::client::rooms::public_rooms_json(
+                &resp.chunk,
+                resp.total_room_count_estimate,
+                resp.next_batch.as_deref(),
+                resp.prev_batch.as_deref(),
+            );
+            let mut r = axum::Json(body).into_response();
+            crate::extract::add_cors(r.headers_mut());
+            r
+        }
+        Err(e) => e.into_response(),
+    }
 }
 
 /// Keep `RoomVersionId` referenced for readers of this module.

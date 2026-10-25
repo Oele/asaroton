@@ -274,7 +274,12 @@ impl Services {
                     continue;
                 }
                 let s = self.room_summary_json(&item.room).await?;
-                let c = self.space_children(&item.room).await?;
+                // Only spaces have children worth listing or following.
+                let c = if s.get("room_type").and_then(Value::as_str) == Some("m.space") {
+                    self.space_children(&item.room).await?
+                } else {
+                    Vec::new()
+                };
                 (s, c)
             } else {
                 let is_space = remote_cache
@@ -327,15 +332,26 @@ impl Services {
                     (summary, children)
                 }
             };
+            // With `suggested_only`, only suggested links are reported and followed.
+            let children: Vec<Value> = if suggested_only {
+                children
+                    .into_iter()
+                    .filter(|c| {
+                        c.get("content")
+                            .and_then(|c| c.get("suggested"))
+                            .and_then(Value::as_bool)
+                            == Some(true)
+                    })
+                    .collect()
+            } else {
+                children
+            };
             let descend = max_depth.is_none_or(|d| item.depth < d);
             if descend {
+                // Depth first: the children go to the front of the queue, in order.
+                let mut pending = Vec::new();
                 for child in &children {
                     let content = child.get("content").cloned().unwrap_or_default();
-                    if suggested_only
-                        && content.get("suggested").and_then(Value::as_bool) != Some(true)
-                    {
-                        continue;
-                    }
                     let Some(child_id) = child
                         .get("state_key")
                         .and_then(Value::as_str)
@@ -353,11 +369,14 @@ impl Services {
                                 .collect()
                         })
                         .unwrap_or_default();
-                    queue.push_back(Pending {
+                    pending.push(Pending {
                         room: child_id,
                         depth: item.depth + 1,
                         via,
                     });
+                }
+                for p in pending.into_iter().rev() {
+                    queue.push_front(p);
                 }
             }
             let mut entry = summary;
