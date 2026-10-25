@@ -2,11 +2,7 @@
 //! run every receipt-time check over the events, verify signatures, redact, and resolve a
 //! state conflict.
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::cast_possible_truncation
-)]
+#![allow(clippy::pedantic, clippy::unwrap_used, clippy::expect_used)]
 
 use std::collections::HashMap;
 
