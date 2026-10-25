@@ -60,6 +60,10 @@ pub fn routes(router: Router<AppState>) -> Router<AppState> {
     let r = route::<get_keys::v1::Request, _, _>(r, user_keys_query);
     let r = route::<claim_keys::v1::Request, _, _>(r, user_keys_claim);
     let r = route::<get_public_rooms::v1::Request, _, _>(r, public_rooms);
+    let r = r.route(
+        "/_matrix/federation/v1/hierarchy/{room_id}",
+        axum::routing::get(hierarchy_handler),
+    );
     // Media responses are hand-built multipart bodies, so these bypass the typed route helper.
     r.route(
         "/_matrix/federation/v1/media/download/{media_id}",
@@ -858,4 +862,25 @@ async fn filter_visible_to_server(
         }
     }
     Ok(out)
+}
+
+async fn hierarchy_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    req: Ruma<ruma::api::federation::space::get_hierarchy::v1::Request>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let result = async {
+        let origin = req.origin()?.clone();
+        let body = state
+            .federation_hierarchy(&origin, &req.body.room_id, req.body.suggested_only)
+            .await?;
+        let mut resp = axum::Json(body).into_response();
+        crate::extract::add_cors(resp.headers_mut());
+        Ok::<_, Error>(resp)
+    }
+    .await;
+    match result {
+        Ok(resp) => resp,
+        Err(e) => e.into_response(),
+    }
 }

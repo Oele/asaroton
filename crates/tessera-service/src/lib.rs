@@ -20,6 +20,7 @@ pub mod profile;
 pub mod push;
 pub mod rooms;
 pub mod signing;
+pub mod spaces;
 pub mod sync;
 pub mod typing;
 

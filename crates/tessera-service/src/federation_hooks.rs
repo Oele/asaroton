@@ -57,6 +57,14 @@ pub trait FederationHooks: Send + Sync {
     ) -> Result<(OwnedRoomId, Vec<OwnedServerName>)>;
     /// Fetch a remote user's profile (`displayname`, `avatar_url`).
     async fn remote_profile(&self, user_id: &UserId) -> Result<Value>;
+    /// A room's hierarchy summary from one of `servers` (federation `/hierarchy`), as the
+    /// raw response object.
+    async fn remote_hierarchy(
+        &self,
+        servers: &[OwnedServerName],
+        room_id: &RoomId,
+        suggested_only: bool,
+    ) -> Result<Value>;
     /// Fetch older history for a room from other servers; returns how many events were stored.
     async fn backfill(&self, room_id: &RoomId, limit: usize) -> Result<usize>;
     /// Open Graph preview data for a URL.
@@ -120,6 +128,9 @@ impl FederationHooks for NoFederation {
         Err(disabled())
     }
     async fn remote_profile(&self, _: &UserId) -> Result<Value> {
+        Err(disabled())
+    }
+    async fn remote_hierarchy(&self, _: &[OwnedServerName], _: &RoomId, _: bool) -> Result<Value> {
         Err(disabled())
     }
     async fn backfill(&self, _: &RoomId, _: usize) -> Result<usize> {

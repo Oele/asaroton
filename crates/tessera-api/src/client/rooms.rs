@@ -1471,3 +1471,33 @@ fn glob_match(pattern: &str, value: &str) -> bool {
     let v: Vec<char> = value.chars().collect();
     rec(&p, &v)
 }
+
+// ---------------------------------------------------------------- spaces
+
+pub async fn hierarchy(
+    services: AppState,
+    req: Ruma<ruma::api::client::space::get_hierarchy::v1::Request>,
+) -> Result<axum::response::Response> {
+    use axum::response::IntoResponse;
+    let sender = req.sender()?;
+    let b = &req.body;
+    let (rooms, next_batch) = services
+        .hierarchy(
+            &sender.user_id,
+            &b.room_id,
+            b.suggested_only,
+            b.max_depth
+                .map(|d| usize::try_from(u64::from(d)).unwrap_or(usize::MAX)),
+            b.limit
+                .map(|l| usize::try_from(u64::from(l)).unwrap_or(usize::MAX)),
+            b.from.as_deref(),
+        )
+        .await?;
+    let mut body = json!({ "rooms": rooms });
+    if let Some(n) = next_batch {
+        body["next_batch"] = json!(n);
+    }
+    let mut resp = axum::Json(body).into_response();
+    crate::extract::add_cors(resp.headers_mut());
+    Ok(resp)
+}

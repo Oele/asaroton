@@ -126,6 +126,32 @@ impl FederationHooks for Hooks {
         Ok((resp.room_id, resp.servers))
     }
 
+    async fn remote_hierarchy(
+        &self,
+        servers: &[OwnedServerName],
+        room_id: &ruma::RoomId,
+        suggested_only: bool,
+    ) -> tessera_service::Result<Value> {
+        use ruma::api::federation::space::get_hierarchy;
+        let mut last = tessera_service::Error::not_found("No server could provide the room.");
+        for server in servers {
+            let mut req = get_hierarchy::v1::Request::new(room_id.to_owned());
+            req.suggested_only = suggested_only;
+            match self.0.client.send(server, req).await {
+                Ok(resp) => {
+                    return serde_json::to_value(serde_json::json!({
+                        "room": resp.room,
+                        "children": resp.children,
+                        "inaccessible_children": resp.inaccessible_children,
+                    }))
+                    .map_err(Into::into);
+                }
+                Err(e) => last = tessera_service::Error::from(e),
+            }
+        }
+        Err(last)
+    }
+
     async fn remote_profile(&self, user_id: &UserId) -> tessera_service::Result<Value> {
         let req = get_profile_information::v1::Request::new(user_id.to_owned());
         let resp = self

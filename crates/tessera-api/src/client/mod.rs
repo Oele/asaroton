@@ -65,6 +65,10 @@ pub fn routes(router: Router<AppState>) -> Router<AppState> {
     );
     let r = route::<c::membership::leave_room::v3::Request, _, _>(r, rooms::leave);
     let r = route::<c::knock::knock_room::v3::Request, _, _>(r, rooms::knock);
+    let r = r.route(
+        "/_matrix/client/v1/rooms/{room_id}/hierarchy",
+        axum::routing::get(hierarchy_handler),
+    );
     let r = route::<c::membership::forget_room::v3::Request, _, _>(r, rooms::forget);
     let r = route::<c::membership::invite_user::v3::Request, _, _>(r, rooms::invite);
     let r = route::<c::membership::kick_user::v3::Request, _, _>(r, rooms::kick);
@@ -361,6 +365,17 @@ async fn search_handler(
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
     match rooms::search(state, req).await {
+        Ok(resp) => resp,
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn hierarchy_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    req: crate::Ruma<ruma::api::client::space::get_hierarchy::v1::Request>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    match rooms::hierarchy(state, req).await {
         Ok(resp) => resp,
         Err(e) => e.into_response(),
     }
