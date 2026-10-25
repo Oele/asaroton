@@ -54,7 +54,30 @@ fn service_config(config: &Config) -> anyhow::Result<tessera_service::Config> {
         allow_guests: config.registration.allow_guests,
         federation_disabled: config.federation.disabled,
         trusted_key_servers: trusted,
-        rate_limiting: config.rate_limiting.enabled,
+        rate_limits: {
+            let rl = &config.rate_limiting;
+            let rate = |r: &crate::config::RateConfig| tessera_service::config::Rate {
+                per_second: r.per_second,
+                burst: r.burst,
+            };
+            tessera_service::config::RateLimits {
+                enabled: rl.enabled,
+                trust_x_forwarded_for: rl.trust_x_forwarded_for,
+                logins: rate(&rl.logins),
+                registrations: rate(&rl.registrations),
+                messages: rate(&rl.messages),
+                joins: rate(&rl.joins),
+                invites: rate(&rl.invites),
+            }
+        },
+        admins: config
+            .admins
+            .iter()
+            .map(|a| {
+                ruma::OwnedUserId::try_from(a.as_str())
+                    .map_err(|e| anyhow::anyhow!("invalid admin user ID {a}: {e}"))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?,
         public_base_url,
         software_version: env!("CARGO_PKG_VERSION").to_owned(),
         media_dir: config.data_dir.join("media"),
@@ -142,7 +165,16 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         services.set_federation(Arc::new(Hooks(Arc::clone(&fed))));
         Some(fed)
     };
+    // Configured admins get the flag (they must have registered already).
+    for admin in &services.config.admins {
+        match services.store.get_user(admin).await? {
+            Some(u) if !u.is_admin => services.store.set_admin(admin, true).await?,
+            Some(_) => {}
+            None => tracing::warn!(user = %admin, "configured admin does not exist yet"),
+        }
+    }
     let app = tessera_api::build_router(Arc::new(App {
+        limiter: tessera_api::ratelimit::Limiter::default(),
         services: Arc::clone(&services),
         federation,
     }));

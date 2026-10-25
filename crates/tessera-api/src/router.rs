@@ -65,6 +65,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/_matrix/{*rest}", axum::routing::any(unrecognized))
         .method_not_allowed_fallback(method_not_allowed)
         .fallback(not_found)
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::ratelimit::middleware,
+        ))
         .layer(axum::middleware::from_fn(cors_and_options))
         .with_state(state)
 }

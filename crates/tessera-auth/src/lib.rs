@@ -31,6 +31,8 @@ pub struct Sender {
     pub appservice_id: Option<String>,
     /// The access token used (kept for logout).
     pub token: String,
+    /// Server administrator (user flag, or an admin scope from the authentication service).
+    pub is_admin: bool,
 }
 
 /// Why a token was rejected.
@@ -97,6 +99,7 @@ impl Authenticator {
                 is_guest: false,
                 appservice_id: Some(a.id.clone()),
                 token: token.to_owned(),
+                is_admin: false,
             });
         }
         if let Some(mas) = &self.mas {
@@ -130,6 +133,7 @@ impl Authenticator {
                 is_guest: false,
                 appservice_id: user.appservice_id,
                 token: token.to_owned(),
+                is_admin: id.admin || user.is_admin,
             });
         }
         let Some(t) = self.store.get_access_token(token).await? else {
@@ -149,9 +153,14 @@ impl Authenticator {
             .clone()
             .unwrap_or_else(|| t.user_id.clone());
         let user = self.store.get_user(&user_id).await?;
-        let (is_guest, appservice_id, deactivated) = match &user {
-            Some(u) => (u.is_guest, u.appservice_id.clone(), u.is_deactivated),
-            None => (false, None, false),
+        let (is_guest, appservice_id, deactivated, is_admin) = match &user {
+            Some(u) => (
+                u.is_guest,
+                u.appservice_id.clone(),
+                u.is_deactivated,
+                u.is_admin,
+            ),
+            None => (false, None, false, false),
         };
         if deactivated {
             return Err(AuthError::Deactivated);
@@ -170,6 +179,7 @@ impl Authenticator {
             is_guest,
             appservice_id,
             token: token.to_owned(),
+            is_admin,
         })
     }
 }

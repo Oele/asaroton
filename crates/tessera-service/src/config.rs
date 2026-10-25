@@ -13,7 +13,9 @@ pub struct Config {
     pub allow_guests: bool,
     pub federation_disabled: bool,
     pub trusted_key_servers: Vec<OwnedServerName>,
-    pub rate_limiting: bool,
+    pub rate_limits: RateLimits,
+    /// Users made server admins at startup.
+    pub admins: Vec<ruma::OwnedUserId>,
     /// Public base URL for the client API, used in well-known and login responses.
     pub public_base_url: String,
     /// Software version string reported in `/versions`.
@@ -42,4 +44,53 @@ pub struct MasSettings {
 pub struct ServerNotices {
     pub user_localpart: String,
     pub display_name: String,
+}
+
+/// A token bucket: `burst` requests at once, refilled at `per_second`.
+#[derive(Clone, Copy, Debug)]
+pub struct Rate {
+    pub per_second: f64,
+    pub burst: u32,
+}
+
+/// Request rate limits by class of request.
+#[derive(Clone, Debug)]
+pub struct RateLimits {
+    pub enabled: bool,
+    /// Take the client address from `X-Forwarded-For` (behind a trusted reverse proxy).
+    pub trust_x_forwarded_for: bool,
+    pub logins: Rate,
+    pub registrations: Rate,
+    pub messages: Rate,
+    pub joins: Rate,
+    pub invites: Rate,
+}
+
+impl Default for RateLimits {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            trust_x_forwarded_for: false,
+            logins: Rate {
+                per_second: 0.17,
+                burst: 5,
+            },
+            registrations: Rate {
+                per_second: 0.17,
+                burst: 3,
+            },
+            messages: Rate {
+                per_second: 0.2,
+                burst: 10,
+            },
+            joins: Rate {
+                per_second: 0.1,
+                burst: 10,
+            },
+            invites: Rate {
+                per_second: 0.3,
+                burst: 10,
+            },
+        }
+    }
 }

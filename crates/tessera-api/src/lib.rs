@@ -10,6 +10,7 @@ pub mod client;
 mod error;
 mod extract;
 pub mod federation;
+pub mod ratelimit;
 mod router;
 
 use std::sync::Arc;
@@ -26,6 +27,8 @@ pub struct App {
     pub services: Arc<Services>,
     /// `None` when federation is disabled.
     pub federation: Option<Arc<Federation>>,
+    /// Request rate limiting state.
+    pub limiter: ratelimit::Limiter,
 }
 
 impl std::fmt::Debug for App {

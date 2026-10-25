@@ -40,9 +40,8 @@ pub struct Config {
     pub mas: MasConfig,
     #[serde(default)]
     pub logging: LoggingConfig,
-    /// Admin API tokens etc. (reserved for later phases).
+    /// User IDs made server admins at startup (they must exist).
     #[serde(default)]
-    #[allow(dead_code)]
     pub admins: Vec<String>,
 }
 
@@ -132,11 +131,76 @@ pub struct RegistrationConfig {
 pub struct RateLimitingConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Take the client address from `X-Forwarded-For` (only behind a trusted reverse proxy).
+    #[serde(default)]
+    pub trust_x_forwarded_for: bool,
+    /// Per client address.
+    #[serde(default = "default_rate_logins")]
+    pub logins: RateConfig,
+    /// Per client address.
+    #[serde(default = "default_rate_registrations")]
+    pub registrations: RateConfig,
+    /// Per user: sending events.
+    #[serde(default = "default_rate_messages")]
+    pub messages: RateConfig,
+    /// Per user: joining rooms.
+    #[serde(default = "default_rate_joins")]
+    pub joins: RateConfig,
+    /// Per user: inviting.
+    #[serde(default = "default_rate_invites")]
+    pub invites: RateConfig,
+}
+
+/// A token bucket: `burst` requests at once, then `per_second`.
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RateConfig {
+    pub per_second: f64,
+    pub burst: u32,
+}
+
+fn default_rate_logins() -> RateConfig {
+    RateConfig {
+        per_second: 0.17,
+        burst: 5,
+    }
+}
+fn default_rate_registrations() -> RateConfig {
+    RateConfig {
+        per_second: 0.17,
+        burst: 3,
+    }
+}
+fn default_rate_messages() -> RateConfig {
+    RateConfig {
+        per_second: 0.2,
+        burst: 10,
+    }
+}
+fn default_rate_joins() -> RateConfig {
+    RateConfig {
+        per_second: 0.1,
+        burst: 10,
+    }
+}
+fn default_rate_invites() -> RateConfig {
+    RateConfig {
+        per_second: 0.3,
+        burst: 10,
+    }
 }
 
 impl Default for RateLimitingConfig {
     fn default() -> Self {
-        Self { enabled: true }
+        Self {
+            enabled: true,
+            trust_x_forwarded_for: false,
+            logins: default_rate_logins(),
+            registrations: default_rate_registrations(),
+            messages: default_rate_messages(),
+            joins: default_rate_joins(),
+            invites: default_rate_invites(),
+        }
     }
 }
 

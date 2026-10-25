@@ -3234,6 +3234,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "bytes",
+ "dashmap",
  "futures",
  "hex",
  "hmac 0.12.1",
@@ -3243,6 +3244,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha1 0.10.7",
+ "sha2 0.10.9",
  "tessera-auth",
  "tessera-core",
  "tessera-federation",
