@@ -288,6 +288,9 @@ impl Services {
         if req.visibility == Some(Visibility::Public) {
             self.store.set_room_public(&room_id, true).await?;
         }
+        // A manually upgraded room (predecessor in creation content) carries the creator's
+        // room-specific push rules over, like /upgrade does.
+        self.after_user_joined(&creator, &room_id).await;
         Ok(room_id)
     }
 
