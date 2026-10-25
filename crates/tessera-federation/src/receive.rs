@@ -210,6 +210,8 @@ impl Federation {
                 .state_key()
                 .and_then(|k| ruma::OwnedUserId::try_from(k).ok())
             {
+                // Local users' invites arrive through /invite; a copy over /send is ignored.
+                Some(target) if services.is_local(&target) => false,
                 Some(target) => services
                     .store
                     .get_membership(room_id, &target)
@@ -352,6 +354,27 @@ impl Federation {
         let services = &self.services;
         let room_id = pdu.room_id().to_owned();
 
+        // Oversized fields: rejected outright, before anything is fetched on its behalf.
+        if let Err(e) = auth::check_size_limits(&pdu) {
+            let reason = e.to_string();
+            tracing::info!(event_id = %pdu.event_id(), %reason, "rejecting event");
+            let stored = pdu.with_rejected(true);
+            services
+                .store
+                .persist_event(PersistEvent {
+                    pdu: stored.clone(),
+                    state: EventState::Outlier,
+                    soft_failed: false,
+                    backfilled,
+                    stream_ordering: None,
+                    current_state_delta: None,
+                    forward_extremities: None,
+                })
+                .await?;
+            self.event_cache.insert(pdu.event_id().to_owned(), stored);
+            return Ok(Outcome::Rejected(reason));
+        }
+
         // 3a. auth events
         self.ensure_auth_events(origin, &room_id, &pdu, rules, 0)
             .await?;
@@ -370,9 +393,7 @@ impl Federation {
         // 5. authorisation
         let fetch = |id: &ruma::EventId| self.cached_event(id);
         let mut rejected_reason: Option<String> = None;
-        if let Err(e) = auth::check_size_limits(&pdu) {
-            rejected_reason = Some(e.to_string());
-        } else if let Err(e) = auth::check_state_independent(&pdu, rules, fetch) {
+        if let Err(e) = auth::check_state_independent(&pdu, rules, fetch) {
             rejected_reason = Some(e.to_string());
         } else if self.auth_events_rejected(&pdu) {
             rejected_reason = Some("event references a rejected auth event".into());

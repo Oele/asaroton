@@ -203,13 +203,14 @@ impl Services {
         }
         for (v, e) in out.iter_mut().zip(events) {
             if let Some((ty, key)) = e.pdu.state_tuple()
-                && let Some(prev) = self.previous_state_content(e, &ty, key).await?
+                && let Some((prev, sender)) = self.previous_state_content(e, &ty, key).await?
                 && let Some(u) = v
                     .as_object_mut()
                     .and_then(|o| o.get_mut("unsigned"))
                     .and_then(Value::as_object_mut)
             {
                 u.insert("prev_content".into(), prev);
+                u.insert("prev_sender".into(), json!(sender));
             }
         }
         if let Some(user) = user {
@@ -237,7 +238,7 @@ impl Services {
         ev: &StoredEvent,
         ty: &ruma::events::StateEventType,
         key: &str,
-    ) -> Result<Option<Value>> {
+    ) -> Result<Option<(Value, ruma::OwnedUserId)>> {
         let Some(group) = self.store.state_group_before(ev.event_id()).await? else {
             return Ok(None);
         };
@@ -251,10 +252,10 @@ impl Services {
         let Some(prev_id) = prev_id else {
             return Ok(None);
         };
-        Ok(self
-            .store
-            .get_event(&prev_id)
-            .await?
-            .and_then(|p| serde_json::from_str(p.pdu.content().get()).ok()))
+        Ok(self.store.get_event(&prev_id).await?.and_then(|p| {
+            serde_json::from_str(p.pdu.content().get())
+                .ok()
+                .map(|c| (c, p.pdu.sender().to_owned()))
+        }))
     }
 }

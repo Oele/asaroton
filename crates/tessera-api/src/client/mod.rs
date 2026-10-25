@@ -1,6 +1,7 @@
 //! Client-Server API handlers.
 
 pub mod account;
+pub mod backup;
 pub mod discovery;
 pub mod keys;
 pub mod media;
@@ -220,6 +221,36 @@ pub fn routes(router: Router<AppState>) -> Router<AppState> {
     #[allow(deprecated)]
     let r = route::<c::media::get_content_thumbnail::v3::Request, _, _>(r, media::thumbnail_legacy);
     // e2ee keys & to-device
+    // key backups
+    let r = route::<c::backup::create_backup_version::v3::Request, _, _>(r, backup::create_version);
+    let r =
+        route::<c::backup::get_latest_backup_info::v3::Request, _, _>(r, backup::latest_version);
+    let r = route::<c::backup::get_backup_info::v3::Request, _, _>(r, backup::get_version);
+    let r = route::<c::backup::update_backup_version::v3::Request, _, _>(r, backup::update_version);
+    let r = route::<c::backup::delete_backup_version::v3::Request, _, _>(r, backup::delete_version);
+    let r = route::<c::backup::add_backup_keys::v3::Request, _, _>(r, backup::put_keys);
+    let r =
+        route::<c::backup::add_backup_keys_for_room::v3::Request, _, _>(r, backup::put_room_keys);
+    let r = route::<c::backup::add_backup_keys_for_session::v3::Request, _, _>(
+        r,
+        backup::put_session_key,
+    );
+    let r = route::<c::backup::get_backup_keys::v3::Request, _, _>(r, backup::get_keys);
+    let r =
+        route::<c::backup::get_backup_keys_for_room::v3::Request, _, _>(r, backup::get_room_keys);
+    let r = route::<c::backup::get_backup_keys_for_session::v3::Request, _, _>(
+        r,
+        backup::get_session_key,
+    );
+    let r = route::<c::backup::delete_backup_keys::v3::Request, _, _>(r, backup::delete_keys);
+    let r = route::<c::backup::delete_backup_keys_for_room::v3::Request, _, _>(
+        r,
+        backup::delete_room_keys,
+    );
+    let r = route::<c::backup::delete_backup_keys_for_session::v3::Request, _, _>(
+        r,
+        backup::delete_session_key,
+    );
     let r = route::<c::keys::upload_keys::v3::Request, _, _>(r, keys::upload);
     let r = route::<c::keys::get_keys::v3::Request, _, _>(r, keys::query);
     let r = route::<c::keys::claim_keys::v3::Request, _, _>(r, keys::claim);

@@ -476,8 +476,12 @@ impl EventStore for PostgresStore {
 
     async fn gap_since(&self, room_id: &RoomId, since: StreamOrdering) -> Result<bool> {
         let row = sqlx::query(
-            "SELECT 1 FROM missing_events m JOIN events e ON e.event_id = m.referenced_by
-              WHERE m.room_id = $1 AND e.stream_ordering > $2 AND NOT e.outlier LIMIT 1",
+            "SELECT 1 FROM event_edges g
+               JOIN events e ON e.event_id = g.event_id
+               LEFT JOIN events p ON p.event_id = g.prev_event_id
+              WHERE e.room_id = $1 AND e.stream_ordering > $2 AND NOT e.outlier AND NOT e.rejected
+                AND (p.event_id IS NULL OR p.outlier)
+              LIMIT 1",
         )
         .bind(room_id.as_str())
         .bind(since)

@@ -385,3 +385,39 @@ pub struct SearchHit {
     pub event: StoredEvent,
     pub rank: f64,
 }
+
+/// A key backup version.
+#[derive(Debug, Clone)]
+pub struct BackupVersion {
+    pub version: String,
+    /// `{"algorithm": ..., "auth_data": ...}` exactly as the client sent it.
+    pub algorithm: serde_json::Value,
+    pub etag: i64,
+    pub count: i64,
+}
+
+/// One backed-up session key.
+#[derive(Debug, Clone)]
+pub struct BackupKey {
+    pub room_id: OwnedRoomId,
+    pub session_id: String,
+    pub first_message_index: i64,
+    pub forwarded_count: i64,
+    pub is_verified: bool,
+    /// The full `KeyBackupData` JSON.
+    pub data: serde_json::Value,
+}
+
+impl BackupKey {
+    /// Whether `new` should replace `self` (spec: verified beats unverified, then lower
+    /// `first_message_index`, then lower `forwarded_count`).
+    pub fn should_be_replaced_by(&self, new: &BackupKey) -> bool {
+        if new.is_verified != self.is_verified {
+            return new.is_verified;
+        }
+        if new.first_message_index != self.first_message_index {
+            return new.first_message_index < self.first_message_index;
+        }
+        new.forwarded_count < self.forwarded_count
+    }
+}

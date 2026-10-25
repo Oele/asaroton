@@ -398,7 +398,7 @@ impl Services {
         self.store
             .get_event(event_id)
             .await?
-            .filter(|e| e.pdu.room_id() == room_id)
+            .filter(|e| e.pdu.room_id() == room_id && !e.pdu.rejected())
             .ok_or_else(|| Error::not_found("Event not found."))
     }
 

@@ -363,6 +363,54 @@ pub trait KeyStore: Send + Sync {
 
 /// End-to-end encryption keys, to-device messages, device list stream, push.
 #[async_trait]
+pub trait KeyBackupStore: Send + Sync {
+    /// Create a new backup version; returns its version string.
+    async fn create_backup_version(
+        &self,
+        user_id: &UserId,
+        algorithm: &serde_json::Value,
+    ) -> Result<String>;
+    /// A backup version (`None` = latest), if it exists and is not deleted.
+    async fn get_backup_version(
+        &self,
+        user_id: &UserId,
+        version: Option<&str>,
+    ) -> Result<Option<BackupVersion>>;
+    /// Replace the algorithm/auth data of a version.
+    async fn update_backup_version(
+        &self,
+        user_id: &UserId,
+        version: &str,
+        algorithm: &serde_json::Value,
+    ) -> Result<bool>;
+    /// Delete a version and its keys.
+    async fn delete_backup_version(&self, user_id: &UserId, version: &str) -> Result<bool>;
+    /// Store keys, applying the replacement rules; returns the new etag and count.
+    async fn put_backup_keys(
+        &self,
+        user_id: &UserId,
+        version: &str,
+        keys: &[BackupKey],
+    ) -> Result<(i64, i64)>;
+    /// Keys of a version, optionally narrowed to a room and session.
+    async fn get_backup_keys(
+        &self,
+        user_id: &UserId,
+        version: &str,
+        room_id: Option<&RoomId>,
+        session_id: Option<&str>,
+    ) -> Result<Vec<BackupKey>>;
+    /// Delete keys (all, a room's, or one session's); returns the new etag and count.
+    async fn delete_backup_keys(
+        &self,
+        user_id: &UserId,
+        version: &str,
+        room_id: Option<&RoomId>,
+        session_id: Option<&str>,
+    ) -> Result<(i64, i64)>;
+}
+
+#[async_trait]
 pub trait E2eeStore: Send + Sync {
     async fn set_device_keys(
         &self,
@@ -569,6 +617,7 @@ pub trait Store:
     + AccountDataStore
     + KeyStore
     + E2eeStore
+    + KeyBackupStore
     + FederationStore
     + MediaStore
 {
