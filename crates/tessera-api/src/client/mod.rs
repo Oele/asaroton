@@ -65,6 +65,9 @@ pub fn routes(router: Router<AppState>) -> Router<AppState> {
     );
     let r = route::<c::membership::leave_room::v3::Request, _, _>(r, rooms::leave);
     let r = route::<c::knock::knock_room::v3::Request, _, _>(r, rooms::knock);
+    let r =
+        route::<c::room::get_event_by_timestamp::v1::Request, _, _>(r, rooms::timestamp_to_event);
+    let r = route::<c::room::get_summary::v1::Request, _, _>(r, rooms::room_summary);
     let r = r.route(
         "/_matrix/client/v1/rooms/{room_id}/hierarchy",
         axum::routing::get(hierarchy_handler),

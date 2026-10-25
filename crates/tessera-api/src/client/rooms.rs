@@ -1501,3 +1501,107 @@ pub async fn hierarchy(
     crate::extract::add_cors(resp.headers_mut());
     Ok(resp)
 }
+
+// ---------------------------------------------------------------- timestamp lookup, summary
+
+pub async fn timestamp_to_event(
+    services: AppState,
+    req: Ruma<ruma::api::client::room::get_event_by_timestamp::v1::Request>,
+) -> Result<ruma::api::client::room::get_event_by_timestamp::v1::Response> {
+    let sender = req.sender()?;
+    // Members only, whatever the room's visibility: this endpoint must not leak history.
+    services
+        .require_joined(&req.body.room_id, &sender.user_id)
+        .await
+        .map_err(|_| Error::forbidden("You are not in this room."))?;
+    let dir = match req.body.dir {
+        ruma::api::Direction::Forward => Direction::Forwards,
+        ruma::api::Direction::Backward => Direction::Backwards,
+    };
+    let ts = i64::try_from(u64::from(req.body.ts.0)).unwrap_or(i64::MAX);
+    let ev = services
+        .store
+        .event_at_timestamp(&req.body.room_id, ts, dir)
+        .await?
+        .ok_or_else(|| Error::not_found("No event found in that direction."))?;
+    Ok(
+        ruma::api::client::room::get_event_by_timestamp::v1::Response::new(
+            ev.pdu.event_id().to_owned(),
+            ev.pdu.origin_server_ts(),
+        ),
+    )
+}
+
+pub async fn room_summary(
+    services: AppState,
+    req: Ruma<ruma::api::client::room::get_summary::v1::Request>,
+) -> Result<ruma::api::client::room::get_summary::v1::Response> {
+    use ruma::api::client::room::get_summary::v1::Response;
+    let mut via = req.body.via.clone();
+    let room_id: OwnedRoomId = match <&ruma::RoomId>::try_from(req.body.room_id_or_alias.as_str()) {
+        Ok(id) => id.to_owned(),
+        Err(_) => {
+            let alias = <&ruma::RoomAliasId>::try_from(req.body.room_id_or_alias.as_str())
+                .map_err(|_| Error::invalid_param("Invalid room ID or alias."))?;
+            if alias.server_name() == services.server_name() {
+                services
+                    .store
+                    .get_alias(alias)
+                    .await?
+                    .ok_or_else(|| Error::not_found("Room alias not found."))?
+                    .room_id
+            } else {
+                let (room_id, servers) = services.federation().resolve_alias(alias).await?;
+                via.extend(servers);
+                room_id
+            }
+        }
+    };
+    let user = req.sender.as_ref().map(|s| s.user_id.clone());
+    let local = services.store.room_exists(&room_id).await?
+        && !services.store.current_state(&room_id).await?.is_empty();
+    let summary_json = if local {
+        let accessible = match &user {
+            Some(u) => services.room_accessible_to_user(&room_id, u).await?,
+            None => {
+                let c = services.room_summary_json(&room_id).await?;
+                c.get("join_rule").and_then(Value::as_str) == Some("public")
+                    || c.get("world_readable").and_then(Value::as_bool) == Some(true)
+            }
+        };
+        if !accessible {
+            return Err(Error::not_found("Room is not accessible."));
+        }
+        services.room_summary_json(&room_id).await?
+    } else {
+        if let Some(server) = room_id.server_name()
+            && !via.iter().any(|s| *s == server)
+        {
+            via.push(server.to_owned());
+        }
+        let resp = services
+            .federation()
+            .remote_hierarchy(&via, &room_id, false)
+            .await
+            .map_err(|_| Error::not_found("Room is not accessible."))?;
+        let mut room = resp
+            .get("room")
+            .cloned()
+            .ok_or_else(|| Error::not_found("Room is not accessible."))?;
+        if let Some(o) = room.as_object_mut() {
+            o.remove("children_state");
+        }
+        room
+    };
+    let summary: ruma::room::RoomSummary = serde_json::from_value(summary_json)
+        .map_err(|e| Error::internal(format!("room summary: {e}")))?;
+    let mut resp = Response::new(summary);
+    if let Some(u) = &user {
+        resp.membership = services
+            .store
+            .get_membership(&room_id, u)
+            .await?
+            .map(|m| m.membership);
+    }
+    Ok(resp)
+}

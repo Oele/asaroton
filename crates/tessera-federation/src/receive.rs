@@ -157,9 +157,22 @@ impl Federation {
             return Err(Error::Rejected("unknown room".into()));
         };
         let rules = room_version::rules(&room.room_version)?;
+        if !services.server_acl_allows(room_id, origin).await? {
+            return Err(Error::Rejected(
+                "origin is denied by the room's server ACL".into(),
+            ));
+        }
         let pdu = self.parse_and_verify(origin, raw, &rules).await?;
         if pdu.room_id() != room_id {
             return Err(Error::Rejected("event room_id does not match".into()));
+        }
+        if !services
+            .server_acl_allows(room_id, pdu.sender().server_name())
+            .await?
+        {
+            return Err(Error::Rejected(
+                "sender's server is denied by the room's server ACL".into(),
+            ));
         }
         // Only servers that are in the room may send us events for it; the sender's server must
         // be the origin unless the event is a join authorised by someone on our side.
@@ -1168,7 +1181,9 @@ impl Federation {
         let services: &Services = &self.services;
         match edu {
             Edu::Typing(t) => {
-                if t.user_id.server_name() != origin {
+                if t.user_id.server_name() != origin
+                    || !services.server_acl_allows(&t.room_id, origin).await?
+                {
                     return Ok(());
                 }
                 if services.is_joined(&t.room_id, &t.user_id).await? {
@@ -1184,6 +1199,9 @@ impl Federation {
             }
             Edu::Receipt(r) => {
                 for (room_id, map) in r.receipts {
+                    if !services.server_acl_allows(&room_id, origin).await? {
+                        continue;
+                    }
                     for (user_id, data) in map.read {
                         if user_id.server_name() != origin {
                             continue;

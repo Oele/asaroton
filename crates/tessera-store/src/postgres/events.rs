@@ -212,6 +212,32 @@ impl EventStore for PostgresStore {
         Ok(out)
     }
 
+    async fn event_at_timestamp(
+        &self,
+        room_id: &RoomId,
+        ts: i64,
+        direction: Direction,
+    ) -> Result<Option<StoredEvent>> {
+        let sql = match direction {
+            Direction::Forwards => format!(
+                "SELECT {EVENT_COLUMNS} FROM events e JOIN rooms r ON r.room_id = e.room_id
+                  WHERE e.room_id = $1 AND e.origin_server_ts >= $2 AND NOT e.rejected AND NOT e.outlier
+                  ORDER BY e.origin_server_ts ASC, e.stream_ordering ASC LIMIT 1"
+            ),
+            Direction::Backwards => format!(
+                "SELECT {EVENT_COLUMNS} FROM events e JOIN rooms r ON r.room_id = e.room_id
+                  WHERE e.room_id = $1 AND e.origin_server_ts <= $2 AND NOT e.rejected AND NOT e.outlier
+                  ORDER BY e.origin_server_ts DESC, e.stream_ordering DESC LIMIT 1"
+            ),
+        };
+        let row: Option<EventRow> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
+            .bind(room_id.as_str())
+            .bind(ts)
+            .fetch_optional(&self.pool)
+            .await?;
+        row.map(StoredEvent::try_from).transpose()
+    }
+
     async fn reserve_backfill_orderings(&self, n: usize) -> Result<Vec<StreamOrdering>> {
         let rows = sqlx::query("SELECT nextval('events_backfill_seq') FROM generate_series(1, $1)")
             .bind(i64::try_from(n).unwrap_or(0))

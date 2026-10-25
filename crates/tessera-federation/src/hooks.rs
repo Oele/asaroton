@@ -29,7 +29,20 @@ impl FederationHooks for Hooks {
             }
         };
         // A leave/kick must still reach the server of the user leaving.
-        let mut servers = servers_except_self(servers, fed.server_name());
+        let servers = servers_except_self(servers, fed.server_name());
+        // Servers denied by the room's ACL get nothing.
+        let mut allowed = Vec::with_capacity(servers.len());
+        for s in servers {
+            if fed
+                .services
+                .server_acl_allows(pdu.room_id(), &s)
+                .await
+                .unwrap_or(true)
+            {
+                allowed.push(s);
+            }
+        }
+        let mut servers = allowed;
         if pdu.event_type() == &ruma::events::TimelineEventType::RoomMember
             && let Some(target) = pdu.state_key().and_then(|k| OwnedUserId::try_from(k).ok())
             && target.server_name() != fed.server_name()

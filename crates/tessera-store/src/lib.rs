@@ -175,6 +175,14 @@ pub trait EventStore: Send + Sync {
     /// Persist several events in one transaction, in order.
     async fn persist_events(&self, events: Vec<PersistEvent>) -> Result<Vec<PersistedEvent>>;
 
+    /// The event closest to `ts` in the given direction (forwards: the earliest event at or
+    /// after `ts`; backwards: the latest at or before), ties broken by stream order.
+    async fn event_at_timestamp(
+        &self,
+        room_id: &RoomId,
+        ts: i64,
+        direction: Direction,
+    ) -> Result<Option<StoredEvent>>;
     /// Reserve `n` stream orderings from the backfill sequence (descending), so a batch of
     /// backfilled events can be stored oldest-first yet ordered correctly.
     async fn reserve_backfill_orderings(&self, n: usize) -> Result<Vec<StreamOrdering>>;

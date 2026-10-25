@@ -427,3 +427,91 @@ impl Services {
         }))
     }
 }
+
+/// Matrix server ACL glob: `*` matches any run of characters, `?` one.
+fn acl_glob(pattern: &str, server: &str) -> bool {
+    fn rec(p: &[char], v: &[char]) -> bool {
+        match (p.first(), v.first()) {
+            (None, None) => true,
+            (Some('*'), _) => rec(&p[1..], v) || (!v.is_empty() && rec(p, &v[1..])),
+            (Some('?'), Some(_)) => rec(&p[1..], &v[1..]),
+            (Some(a), Some(b)) if a.eq_ignore_ascii_case(b) => rec(&p[1..], &v[1..]),
+            _ => false,
+        }
+    }
+    let p: Vec<char> = pattern.chars().collect();
+    let v: Vec<char> = server.chars().collect();
+    rec(&p, &v)
+}
+
+impl Services {
+    /// Whether the room's `m.room.server_acl` lets `server` participate.
+    pub async fn server_acl_allows(&self, room_id: &RoomId, server: &ServerName) -> Result<bool> {
+        let Some(acl) = self
+            .state_content(room_id, &StateEventType::RoomServerAcl, "")
+            .await?
+        else {
+            return Ok(true);
+        };
+        Ok(acl_permits(&acl, server))
+    }
+}
+
+/// Evaluate an ACL content object for a server name.
+pub fn acl_permits(acl: &Value, server: &ServerName) -> bool {
+    let host = server.host();
+    let is_ip_literal = host.parse::<std::net::IpAddr>().is_ok()
+        || host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<std::net::IpAddr>()
+            .is_ok();
+    if is_ip_literal
+        && !acl
+            .get("allow_ip_literals")
+            .and_then(Value::as_bool)
+            .unwrap_or(true)
+    {
+        return false;
+    }
+    let list = |key: &str| -> Vec<String> {
+        acl.get(key)
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    if list("deny").iter().any(|p| acl_glob(p, host)) {
+        return false;
+    }
+    list("allow").iter().any(|p| acl_glob(p, host))
+}
+
+#[cfg(test)]
+mod acl_tests {
+    use super::*;
+
+    #[test]
+    fn globs_and_lists() {
+        let acl = json!({ "allow": ["*"], "deny": ["evil.example", "*.bad.example"], "allow_ip_literals": false });
+        let ok = |s: &str| acl_permits(&acl, <&ServerName>::try_from(s).unwrap());
+        assert!(ok("matrix.org"));
+        assert!(!ok("evil.example"));
+        assert!(!ok("sub.bad.example"));
+        assert!(!ok("1.2.3.4"));
+        assert!(!ok("1.2.3.4:8448"));
+        let strict = json!({ "allow": ["good.example"] });
+        assert!(acl_permits(
+            &strict,
+            <&ServerName>::try_from("good.example").unwrap()
+        ));
+        assert!(!acl_permits(
+            &strict,
+            <&ServerName>::try_from("other.example").unwrap()
+        ));
+    }
+}

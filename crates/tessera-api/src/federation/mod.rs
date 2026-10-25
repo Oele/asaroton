@@ -60,6 +60,10 @@ pub fn routes(router: Router<AppState>) -> Router<AppState> {
     let r = route::<get_keys::v1::Request, _, _>(r, user_keys_query);
     let r = route::<claim_keys::v1::Request, _, _>(r, user_keys_claim);
     let r = route::<get_public_rooms::v1::Request, _, _>(r, public_rooms);
+    let r = route::<ruma::api::federation::event::get_event_by_timestamp::v1::Request, _, _>(
+        r,
+        timestamp_to_event,
+    );
     let r = r.route(
         "/_matrix/federation/v1/hierarchy/{room_id}",
         axum::routing::get(hierarchy_handler),
@@ -883,4 +887,36 @@ async fn hierarchy_handler(
         Ok(resp) => resp,
         Err(e) => e.into_response(),
     }
+}
+
+pub async fn timestamp_to_event(
+    app: AppState,
+    req: Ruma<ruma::api::federation::event::get_event_by_timestamp::v1::Request>,
+) -> Result<ruma::api::federation::event::get_event_by_timestamp::v1::Response> {
+    let origin = req.origin()?.clone();
+    let in_room = app
+        .store
+        .members(&req.body.room_id, Some("join"))
+        .await?
+        .iter()
+        .any(|m| m.user_id.server_name() == origin);
+    if !in_room {
+        return Err(Error::forbidden("Your server is not in this room."));
+    }
+    let dir = match req.body.dir {
+        ruma::api::Direction::Forward => tessera_store::Direction::Forwards,
+        ruma::api::Direction::Backward => tessera_store::Direction::Backwards,
+    };
+    let ts = i64::try_from(u64::from(req.body.ts.0)).unwrap_or(i64::MAX);
+    let ev = app
+        .store
+        .event_at_timestamp(&req.body.room_id, ts, dir)
+        .await?
+        .ok_or_else(|| Error::not_found("No event found in that direction."))?;
+    Ok(
+        ruma::api::federation::event::get_event_by_timestamp::v1::Response::new(
+            ev.pdu.event_id().to_owned(),
+            ev.pdu.origin_server_ts(),
+        ),
+    )
 }
