@@ -25,9 +25,12 @@ most recent runs noted in the commit history.
 | Auth: MSC3861 delegation | done: `[mas]` config delegates token validation to Matrix Authentication Service (introspection with the shared secret, 2-minute cache, device scope handling), the `/_synapse/mas/*` management API MAS provisions users and devices through, `/auth_metadata` and MSC2965 well-known discovery, login/registration/password endpoints disabled, cross-signing resets gated on MAS approval. Tested against MAS 1.27 with compatibility tokens |
 | Operations | rate limiting (per address and per token buckets, `M_LIMIT_EXCEEDED`), message retention (`m.room.retention` and a server default), fuzz targets for canonical JSON, PDU parsing and redaction (`scripts/fuzz.sh`), load-test swarm (`scripts/loadtest.py`), release Dockerfile and compose file (`docs/deployment.md`) |
 
-Known gaps (Complement): `/members?at=` with a token before the room's first event; UIA accepts
-an `auth` dict without a session like Synapse does (TestRegistration's strictness subtest, skipped
-for Synapse too); ephemeral events to appservices. Experimental (non-spec) Complement packages
+Known deviations (Complement): UIA accepts an `auth` dict without a session like Synapse does
+(TestRegistration's strictness subtest, skipped for Synapse too); TestIsDirectFlagFederation sends
+a room-version-12 invite without `m.room.create` in `invite_room_state`, which v1.16 (MSC4311)
+requires receivers to reject (it passes on servers that still default to room version 11);
+TestDeviceListsUpdateOverFederationOnRoomJoin is skipped for Synapse as well; ephemeral events to
+appservices are not sent. Experimental (non-spec) Complement packages
 are not targeted: faster joins (MSC3902), delayed events (MSC4140), thread subscriptions
 (MSC4306), invite filtering (MSC4155), owned state (MSC3757), account-data deletion (MSC3391),
 relation filters (MSC3874), MSC2836, MSC3389, MSC3930, MSC3967, MSC3890, MSC4242.
