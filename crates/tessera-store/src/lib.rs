@@ -111,6 +111,20 @@ pub trait RoomStore: Send + Sync {
     /// Servers with at least one joined user in the room.
     async fn servers_in_room(&self, room_id: &RoomId) -> Result<Vec<ruma::OwnedServerName>>;
     async fn joined_member_count(&self, room_id: &RoomId) -> Result<i64>;
+    /// All memberships of a user (any state), for sync.
+    async fn memberships_for_user(&self, user_id: &UserId) -> Result<Vec<Membership>>;
+    /// Memberships of a user whose current membership event is newer than `since`.
+    async fn memberships_changed_since(&self, user_id: &UserId, since: StreamOrdering) -> Result<Vec<Membership>>;
+    async fn set_forgotten(&self, room_id: &RoomId, user_id: &UserId, forgotten: bool) -> Result<()>;
+
+    /// Transaction-ID de-duplication for client sends.
+    async fn get_txn_event(&self, user_id: &UserId, device_id: Option<&DeviceId>, txn_id: &str) -> Result<Option<OwnedEventId>>;
+    async fn set_txn_event(&self, user_id: &UserId, device_id: Option<&DeviceId>, txn_id: &str, event_id: &EventId) -> Result<()>;
+
+    /// Receipts.
+    async fn set_receipt(&self, receipt: Receipt) -> Result<i64>;
+    async fn receipts_for_room(&self, room_id: &RoomId, since: i64) -> Result<Vec<Receipt>>;
+    async fn max_receipt_stream_id(&self) -> Result<i64>;
 }
 
 /// Events and state.

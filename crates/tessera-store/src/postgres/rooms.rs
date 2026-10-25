@@ -45,6 +45,7 @@ pub(crate) struct MembershipRow {
     display_name: Option<String>,
     avatar_url: Option<String>,
     stream_ordering: i64,
+    forgotten: bool,
 }
 
 impl TryFrom<MembershipRow> for Membership {
@@ -60,13 +61,14 @@ impl TryFrom<MembershipRow> for Membership {
             display_name: r.display_name,
             avatar_url: r.avatar_url,
             stream_ordering: r.stream_ordering,
+            forgotten: r.forgotten,
         })
     }
 }
 
 const ROOM_COLUMNS: &str = "room_id, room_version, creator, is_public, created_ts";
 pub(crate) const MEMBERSHIP_COLUMNS: &str =
-    "room_id, user_id, membership, event_id, sender, display_name, avatar_url, stream_ordering";
+    "room_id, user_id, membership, event_id, sender, display_name, avatar_url, stream_ordering, forgotten";
 
 #[async_trait]
 impl RoomStore for PostgresStore {
@@ -225,6 +227,113 @@ impl RoomStore for PostgresStore {
             }
         }
         Ok(out.into_iter().collect())
+    }
+
+    async fn memberships_for_user(&self, user_id: &UserId) -> Result<Vec<Membership>> {
+        let rows: Vec<MembershipRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT {MEMBERSHIP_COLUMNS} FROM room_memberships WHERE user_id = $1 ORDER BY stream_ordering"
+        )))
+        .bind(user_id.as_str())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(Membership::try_from).collect()
+    }
+
+    async fn memberships_changed_since(&self, user_id: &UserId, since: i64) -> Result<Vec<Membership>> {
+        let rows: Vec<MembershipRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT {MEMBERSHIP_COLUMNS} FROM room_memberships WHERE user_id = $1 AND stream_ordering > $2 ORDER BY stream_ordering"
+        )))
+        .bind(user_id.as_str())
+        .bind(since)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(Membership::try_from).collect()
+    }
+
+    async fn set_forgotten(&self, room_id: &RoomId, user_id: &UserId, forgotten: bool) -> Result<()> {
+        sqlx::query("UPDATE room_memberships SET forgotten = $3 WHERE room_id = $1 AND user_id = $2")
+            .bind(room_id.as_str())
+            .bind(user_id.as_str())
+            .bind(forgotten)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn get_txn_event(&self, user_id: &UserId, device_id: Option<&ruma::DeviceId>, txn_id: &str) -> Result<Option<OwnedEventId>> {
+        let row = sqlx::query("SELECT event_id FROM event_txn_ids WHERE user_id = $1 AND device_id = $2 AND txn_id = $3")
+            .bind(user_id.as_str())
+            .bind(device_id.map_or("", ruma::DeviceId::as_str))
+            .bind(txn_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        row.map(|r| OwnedEventId::try_from(r.get::<String, _>(0)).map_err(|e| Error::Corrupt(e.to_string())))
+            .transpose()
+    }
+
+    async fn set_txn_event(&self, user_id: &UserId, device_id: Option<&ruma::DeviceId>, txn_id: &str, event_id: &ruma::EventId) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO event_txn_ids (user_id, device_id, txn_id, event_id, created_ts) VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(user_id.as_str())
+        .bind(device_id.map_or("", ruma::DeviceId::as_str))
+        .bind(txn_id)
+        .bind(event_id.as_str())
+        .bind(now_ts())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn set_receipt(&self, receipt: crate::Receipt) -> Result<i64> {
+        let row = sqlx::query(
+            "INSERT INTO receipts (room_id, user_id, receipt_type, thread_id, event_id, data, stream_id)
+             VALUES ($1, $2, $3, $4, $5, $6, nextval('receipts_seq'))
+             ON CONFLICT (room_id, user_id, receipt_type, thread_id) DO UPDATE SET event_id = EXCLUDED.event_id,
+                data = EXCLUDED.data, stream_id = EXCLUDED.stream_id
+             RETURNING stream_id",
+        )
+        .bind(receipt.room_id.as_str())
+        .bind(receipt.user_id.as_str())
+        .bind(&receipt.receipt_type)
+        .bind(receipt.thread_id.as_deref().unwrap_or(""))
+        .bind(receipt.event_id.as_str())
+        .bind(&receipt.data)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.get::<i64, _>(0))
+    }
+
+    async fn receipts_for_room(&self, room_id: &RoomId, since: i64) -> Result<Vec<crate::Receipt>> {
+        let rows = sqlx::query(
+            "SELECT room_id, user_id, receipt_type, thread_id, event_id, data, stream_id FROM receipts
+             WHERE room_id = $1 AND stream_id > $2 ORDER BY stream_id",
+        )
+        .bind(room_id.as_str())
+        .bind(since)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(|r| {
+                let corrupt = |e: ruma::IdParseError| Error::Corrupt(e.to_string());
+                let thread: String = r.get("thread_id");
+                Ok(crate::Receipt {
+                    room_id: OwnedRoomId::try_from(r.get::<String, _>("room_id")).map_err(corrupt)?,
+                    user_id: OwnedUserId::try_from(r.get::<String, _>("user_id")).map_err(corrupt)?,
+                    receipt_type: r.get("receipt_type"),
+                    thread_id: if thread.is_empty() { None } else { Some(thread) },
+                    event_id: OwnedEventId::try_from(r.get::<String, _>("event_id")).map_err(corrupt)?,
+                    data: r.get("data"),
+                    stream_id: r.get("stream_id"),
+                })
+            })
+            .collect()
+    }
+
+    async fn max_receipt_stream_id(&self) -> Result<i64> {
+        let row = sqlx::query("SELECT COALESCE(MAX(stream_id), 0) FROM receipts").fetch_one(&self.pool).await?;
+        Ok(row.get::<i64, _>(0))
     }
 
     async fn joined_member_count(&self, room_id: &RoomId) -> Result<i64> {

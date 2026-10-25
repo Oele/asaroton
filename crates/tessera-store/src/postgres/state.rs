@@ -107,7 +107,7 @@ pub(crate) async fn apply_current_state_delta(
                          ON CONFLICT (room_id, user_id) DO UPDATE SET membership = EXCLUDED.membership,
                             event_id = EXCLUDED.event_id, sender = EXCLUDED.sender,
                             display_name = EXCLUDED.display_name, avatar_url = EXCLUDED.avatar_url,
-                            stream_ordering = EXCLUDED.stream_ordering",
+                            stream_ordering = EXCLUDED.stream_ordering, forgotten = FALSE",
                     )
                     .bind(room_id.as_str())
                     .bind(state_key)

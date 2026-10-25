@@ -194,6 +194,21 @@ pub struct Membership {
     pub display_name: Option<String>,
     pub avatar_url: Option<String>,
     pub stream_ordering: StreamOrdering,
+    /// The user asked to forget this room (hidden from sync until they rejoin).
+    pub forgotten: bool,
+}
+
+/// A read receipt.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Receipt {
+    pub room_id: OwnedRoomId,
+    pub user_id: OwnedUserId,
+    pub receipt_type: String,
+    /// `None` = unthreaded.
+    pub thread_id: Option<String>,
+    pub event_id: OwnedEventId,
+    pub data: serde_json::Value,
+    pub stream_id: i64,
 }
 
 /// Direction for paginating a timeline.
