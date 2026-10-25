@@ -227,7 +227,7 @@ impl Services {
             )
             .await?;
         }
-        if !initial_has("m.room.guest_access") {
+        if guest == "can_join" && !initial_has("m.room.guest_access") {
             self.send_state_locked(
                 &mut ctx,
                 &room_id,

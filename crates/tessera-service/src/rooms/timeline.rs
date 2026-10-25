@@ -305,8 +305,15 @@ impl Services {
                 break;
             }
         }
+        let truncated = events.len() > limit;
         events.truncate(limit);
-        let end = if exhausted { None } else { Some(cursor) };
+        let end = if truncated {
+            events.last().map(|e| StreamToken(e.stream_ordering))
+        } else if exhausted {
+            None
+        } else {
+            Some(cursor)
+        };
         Ok(TimelinePage {
             events,
             start: from,
