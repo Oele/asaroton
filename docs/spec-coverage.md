@@ -21,10 +21,10 @@ most recent runs noted in the commit history.
 | Server-Server: backfill / missing events | done both directions, with history-visibility redaction |
 | Server-Server: media | done |
 | Appservice API | done: registrations (YAML), namespaces, `as_token` auth with `user_id`, transactions, user/alias queries, ping, third-party protocol/location/user lookups |
-| Admin API | Synapse-compatible registration and server notices only |
+| Admin API | Synapse-compatible subset: shared-secret registration, server notices, `server_version`, users (list, get, create/update, deactivate, reset password, admin flag, devices, joined rooms), rooms (list, details, members, state, delete, force join), history purge |
 | Auth: MSC3861 delegation | done: `[mas]` config delegates token validation to Matrix Authentication Service (introspection with the shared secret, 2-minute cache, device scope handling), the `/_synapse/mas/*` management API MAS provisions users and devices through, `/auth_metadata` and MSC2965 well-known discovery, login/registration/password endpoints disabled, cross-signing resets gated on MAS approval. Tested against MAS 1.27 with compatibility tokens |
+| Operations | rate limiting (per address and per token buckets, `M_LIMIT_EXCEEDED`), message retention (`m.room.retention` and a server default), fuzz targets for canonical JSON, PDU parsing and redaction (`scripts/fuzz.sh`), load-test swarm (`scripts/loadtest.py`), release Dockerfile and compose file (`docs/deployment.md`) |
 
-Known gaps (Complement): `/members?at=` with a token before the room's first event, initial
-`/sync` timelines are stream- rather than topologically ordered (TestSyncOmitsStateChangeOnFilteredEvents),
+Known gaps (Complement): `/members?at=` with a token before the room's first event,
 state-resolution ordering of a v12 creator versus a >100 admin (ruma state-res), ephemeral events
 to appservices.
