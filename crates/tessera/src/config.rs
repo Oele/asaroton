@@ -98,7 +98,7 @@ pub struct FederationConfig {
     pub insecure_http_servers: Vec<OwnedServerName>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RegistrationConfig {
     /// Allow open registration.
@@ -113,17 +113,6 @@ pub struct RegistrationConfig {
     /// Allow guest accounts.
     #[serde(default)]
     pub allow_guests: bool,
-}
-
-impl Default for RegistrationConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            shared_secret: None,
-            require_token: false,
-            allow_guests: false,
-        }
-    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
