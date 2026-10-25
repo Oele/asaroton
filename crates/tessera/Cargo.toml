@@ -30,8 +30,6 @@ toml.workspace = true
 clap.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
-metrics.workspace = true
-metrics-exporter-prometheus.workspace = true
 rustls.workspace = true
 rustls-pemfile.workspace = true
 

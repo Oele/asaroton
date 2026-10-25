@@ -24,3 +24,6 @@ tokio.workspace = true
 futures.workspace = true
 dashmap.workspace = true
 parking_lot.workspace = true
+base64.workspace = true
+rand.workspace = true
+http.workspace = true

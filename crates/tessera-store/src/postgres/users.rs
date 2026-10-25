@@ -373,6 +373,19 @@ impl UserStore for PostgresStore {
         Ok(())
     }
 
+    async fn delete_access_tokens_for_device(
+        &self,
+        user_id: &UserId,
+        device_id: &DeviceId,
+    ) -> Result<()> {
+        sqlx::query("DELETE FROM access_tokens WHERE user_id = $1 AND device_id = $2")
+            .bind(user_id.as_str())
+            .bind(device_id.as_str())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     async fn create_refresh_token(&self, token: RefreshToken) -> Result<()> {
         sqlx::query(
             "INSERT INTO refresh_tokens (token, user_id, device_id, created_ts, expires_ts, next_token)

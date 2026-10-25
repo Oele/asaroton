@@ -75,6 +75,11 @@ pub trait UserStore: Send + Sync {
         user_id: &UserId,
         except_device: Option<&DeviceId>,
     ) -> Result<()>;
+    async fn delete_access_tokens_for_device(
+        &self,
+        user_id: &UserId,
+        device_id: &DeviceId,
+    ) -> Result<()>;
     async fn create_refresh_token(&self, token: RefreshToken) -> Result<()>;
     async fn get_refresh_token(&self, token: &str) -> Result<Option<RefreshToken>>;
     async fn set_refresh_token_next(&self, token: &str, next: &str) -> Result<()>;
