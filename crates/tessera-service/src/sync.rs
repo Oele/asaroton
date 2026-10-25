@@ -606,9 +606,16 @@ impl Services {
                 }
                 None => self.store.current_state_pdus(room_id).await?,
             };
-            if let Some(start) = timeline_start {
-                s.retain(|e| e.stream_ordering < start);
-            }
+            // Everything the timeline already carries is left out of the state block; the
+            // rest is current state as of the timeline's end (state events may arrive with a
+            // later stream position than events they precede topologically).
+            let in_timeline: HashSet<OwnedEventId> = room
+                .timeline
+                .iter()
+                .map(|e| e.pdu.event_id().to_owned())
+                .collect();
+            let _ = timeline_start;
+            s.retain(|e| !in_timeline.contains(e.pdu.event_id()));
             s
         } else if limited && let (Some(s), Some(start)) = (since, timeline_start) {
             self.state_delta(room_id, s.events, start).await?

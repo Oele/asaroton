@@ -2,7 +2,7 @@
 
 use axum::{Json, Router, extract::State, response::IntoResponse};
 use ruma::{
-    OwnedEventId, RoomVersionId, UInt,
+    CanonicalJsonObject, OwnedEventId, RoomVersionId, UInt,
     api::federation::{
         authenticated_media as fed_media,
         authorization::get_event_authorization,
@@ -43,6 +43,16 @@ pub fn routes(router: Router<AppState>) -> Router<AppState> {
     let r = route::<send_transaction_message::v1::Request, _, _>(r, send_transaction);
     let r = route::<prepare_join_event::v1::Request, _, _>(r, make_join);
     let r = route::<create_join_event::v2::Request, _, _>(r, send_join_v2);
+    // v1 send_join/send_leave: same request shape, response wrapped in `[200, body]`.
+    let r = r
+        .route(
+            "/_matrix/federation/v1/send_join/{room_id}/{event_id}",
+            axum::routing::put(send_join_v1_handler),
+        )
+        .route(
+            "/_matrix/federation/v1/send_leave/{room_id}/{event_id}",
+            axum::routing::put(send_leave_v1_handler),
+        );
     let r = route::<prepare_leave_event::v1::Request, _, _>(r, make_leave);
     let r = route::<create_leave_event::v2::Request, _, _>(r, send_leave_v2);
     let r = route::<prepare_knock_event::v1::Request, _, _>(r, make_knock);
@@ -320,6 +330,28 @@ pub async fn make_join(
     Ok(resp)
 }
 
+/// The event sent to `send_join`/`send_leave`/`send_knock` must be a membership event of the
+/// given kind for its own sender; anything else is a client error.
+fn check_membership_shape(raw: &CanonicalJsonObject, membership: &str) -> Result<()> {
+    let get = |k: &str| raw.get(k).and_then(|v| v.as_str()).map(str::to_owned);
+    let actual = raw
+        .get("content")
+        .and_then(|c| c.as_object())
+        .and_then(|c| c.get("membership"))
+        .and_then(|m| m.as_str())
+        .map(str::to_owned);
+    if get("type").as_deref() != Some("m.room.member")
+        || actual.as_deref() != Some(membership)
+        || get("state_key").is_none()
+        || get("state_key") != get("sender")
+    {
+        return Err(Error::bad_json(format!(
+            "Not a {membership} membership event."
+        )));
+    }
+    Ok(())
+}
+
 pub async fn send_join_v2(
     app: AppState,
     req: Ruma<create_join_event::v2::Request>,
@@ -327,11 +359,43 @@ pub async fn send_join_v2(
     let origin = req.origin()?.clone();
     let fed = app.fed()?;
     let raw = tessera_core::canonical::from_str(req.body.pdu.get())?;
+    check_membership_shape(&raw, "join")?;
     let room_state = fed
         .send_join(&origin, &req.body.room_id, raw)
         .await
         .map_err(fed_err)?;
     Ok(create_join_event::v2::Response::new(room_state))
+}
+
+async fn send_join_v1_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    req: Ruma<create_join_event::v2::Request>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    match send_join_v2(state, req).await {
+        Ok(resp) => {
+            let body = serde_json::to_value(&resp.room_state).unwrap_or(Value::Null);
+            let mut r = axum::Json(serde_json::json!([200, body])).into_response();
+            crate::extract::add_cors(r.headers_mut());
+            r
+        }
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn send_leave_v1_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    req: Ruma<create_leave_event::v2::Request>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    match send_leave_v2(state, req).await {
+        Ok(_) => {
+            let mut r = axum::Json(serde_json::json!([200, {}])).into_response();
+            crate::extract::add_cors(r.headers_mut());
+            r
+        }
+        Err(e) => e.into_response(),
+    }
 }
 
 pub async fn make_leave(
@@ -357,6 +421,7 @@ pub async fn send_leave_v2(
     let origin = req.origin()?.clone();
     let fed = app.fed()?;
     let raw = tessera_core::canonical::from_str(req.body.pdu.get())?;
+    check_membership_shape(&raw, "leave")?;
     fed.send_leave(&origin, &req.body.room_id, raw)
         .await
         .map_err(fed_err)?;
@@ -386,21 +451,7 @@ pub async fn send_knock(
     let origin = req.origin()?.clone();
     let fed = app.fed()?;
     let raw = tessera_core::canonical::from_str(req.body.pdu.get())?;
-    // Shape checks are a client error, not a rejection.
-    let get = |k: &str| raw.get(k).and_then(|v| v.as_str()).map(str::to_owned);
-    let membership = raw
-        .get("content")
-        .and_then(|c| c.as_object())
-        .and_then(|c| c.get("membership"))
-        .and_then(|m| m.as_str())
-        .map(str::to_owned);
-    if get("type").as_deref() != Some("m.room.member")
-        || membership.as_deref() != Some("knock")
-        || get("state_key").is_none()
-        || get("state_key") != get("sender")
-    {
-        return Err(Error::bad_json("Not a knock membership event."));
-    }
+    check_membership_shape(&raw, "knock")?;
     let stripped = fed
         .send_knock(&origin, &req.body.room_id, raw)
         .await

@@ -188,17 +188,15 @@ pub async fn register(
     } else {
         vec![AuthFlow::new(vec![AuthType::Dummy])]
     };
-    // A stage submitted without its session is answered with a fresh challenge: registration
-    // flows are tracked per session, unlike re-authentication of an existing user.
-    let auth = body
-        .auth
-        .as_ref()
-        .filter(|a| a.session().is_some() || a.auth_type().is_none());
     let outcome = services
         .uia
-        .step(flows, auth, None, None, async |stage, data, user| {
-            check_stage(&services, stage, data, user).await
-        })
+        .step(
+            flows,
+            body.auth.as_ref(),
+            None,
+            None,
+            async |stage, data, user| check_stage(&services, stage, data, user).await,
+        )
         .await;
     match outcome {
         UiaOutcome::Complete { .. } => {}

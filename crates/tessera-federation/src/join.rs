@@ -184,10 +184,20 @@ impl Federation {
         }
 
         let _guard = services.lock_room(room_id).await;
+        let join_event_id = join.event_id().to_owned();
         self.persist_joined_room(room_id, &version, &rules, auth_chain, state_events, join)
             .await?;
-        let servers = services.remote_servers_in_room(room_id).await?;
-        let _ = services.send_device_lists_to(user_id, servers).await;
+        // We tell the other servers about our join ourselves (the resident server does not
+        // forward events from other servers).
+        let servers: Vec<OwnedServerName> = services
+            .remote_servers_in_room(room_id)
+            .await?
+            .into_iter()
+            .filter(|s| s != server)
+            .collect();
+        if !servers.is_empty() {
+            self.self_arc().queue_pdu(servers, &join_event_id).await;
+        }
         services.after_user_joined(user_id, room_id).await;
         Ok(())
     }
@@ -376,12 +386,31 @@ impl Federation {
                         .notify(tessera_service::Notification::User {
                             user_id: user_id.to_owned(),
                         });
+                    self.fan_out_own_event(room_id, leave.event_id(), server)
+                        .await;
                     return Ok(());
                 }
                 Err(e) => last_err = e,
             }
         }
         Err(last_err)
+    }
+
+    /// After a membership event of ours was accepted by a resident server, tell the other
+    /// servers in the room about it (resident servers do not forward it for us).
+    async fn fan_out_own_event(
+        &self,
+        room_id: &RoomId,
+        event_id: &ruma::EventId,
+        resident: &ServerName,
+    ) {
+        let Ok(servers) = self.services.remote_servers_in_room(room_id).await else {
+            return;
+        };
+        let servers: Vec<OwnedServerName> = servers.into_iter().filter(|s| s != resident).collect();
+        if !servers.is_empty() {
+            self.self_arc().queue_pdu(servers, event_id).await;
+        }
     }
 
     // ------------------------------------------------------------------ knocking
@@ -479,6 +508,8 @@ impl Federation {
                         .notify(tessera_service::Notification::User {
                             user_id: user_id.to_owned(),
                         });
+                    self.fan_out_own_event(room_id, knock.event_id(), server)
+                        .await;
                     return Ok(());
                 }
                 Err(e) => last_err = e,
@@ -593,7 +624,6 @@ impl Federation {
         {
             return Err(Error::Rejected(reason));
         }
-        self.fan_out_accepted(room_id, &pdu, origin).await;
         services
             .stripped_state(room_id, None)
             .await
@@ -763,7 +793,6 @@ impl Federation {
         {
             return Err(Error::Rejected(reason));
         }
-        self.fan_out_accepted(room_id, &pdu, origin).await;
 
         // Respond with the state and auth chain *before* the join (its state group's parent).
         let state_before = match services.store.state_group_before(pdu.event_id()).await? {
@@ -868,7 +897,6 @@ impl Federation {
         {
             return Err(Error::Rejected(reason));
         }
-        self.fan_out_accepted(room_id, &pdu, origin).await;
         Ok(())
     }
 
@@ -1049,19 +1077,5 @@ impl PduFederationJson for Pdu {
             );
         }
         obj
-    }
-}
-
-impl Federation {
-    /// As the resident server for a join/leave sent to us, forward the accepted event to the
-    /// other servers in the room (the sender cannot, since it is not a member yet / any more).
-    async fn fan_out_accepted(&self, room_id: &RoomId, pdu: &Pdu, origin: &ServerName) {
-        let Ok(servers) = self.services.remote_servers_in_room(room_id).await else {
-            return;
-        };
-        let servers: Vec<OwnedServerName> = servers.into_iter().filter(|s| *s != origin).collect();
-        if !servers.is_empty() {
-            self.self_arc().queue_pdu(servers, pdu.event_id()).await;
-        }
     }
 }

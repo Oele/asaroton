@@ -30,14 +30,16 @@ impl FederationHooks for Hooks {
         };
         // A leave/kick must still reach the server of the user leaving.
         let servers = servers_except_self(servers, fed.server_name());
-        // Servers denied by the room's ACL get nothing.
+        // Servers denied by the room's ACL get nothing, except the ACL change itself.
+        let is_acl_event = pdu.event_type() == &ruma::events::TimelineEventType::RoomServerAcl;
         let mut allowed = Vec::with_capacity(servers.len());
         for s in servers {
-            if fed
-                .services
-                .server_acl_allows(pdu.room_id(), &s)
-                .await
-                .unwrap_or(true)
+            if is_acl_event
+                || fed
+                    .services
+                    .server_acl_allows(pdu.room_id(), &s)
+                    .await
+                    .unwrap_or(true)
             {
                 allowed.push(s);
             }
@@ -52,22 +54,6 @@ impl FederationHooks for Hooks {
         }
         if !servers.is_empty() {
             fed.queue_pdu(servers.clone(), pdu.event_id()).await;
-        }
-        // A local user joining a federated room: the other servers need their device list.
-        if pdu.event_type() == &ruma::events::TimelineEventType::RoomMember
-            && let Some(target) = pdu.state_key().and_then(|k| OwnedUserId::try_from(k).ok())
-            && fed.services.is_local(&target)
-            && serde_json::from_str::<Value>(pdu.content().get())
-                .ok()
-                .and_then(|c| {
-                    c.get("membership")
-                        .and_then(|m| m.as_str())
-                        .map(str::to_owned)
-                })
-                .as_deref()
-                == Some("join")
-        {
-            let _ = fed.services.send_device_lists_to(&target, servers).await;
         }
     }
 
