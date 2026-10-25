@@ -253,8 +253,12 @@ impl Federation {
     ) -> Result<Pdu> {
         let pdu = Pdu::from_canonical(raw, rules)
             .map_err(|e| Error::Rejected(format!("malformed event: {e}")))?;
-        auth::check_format(&pdu, rules)
-            .map_err(|e| Error::Rejected(format!("invalid event: {e}")))?;
+        // Oversized fields are not a format error here: the event is accepted into the
+        // pipeline, which rejects it (and stores it as rejected) like any auth failure.
+        if auth::check_size_limits(&pdu).is_ok() {
+            auth::check_format(&pdu, rules)
+                .map_err(|e| Error::Rejected(format!("invalid event: {e}")))?;
+        }
         let servers = signing::required_signing_servers(pdu.raw(), rules)
             .map_err(|e| Error::Rejected(format!("cannot determine signing servers: {e}")))?;
         let min_valid = i64::try_from(u64::from(pdu.origin_server_ts().0)).unwrap_or(0);
@@ -480,6 +484,7 @@ impl Federation {
                 .await?
         };
 
+        let delta_applied = delta.is_some();
         let persisted = services
             .store
             .persist_event(PersistEvent {
@@ -522,6 +527,14 @@ impl Federation {
                         .await;
                 }
             }
+        }
+        if pdu.event_type() == &ruma::events::TimelineEventType::RoomMember
+            && pdu
+                .state_key()
+                .and_then(|k| ruma::OwnedUserId::try_from(k).ok())
+                .is_some_and(|u| services.is_local(&u))
+        {
+            tracing::info!(event_id = %pdu.event_id(), state_key = ?pdu.state_key(), soft_failed, delta = delta_applied, "membership event for local user stored");
         }
         if !soft_failed {
             services.notifier.notify(Notification::RoomEvent {

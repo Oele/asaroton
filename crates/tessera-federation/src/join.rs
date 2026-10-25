@@ -939,6 +939,7 @@ impl Federation {
         let _guard = services.lock_room(room_id).await;
         // Only let the invite drive current state if we are not already participating.
         let participating = self.we_are_in_room_pub(room_id).await?;
+        tracing::info!(%room_id, invitee = %invitee, participating, "federation invite received");
         services
             .store
             .persist_event(PersistEvent {
