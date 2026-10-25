@@ -1086,6 +1086,11 @@ impl Federation {
             }
             chains.push(set);
         }
+        // Room versions whose create event is not in auth chains still need it: it names the
+        // creators, who outrank everyone when events are ordered.
+        if let Ok(create_id) = tessera_core::pdu::create_event_id_for_room(room_id) {
+            all_ids.insert(create_id);
+        }
         let all: Vec<OwnedEventId> = all_ids.into_iter().collect();
         self.warm_cache(&all).await?;
         let room_id = room_id.to_owned();
