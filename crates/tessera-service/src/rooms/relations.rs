@@ -224,9 +224,30 @@ impl Services {
             }
             out.push(v);
         }
+        // `prev_content`: within an ascending slice of one room, the previous content of a
+        // state key is whatever the slice last set it to; only the first occurrence of each key
+        // needs the state lookup.
+        let ascending = events.len() > 1
+            && events
+                .windows(2)
+                .all(|w| w[0].stream_ordering >= 0 && w[0].stream_ordering < w[1].stream_ordering)
+            && events
+                .windows(2)
+                .all(|w| w[0].pdu.room_id() == w[1].pdu.room_id());
+        let mut last_seen: std::collections::HashMap<
+            (ruma::events::StateEventType, String),
+            (Value, ruma::OwnedUserId),
+        > = std::collections::HashMap::new();
         for (v, e) in out.iter_mut().zip(events) {
-            if let Some((ty, key)) = e.pdu.state_tuple()
-                && let Some((prev, sender)) = self.previous_state_content(e, &ty, key).await?
+            let Some((ty, key)) = e.pdu.state_tuple() else {
+                continue;
+            };
+            let slot = (ty.clone(), key.to_owned());
+            let prev = match last_seen.get(&slot).filter(|_| ascending) {
+                Some(p) => Some(p.clone()),
+                None => self.previous_state_content(e, &ty, key).await?,
+            };
+            if let Some((prev, sender)) = prev
                 && let Some(u) = v
                     .as_object_mut()
                     .and_then(|o| o.get_mut("unsigned"))
@@ -234,6 +255,9 @@ impl Services {
             {
                 u.insert("prev_content".into(), prev);
                 u.insert("prev_sender".into(), json!(sender));
+            }
+            if let Ok(content) = serde_json::from_str::<Value>(e.pdu.content().get()) {
+                last_seen.insert(slot, (content, e.pdu.sender().to_owned()));
             }
         }
         if let Some(user) = user {
