@@ -1,7 +1,9 @@
 //! Room upgrades: tombstone the old room and create a successor carrying its settings.
 
+use ruma::room_version_rules::RoomIdFormatVersion;
 use ruma::{OwnedRoomId, OwnedUserId, RoomId, RoomVersionId, UserId, events::StateEventType};
 use serde_json::{Value, json};
+use tessera_core::room_version;
 
 use super::{LocalEvent, create::CreateRoomRequest};
 use crate::{Error, Result, Services};
@@ -54,9 +56,13 @@ impl Services {
         let tombstone_id = tombstone.event_id().to_owned();
 
         // --- the successor --------------------------------------------------------------
-        let mut creation_content = json!({
-            "predecessor": { "room_id": old_room, "event_id": tombstone_id },
-        });
+        let new_rules =
+            room_version::rules(&new_version).map_err(|_| Error::unsupported_room_version())?;
+        let mut creation_content = if new_rules.room_id_format == RoomIdFormatVersion::V1 {
+            json!({ "predecessor": { "room_id": old_room, "event_id": tombstone_id } })
+        } else {
+            json!({ "predecessor": { "room_id": old_room } })
+        };
         if let Some(old_create) = self
             .state_content(old_room, &StateEventType::RoomCreate, "")
             .await?
@@ -80,6 +86,17 @@ impl Services {
         let old_pl = self
             .state_content(old_room, &StateEventType::RoomPowerLevels, "")
             .await?;
+        // Rooms with privileged creators must not list them in `users`.
+        let mut new_pl = old_pl.clone();
+        if new_rules.authorization.explicitly_privilege_room_creators
+            && let Some(pl) = new_pl.as_mut()
+            && let Some(Value::Object(users)) = pl.get_mut("users")
+        {
+            users.remove(user.as_str());
+            for c in &additional_creators {
+                users.remove(c.as_str());
+            }
+        }
         let new_room = self
             .create_room(CreateRoomRequest {
                 creator: user.to_owned(),
@@ -92,7 +109,7 @@ impl Services {
                 invite: Vec::new(),
                 is_direct: false,
                 creation_content: Some(creation_content),
-                power_level_content_override: old_pl.clone(),
+                power_level_content_override: new_pl,
                 initial_state,
             })
             .await?;

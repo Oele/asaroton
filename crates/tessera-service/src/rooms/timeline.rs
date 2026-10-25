@@ -85,6 +85,9 @@ impl Services {
         content: Value,
     ) -> Result<OwnedEventId> {
         self.require_joined(room_id, sender).await?;
+        if event_type == "m.room.create" {
+            return Err(Error::bad_json("The create event cannot be replaced."));
+        }
         // Membership changes via /state go through the membership logic so profile fields
         // and invite handling stay consistent.
         if event_type == "m.room.member" {

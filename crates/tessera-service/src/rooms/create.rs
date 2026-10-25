@@ -72,6 +72,43 @@ impl Services {
         if !rules.authorization.use_room_create_sender {
             create_content["creator"] = json!(creator);
         }
+        if rules.authorization.explicitly_privilege_room_creators {
+            // Additional creators: whatever the client listed, plus everyone invited at
+            // creation (they are trusted like the creator).
+            let mut extra: Vec<OwnedUserId> = match create_content.get("additional_creators") {
+                None => Vec::new(),
+                Some(Value::Array(items)) => {
+                    let mut out = Vec::new();
+                    for i in items {
+                        let id = i
+                            .as_str()
+                            .and_then(|s| OwnedUserId::try_from(s).ok())
+                            .ok_or_else(|| {
+                                Error::bad_json("additional_creators must be valid user IDs.")
+                            })?;
+                        out.push(id);
+                    }
+                    out
+                }
+                Some(_) => return Err(Error::bad_json("additional_creators must be an array.")),
+            };
+            for u in &req.invite {
+                if *u != creator && !extra.contains(u) {
+                    extra.push(u.clone());
+                }
+            }
+            if extra.is_empty() {
+                create_content
+                    .as_object_mut()
+                    .map(|o| o.remove("additional_creators"));
+            } else {
+                create_content["additional_creators"] = json!(extra);
+            }
+        } else if create_content.get("additional_creators").is_some() {
+            return Err(Error::bad_json(
+                "additional_creators is only valid in room versions with privileged creators.",
+            ));
+        }
         if version != RoomVersionId::V1 && create_content.get("room_version").is_none() {
             create_content["room_version"] = json!(version.as_str());
         }
@@ -414,7 +451,10 @@ fn default_power_levels(
         "historical": 100,
         "users": {},
     });
-    if !rules.authorization.explicitly_privilege_room_creators {
+    if rules.authorization.explicitly_privilege_room_creators {
+        // Creators are privileged by the room version; upgrades need more than an admin.
+        pl["events"]["m.room.tombstone"] = json!(150);
+    } else {
         pl["users"][creator.as_str()] = json!(100);
     }
     pl
