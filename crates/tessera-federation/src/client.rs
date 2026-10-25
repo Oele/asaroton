@@ -17,6 +17,7 @@ use tessera_service::Services;
 use crate::{Error, FederationConfig, Result, discovery::Discovery};
 
 /// Timeout for ordinary federation requests. Joins and state fetches use a longer one.
+const LONG_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const LONG_TIMEOUT: Duration = Duration::from_secs(180);
 
@@ -291,6 +292,51 @@ impl FederationClient {
         }
         serde_json::from_slice(&bytes)
             .map_err(|e| Error::Protocol(format!("{destination}: bad JSON: {e}")))
+    }
+
+    /// Unauthenticated GET of a binary resource: bytes, content type and disposition.
+    pub async fn get_bytes(
+        &self,
+        destination: &ServerName,
+        path: &str,
+    ) -> Result<(Vec<u8>, String, Option<String>)> {
+        let resolved = self.discovery.resolve(destination).await?;
+        let url = format!("{}{path}", resolved.base_url());
+        let resp = self
+            .http
+            .get(&url)
+            .header(http::header::HOST, &resolved.host_header)
+            .timeout(LONG_REQUEST_TIMEOUT)
+            .send()
+            .await
+            .map_err(|e| {
+                self.discovery.invalidate(destination);
+                Error::Transport(destination.to_owned(), e.to_string())
+            })?;
+        let status = resp.status();
+        let content_type = resp
+            .headers()
+            .get(http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("application/octet-stream")
+            .to_owned();
+        let disposition = resp
+            .headers()
+            .get(http::header::CONTENT_DISPOSITION)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| Error::Transport(destination.to_owned(), e.to_string()))?;
+        if !status.is_success() {
+            return Err(Error::RemoteError {
+                server: destination.to_owned(),
+                status,
+                body: String::from_utf8_lossy(&bytes).into_owned(),
+            });
+        }
+        Ok((bytes.to_vec(), content_type, disposition))
     }
 
     /// Verify an incoming request's `X-Matrix` signature. Returns the origin server.

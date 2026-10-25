@@ -280,12 +280,31 @@ impl FederationHooks for Hooks {
     ) -> tessera_service::Result<(Vec<u8>, String, Option<String>)> {
         use ruma::api::federation::authenticated_media::{FileOrLocation, get_content};
         let req = get_content::v1::Request::new(media_id.to_owned());
-        let resp = self
-            .0
-            .client
-            .send_long(server_name, req)
-            .await
-            .map_err(tessera_service::Error::from)?;
+        let resp = match self.0.client.send_long(server_name, req).await {
+            Ok(r) => r,
+            Err(e) => {
+                // Servers without authenticated media (and some test servers) still serve the
+                // legacy unauthenticated endpoint.
+                tracing::debug!(%server_name, error = %e, "authenticated media fetch failed; trying legacy endpoint");
+                let path = format!(
+                    "/_matrix/media/v3/download/{}/{}",
+                    server_name,
+                    urlencoding_media(media_id)
+                );
+                let (bytes, content_type, disposition) = self
+                    .0
+                    .client
+                    .get_bytes(server_name, &path)
+                    .await
+                    .map_err(tessera_service::Error::from)?;
+                let filename = disposition.and_then(|d| {
+                    d.parse::<ruma::http_headers::ContentDisposition>()
+                        .ok()
+                        .and_then(|cd| cd.filename)
+                });
+                return Ok((bytes, content_type, filename));
+            }
+        };
         match resp.content {
             FileOrLocation::File(c) => {
                 let filename = c
@@ -318,4 +337,17 @@ impl FederationHooks for Hooks {
             _ => Err(tessera_service::Error::internal("unknown media response")),
         }
     }
+}
+
+fn urlencoding_media(s: &str) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            let _ = write!(out, "%{b:02X}");
+        }
+    }
+    out
 }

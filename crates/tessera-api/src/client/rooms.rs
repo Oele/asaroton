@@ -156,6 +156,12 @@ async fn join_room(
     {
         via.push(m.sender.server_name().to_owned());
     }
+    // Room IDs of older versions name a server to try when no `via` was given.
+    if via.is_empty()
+        && let Some(server) = room_id.server_name()
+    {
+        via.push(server.to_owned());
+    }
     services
         .federation()
         .remote_join(&sender.user_id, room_id, &via, reason)
@@ -518,6 +524,54 @@ pub async fn send_state(
     let content = json_from_raw(&req.body.body)?;
     if !content.is_object() {
         return Err(Error::bad_json("Event content must be an object."));
+    }
+    // Setting one's own membership in a room this server is not in is a join (or leave)
+    // over federation, like /join would do.
+    if req.body.event_type == ruma::events::StateEventType::RoomMember
+        && req.body.state_key == sender.user_id.as_str()
+    {
+        let membership = content
+            .get("membership")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let local = services.store.room_exists(&req.body.room_id).await?
+            && services
+                .store
+                .members(&req.body.room_id, Some("join"))
+                .await?
+                .iter()
+                .any(|m| services.is_local(&m.user_id));
+        if !local && membership == "join" {
+            let extra: serde_json::Map<String, Value> = content
+                .as_object()
+                .map(|o| {
+                    o.iter()
+                        .filter(|(k, _)| k.as_str() != "membership")
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let reason = content
+                .get("reason")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            join_room(
+                &services,
+                sender,
+                &req.body.room_id,
+                &[],
+                reason.as_deref(),
+                (!extra.is_empty()).then_some(extra),
+            )
+            .await?;
+            let event_id = services
+                .store
+                .get_membership(&req.body.room_id, &sender.user_id)
+                .await?
+                .map(|m| m.event_id)
+                .ok_or_else(|| Error::internal("join did not record a membership"))?;
+            return Ok(send_state_event::v3::Response::new(event_id));
+        }
     }
     let event_id = services
         .send_state(

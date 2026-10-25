@@ -180,7 +180,7 @@ impl Services {
         server: &ServerName,
     ) -> Result<bool> {
         let ctx = self.room_context(room_id).await?;
-        let (rule, _) = join_rule_summary(&ctx);
+        let (rule, allowed) = join_rule_summary(&ctx);
         if matches!(rule.as_str(), "public" | "knock" | "knock_restricted")
             || state_str(
                 &ctx,
@@ -191,6 +191,21 @@ impl Services {
                 == Some("world_readable")
         {
             return Ok(true);
+        }
+        // Restricted rooms: a server with a member in one of the allowed rooms may see it.
+        if rule == "restricted" {
+            for r in &allowed {
+                if self.store.room_exists(r).await?
+                    && self
+                        .store
+                        .members(r, Some("join"))
+                        .await?
+                        .iter()
+                        .any(|m| m.user_id.server_name() == server)
+                {
+                    return Ok(true);
+                }
+            }
         }
         Ok(self.store.members(room_id, None).await?.iter().any(|m| {
             m.user_id.server_name() == server
