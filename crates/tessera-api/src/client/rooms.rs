@@ -106,18 +106,31 @@ pub async fn join_by_id(
         &req.body.room_id,
         &[],
         req.body.reason.as_deref(),
+        extra_join_content(req.json.as_ref()),
     )
     .await?;
     Ok(join_room_by_id::v3::Response::new(req.body.room_id.clone()))
 }
 
 /// Join locally when we are already in the room, otherwise through federation.
+/// Client-supplied extra membership content on `/join` (everything but the known fields).
+fn extra_join_content(json: Option<&Value>) -> Option<serde_json::Map<String, Value>> {
+    let obj = json?.as_object()?;
+    let extra: serde_json::Map<String, Value> = obj
+        .iter()
+        .filter(|(k, _)| !matches!(k.as_str(), "reason" | "third_party_signed"))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    (!extra.is_empty()).then_some(extra)
+}
+
 async fn join_room(
     services: &AppState,
     sender: &tessera_auth::Sender,
     room_id: &ruma::RoomId,
     via: &[ruma::OwnedServerName],
     reason: Option<&str>,
+    extra: Option<serde_json::Map<String, Value>>,
 ) -> Result<()> {
     let local = services.store.room_exists(room_id).await?
         && services
@@ -128,7 +141,7 @@ async fn join_room(
             .any(|m| services.is_local(&m.user_id));
     if local {
         services
-            .join_local_room(room_id, &sender.user_id, reason)
+            .join_local_room_with(room_id, &sender.user_id, reason, extra.as_ref())
             .await?;
         return Ok(());
     }
@@ -185,6 +198,7 @@ pub async fn join_by_id_or_alias(
         &room_id,
         &via,
         req.body.reason.as_deref(),
+        extra_join_content(req.json.as_ref()),
     )
     .await?;
     Ok(join_room_by_id_or_alias::v3::Response::new(room_id))
@@ -333,9 +347,20 @@ pub async fn members(
     req: Ruma<get_member_events::v3::Request>,
 ) -> Result<get_member_events::v3::Response> {
     let sender = req.sender()?;
-    let state = services
-        .room_state(&req.body.room_id, &sender.user_id)
-        .await?;
+    let state = match req.body.at.as_deref() {
+        Some(at) => {
+            let token =
+                StreamToken::parse(at).ok_or_else(|| Error::invalid_param("Invalid at token."))?;
+            services
+                .room_state_at(&req.body.room_id, &sender.user_id, token)
+                .await?
+        }
+        None => {
+            services
+                .room_state(&req.body.room_id, &sender.user_id)
+                .await?
+        }
+    };
     let want = req.body.membership.clone();
     let not = req.body.not_membership.clone();
     let mut chunk = Vec::new();
@@ -515,8 +540,11 @@ pub async fn messages(
         .map(|f| StreamToken::parse(f).ok_or_else(|| Error::invalid_param("Invalid to token.")))
         .transpose()?;
     let limit = usize::try_from(u64::from(req.body.limit)).unwrap_or(10);
-    let page = services
+    let mut page = services
         .messages(&req.body.room_id, &sender.user_id, from, to, dir, limit)
+        .await?;
+    page.events = services
+        .filter_visible(&req.body.room_id, &sender.user_id, page.events)
         .await?;
     let mut resp = get_message_events::v3::Response::new();
     resp.start = page.start.to_string();
@@ -557,6 +585,9 @@ pub async fn context(
     let ev = services
         .get_room_event(&req.body.room_id, &sender.user_id, &req.body.event_id)
         .await?;
+    if !services.event_visible_to(&ev, &sender.user_id).await? {
+        return Err(Error::not_found("Event not found."));
+    }
     Ok(get_room_event::v3::Response::new(raw(&services
         .client_event(&ev, Some(&sender.user_id))
         .await?)?))
@@ -576,6 +607,15 @@ pub async fn event_context(
             &req.body.event_id,
             limit,
         )
+        .await?;
+    if !services.event_visible_to(&ev, &sender.user_id).await? {
+        return Err(Error::not_found("Event not found."));
+    }
+    let before = services
+        .filter_visible(&req.body.room_id, &sender.user_id, before)
+        .await?;
+    let after = services
+        .filter_visible(&req.body.room_id, &sender.user_id, after)
         .await?;
     let mut resp = get_context::v3::Response::new();
     resp.start = Some(start.to_string());
@@ -688,6 +728,38 @@ pub async fn delete_alias(
         }
     }
     services.store.delete_alias(&req.body.room_alias).await?;
+    // Drop it from m.room.canonical_alias too, when the deleter may do so.
+    if let Ok(Some(mut content)) = services
+        .state_content(
+            &a.room_id,
+            &ruma::events::StateEventType::RoomCanonicalAlias,
+            "",
+        )
+        .await
+    {
+        let alias_str = req.body.room_alias.as_str();
+        let mut changed = false;
+        if content.get("alias").and_then(Value::as_str) == Some(alias_str) {
+            content.as_object_mut().map(|o| o.remove("alias"));
+            changed = true;
+        }
+        if let Some(Value::Array(alts)) = content.get_mut("alt_aliases") {
+            let before = alts.len();
+            alts.retain(|v| v.as_str() != Some(alias_str));
+            changed |= alts.len() != before;
+        }
+        if changed {
+            let _ = services
+                .send_state(
+                    &a.room_id,
+                    &sender.user_id,
+                    "m.room.canonical_alias",
+                    "",
+                    content,
+                )
+                .await;
+        }
+    }
     Ok(alias::delete_alias::v3::Response::new())
 }
 

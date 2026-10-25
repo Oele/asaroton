@@ -192,7 +192,7 @@ impl Services {
     }
 
     /// Room-specific push rules (keyed by room ID) follow the user into the new room.
-    async fn copy_room_push_rules(
+    pub(crate) async fn copy_room_push_rules(
         &self,
         user: &UserId,
         old_room: &RoomId,

@@ -188,6 +188,7 @@ impl Federation {
             .await?;
         let servers = services.remote_servers_in_room(room_id).await?;
         let _ = services.send_device_lists_to(user_id, servers).await;
+        services.after_user_joined(user_id, room_id).await;
         Ok(())
     }
 

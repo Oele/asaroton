@@ -48,11 +48,7 @@ impl Services {
             let valid = dk
                 .get("algorithms")
                 .is_some_and(serde_json::Value::is_array)
-                && dk.get("keys").is_some_and(serde_json::Value::is_object)
-                && dk
-                    .get("signatures")
-                    .and_then(|s| s.get(user_id.as_str()))
-                    .is_some_and(serde_json::Value::is_object);
+                && dk.get("keys").is_some_and(serde_json::Value::is_object);
             if !valid {
                 return Err(Error::bad_json("Device keys are missing required fields."));
             }

@@ -3,16 +3,7 @@
 use std::collections::BTreeMap;
 
 use axum::{Json, extract::State};
-use ruma::{
-    RoomVersionId,
-    api::client::discovery::{
-        get_capabilities::{
-            self,
-            v3::{Capabilities, RoomVersionStability, RoomVersionsCapability},
-        },
-        get_supported_versions,
-    },
-};
+use ruma::api::client::discovery::{get_capabilities, get_supported_versions};
 
 use crate::{AppState, Result, Ruma};
 
@@ -37,27 +28,33 @@ pub async fn versions(
     Ok(resp)
 }
 
-pub async fn capabilities(
-    services: AppState,
-    _req: Ruma<get_capabilities::v3::Request>,
-) -> Result<get_capabilities::v3::Response> {
-    let mut caps = Capabilities::new();
-    let mut available: BTreeMap<RoomVersionId, RoomVersionStability> = BTreeMap::new();
+pub fn capabilities(
+    services: &AppState,
+    req: &Ruma<get_capabilities::v3::Request>,
+) -> Result<axum::response::Response> {
+    use axum::response::IntoResponse;
+    let _ = req.sender()?;
+    let mut available = serde_json::Map::new();
     for v in &tessera_core::SUPPORTED_ROOM_VERSIONS {
-        available.insert(v.clone(), RoomVersionStability::Stable);
+        available.insert(v.to_string(), serde_json::json!("stable"));
     }
-    caps.room_versions =
-        RoomVersionsCapability::new(services.config.default_room_version.clone(), available);
-    caps.change_password.enabled = true;
-    caps.thirdparty_id_changes.enabled = false;
-    caps.profile_fields = Some(get_capabilities::v3::ProfileFieldsCapability::new(true));
-    // Older clients still read the pre-1.16 capabilities.
-    #[allow(deprecated)]
-    {
-        caps.set_displayname.enabled = true;
-        caps.set_avatar_url.enabled = true;
-    }
-    Ok(get_capabilities::v3::Response::new(caps))
+    let body = serde_json::json!({
+        "capabilities": {
+            "m.room_versions": {
+                "default": services.config.default_room_version,
+                "available": available,
+            },
+            "m.change_password": { "enabled": true },
+            "m.set_displayname": { "enabled": true },
+            "m.set_avatar_url": { "enabled": true },
+            "m.3pid_changes": { "enabled": false },
+            "m.get_login_token": { "enabled": false },
+            "m.profile_fields": { "enabled": true },
+        }
+    });
+    let mut resp = axum::Json(body).into_response();
+    crate::extract::add_cors(resp.headers_mut());
+    Ok(resp)
 }
 
 pub async fn well_known_client(State(services): State<AppState>) -> Json<serde_json::Value> {

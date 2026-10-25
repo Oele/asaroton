@@ -5,6 +5,7 @@ use ruma::{
     events::{StateEventType, TimelineEventType, room::member::MembershipState},
 };
 use serde_json::Value;
+use std::collections::HashMap;
 use tessera_store::{Direction, StoredEvent};
 
 use crate::{
@@ -213,6 +214,9 @@ impl Services {
     /// Whether the user may read the room's history right now: joined, or left/banned with
     /// history visibility permitting (simplified: members and former members may read).
     pub async fn can_read_room(&self, room_id: &RoomId, user: &UserId) -> Result<bool> {
+        if !self.store.room_exists(room_id).await? {
+            return Ok(false);
+        }
         if let Some(m) = self.store.get_membership(room_id, user).await? {
             if m.forgotten {
                 return Ok(false);
@@ -401,7 +405,7 @@ impl Services {
         }
         for a in aliases {
             let alias = ruma::OwnedRoomAliasId::try_from(a)
-                .map_err(|_| Error::bad_json(format!("Invalid room alias: {a}")))?;
+                .map_err(|_| Error::invalid_param(format!("Invalid room alias: {a}")))?;
             let target = if alias.server_name() == self.config.server_name {
                 self.store.get_alias(&alias).await?.map(|a| a.room_id)
             } else {
@@ -412,11 +416,215 @@ impl Services {
                     .map(|(r, _)| r)
             };
             if target.as_deref() != Some(room_id) {
-                return Err(Error::bad_json(format!(
-                    "Room alias {a} does not point to this room."
-                )));
+                return Err(Error::matrix(
+                    ruma::api::error::ErrorKind::BadAlias,
+                    http::StatusCode::BAD_REQUEST,
+                    format!("Room alias {a} does not point to this room."),
+                ));
             }
         }
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------- history visibility
+
+/// What decides whether a user may see an event: the room's history visibility and the
+/// user's membership as of that event.
+#[derive(Debug, Clone)]
+struct VisibilityContext {
+    history_visibility: String,
+    membership: Option<MembershipState>,
+}
+
+impl Services {
+    /// The state group holding the state *before* `ev` (for state events) or at it.
+    async fn state_group_for_visibility(
+        &self,
+        ev: &StoredEvent,
+    ) -> Result<Option<tessera_store::StateGroupId>> {
+        if ev.pdu.is_state() {
+            Ok(self.store.state_group_before(ev.pdu.event_id()).await?)
+        } else {
+            Ok(ev.state_group)
+        }
+    }
+
+    async fn visibility_context_at(
+        &self,
+        group: tessera_store::StateGroupId,
+        user: &UserId,
+    ) -> Result<VisibilityContext> {
+        let entries = self.store.state_at_group(group).await?;
+        let mut hv = "shared".to_owned();
+        let mut membership = None;
+        for e in entries {
+            if e.event_type == StateEventType::RoomHistoryVisibility && e.state_key.is_empty() {
+                if let Some(ev) = self.store.get_event(&e.event_id).await?
+                    && let Ok(c) = serde_json::from_str::<Value>(ev.pdu.content().get())
+                    && let Some(v) = c.get("history_visibility").and_then(Value::as_str)
+                {
+                    v.clone_into(&mut hv);
+                }
+            } else if e.event_type == StateEventType::RoomMember
+                && e.state_key == user.as_str()
+                && let Some(ev) = self.store.get_event(&e.event_id).await?
+                && let Ok(c) = serde_json::from_str::<Value>(ev.pdu.content().get())
+                && let Some(m) = c.get("membership").and_then(Value::as_str)
+            {
+                membership = Some(MembershipState::from(m.to_owned()));
+            }
+        }
+        Ok(VisibilityContext {
+            history_visibility: hv,
+            membership,
+        })
+    }
+
+    /// Whether `user` may see `ev` under the room's history visibility rules.
+    pub async fn event_visible_to(&self, ev: &StoredEvent, user: &UserId) -> Result<bool> {
+        let currently_joined = self.is_joined(ev.pdu.room_id(), user).await?;
+        let mut cache = HashMap::new();
+        self.event_visible_cached(ev, user, currently_joined, &mut cache)
+            .await
+    }
+
+    async fn event_visible_cached(
+        &self,
+        ev: &StoredEvent,
+        user: &UserId,
+        currently_joined: bool,
+        cache: &mut HashMap<tessera_store::StateGroupId, VisibilityContext>,
+    ) -> Result<bool> {
+        // A user always sees their own membership changes.
+        if ev.pdu.event_type() == &TimelineEventType::RoomMember
+            && ev.pdu.state_key() == Some(user.as_str())
+        {
+            return Ok(true);
+        }
+        let Some(group) = self.state_group_for_visibility(ev).await? else {
+            return Ok(false);
+        };
+        let ctx = match cache.get(&group) {
+            Some(c) => c.clone(),
+            None => {
+                let c = self.visibility_context_at(group, user).await?;
+                cache.insert(group, c.clone());
+                c
+            }
+        };
+        let visible = match ctx.history_visibility.as_str() {
+            "world_readable" => true,
+            "shared" => currently_joined || ctx.membership == Some(MembershipState::Join),
+            "invited" => matches!(
+                ctx.membership,
+                Some(MembershipState::Join | MembershipState::Invite)
+            ),
+            _ => ctx.membership == Some(MembershipState::Join),
+        };
+        Ok(visible)
+    }
+
+    /// Keep only the events `user` may see.
+    pub async fn filter_visible(
+        &self,
+        room_id: &RoomId,
+        user: &UserId,
+        events: Vec<StoredEvent>,
+    ) -> Result<Vec<StoredEvent>> {
+        let currently_joined = self.is_joined(room_id, user).await?;
+        let mut cache = HashMap::new();
+        let mut out = Vec::with_capacity(events.len());
+        for ev in events {
+            if self
+                .event_visible_cached(&ev, user, currently_joined, &mut cache)
+                .await?
+            {
+                out.push(ev);
+            }
+        }
+        Ok(out)
+    }
+
+    /// The user's membership as of each event, as the `unsigned.membership` field: the
+    /// membership before the event, except for the user's own membership events where it is
+    /// the new membership. Absent membership reads as `leave`.
+    pub async fn membership_at_events(
+        &self,
+        user: &UserId,
+        events: &[StoredEvent],
+    ) -> Result<Vec<String>> {
+        let mut cache: HashMap<tessera_store::StateGroupId, String> = HashMap::new();
+        let mut out = Vec::with_capacity(events.len());
+        for ev in events {
+            if ev.pdu.event_type() == &TimelineEventType::RoomMember
+                && ev.pdu.state_key() == Some(user.as_str())
+            {
+                let m = serde_json::from_str::<Value>(ev.pdu.content().get())
+                    .ok()
+                    .and_then(|c| {
+                        c.get("membership")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned)
+                    })
+                    .unwrap_or_else(|| "leave".to_owned());
+                out.push(m);
+                continue;
+            }
+            let Some(group) = self.state_group_for_visibility(ev).await? else {
+                out.push("leave".to_owned());
+                continue;
+            };
+            let m = match cache.get(&group) {
+                Some(m) => m.clone(),
+                None => {
+                    let ctx = self.visibility_context_at(group, user).await?;
+                    let m = ctx
+                        .membership
+                        .map_or_else(|| "leave".to_owned(), |m| m.to_string());
+                    cache.insert(group, m.clone());
+                    m
+                }
+            };
+            out.push(m);
+        }
+        Ok(out)
+    }
+
+    /// Room state as of a stream token (`/members?at=`), with the same visibility rules as
+    /// `room_state`.
+    pub async fn room_state_at(
+        &self,
+        room_id: &RoomId,
+        user: &UserId,
+        at: StreamToken,
+    ) -> Result<Vec<StoredEvent>> {
+        if !self.can_read_room(room_id, user).await? {
+            return Err(Error::forbidden("You are not allowed to read this room."));
+        }
+        let mut bound = at.0;
+        if let Some(m) = self.store.get_membership(room_id, user).await?
+            && m.membership != MembershipState::Join
+        {
+            bound = bound.min(m.stream_ordering);
+        }
+        let latest = self
+            .store
+            .room_events_in_range(room_id, bound + 1, None, Direction::Backwards, 1)
+            .await?;
+        let Some(ev) = latest.into_iter().next() else {
+            return Ok(Vec::new());
+        };
+        let Some(group) = ev.state_group else {
+            return Ok(Vec::new());
+        };
+        let ids: Vec<ruma::OwnedEventId> = self
+            .store
+            .state_at_group(group)
+            .await?
+            .into_iter()
+            .map(|e| e.event_id)
+            .collect();
+        self.store.get_events(&ids).await.map_err(Into::into)
     }
 }

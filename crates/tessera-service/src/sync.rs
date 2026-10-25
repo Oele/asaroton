@@ -293,6 +293,7 @@ impl Services {
             .filter(|m| filter.room_allowed(&m.room_id))
             .collect();
 
+        let ignored = self.ignored_users(user).await?;
         let mut newly_joined: Vec<OwnedRoomId> = Vec::new();
         for m in &memberships {
             let changed_in_window = since.is_none_or(|s| m.stream_ordering > s.events);
@@ -309,7 +310,7 @@ impl Services {
                         out.join.insert(m.room_id.clone(), room);
                     }
                 }
-                MembershipState::Invite if changed_in_window => {
+                MembershipState::Invite if changed_in_window && !ignored.contains(&m.sender) => {
                     out.invite.insert(
                         m.room_id.clone(),
                         self.stripped_state(&m.room_id, Some(user)).await?,
@@ -446,6 +447,7 @@ impl Services {
         let user = &req.user_id;
         let filter = &req.filter;
         let limit = filter.timeline_limit.min(1000);
+        let ignored = self.ignored_users(user).await?;
         let mut room = RoomSync::default();
 
         // Timeline: newest `limit` matching events in (since, upper], oldest first.
@@ -478,7 +480,9 @@ impl Services {
                     exhausted = true;
                     break;
                 }
-                if filter.timeline_allows(&ev) {
+                if filter.timeline_allows(&ev)
+                    && (ev.pdu.is_state() || !ignored.contains(ev.pdu.sender()))
+                {
                     events.push(ev);
                     if events.len() > limit {
                         break;
@@ -803,5 +807,28 @@ impl Services {
             }
         }
         Ok(out)
+    }
+}
+
+impl Services {
+    /// The users listed in the user's `m.ignored_user_list` account data.
+    pub async fn ignored_users(&self, user: &UserId) -> Result<HashSet<OwnedUserId>> {
+        let Some(data) = self
+            .store
+            .get_account_data(user, None, "m.ignored_user_list")
+            .await?
+        else {
+            return Ok(HashSet::new());
+        };
+        Ok(data
+            .content
+            .get("ignored_users")
+            .and_then(Value::as_object)
+            .map(|m| {
+                m.keys()
+                    .filter_map(|k| OwnedUserId::try_from(k.as_str()).ok())
+                    .collect()
+            })
+            .unwrap_or_default())
     }
 }

@@ -35,6 +35,9 @@ impl Services {
     /// Validate a localpart per the spec's user ID grammar (historical IDs accepted on login
     /// only, not on registration).
     pub fn validate_localpart(&self, localpart: &str) -> Result<OwnedUserId> {
+        // Like Synapse, capitals are folded rather than rejected.
+        let lowered = localpart.to_lowercase();
+        let localpart = lowered.as_str();
         if localpart.is_empty()
             || localpart.len() > 255 - self.config.server_name.as_str().len() - 2
         {

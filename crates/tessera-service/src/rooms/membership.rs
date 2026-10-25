@@ -24,6 +24,18 @@ impl Services {
         user: &UserId,
         reason: Option<&str>,
     ) -> Result<StoredEvent> {
+        self.join_local_room_with(room_id, user, reason, None).await
+    }
+
+    /// Join a room this server is already in. `extra` holds additional client-supplied
+    /// membership content (anything but the protected fields).
+    pub async fn join_local_room_with(
+        &self,
+        room_id: &RoomId,
+        user: &UserId,
+        reason: Option<&str>,
+        extra: Option<&serde_json::Map<String, Value>>,
+    ) -> Result<StoredEvent> {
         let _guard = self.lock_room(room_id).await;
         let mut ctx = self.room_context(room_id).await?;
 
@@ -44,6 +56,17 @@ impl Services {
         }
 
         let mut content = self.member_content_for(user, "join", reason).await?;
+        if let Some(extra) = extra {
+            for (k, v) in extra {
+                if !matches!(
+                    k.as_str(),
+                    "membership" | "join_authorised_via_users_server" | "third_party_invite"
+                ) && content.get(k).is_none()
+                {
+                    content[k] = v.clone();
+                }
+            }
+        }
         let join_rule = join_rule(&ctx);
         let already_allowed = matches!(
             current,
@@ -73,17 +96,37 @@ impl Services {
             _ => return Err(Error::forbidden("Unknown join rule.")),
         }
 
-        self.send_local_event_locked(
-            &mut ctx,
-            LocalEvent::new(
-                room_id.to_owned(),
-                user.to_owned(),
-                TimelineEventType::RoomMember,
+        let ev = self
+            .send_local_event_locked(
+                &mut ctx,
+                LocalEvent::new(
+                    room_id.to_owned(),
+                    user.to_owned(),
+                    TimelineEventType::RoomMember,
+                )
+                .state_key(user.as_str())
+                .content(&content)?,
             )
-            .state_key(user.as_str())
-            .content(&content)?,
-        )
-        .await
+            .await?;
+        self.after_user_joined(user, room_id).await;
+        Ok(ev)
+    }
+
+    /// Housekeeping once a local user has joined a room: push rules for an upgraded room's
+    /// predecessor carry over.
+    pub async fn after_user_joined(&self, user: &UserId, room_id: &RoomId) {
+        if let Ok(Some(create)) = self
+            .state_content(room_id, &StateEventType::RoomCreate, "")
+            .await
+            && let Some(pred) = create
+                .get("predecessor")
+                .and_then(|p| p.get("room_id"))
+                .and_then(Value::as_str)
+            && let Ok(old) = ruma::OwnedRoomId::try_from(pred)
+            && let Err(e) = self.copy_room_push_rules(user, &old, room_id).await
+        {
+            tracing::debug!(error = %e, "copying push rules from predecessor failed");
+        }
     }
 
     /// Whether `user` is joined to one of the rooms named by the restricted join rule.

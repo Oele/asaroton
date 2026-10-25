@@ -22,7 +22,10 @@ pub fn routes(router: Router<AppState>) -> Router<AppState> {
     let r = router;
     // discovery
     let r = route::<c::discovery::get_supported_versions::Request, _, _>(r, discovery::versions);
-    let r = route::<c::discovery::get_capabilities::v3::Request, _, _>(r, discovery::capabilities);
+    let r = r.route(
+        "/_matrix/client/v3/capabilities",
+        axum::routing::get(capabilities_handler),
+    );
     let r = r.route(
         "/.well-known/matrix/client",
         axum::routing::get(discovery::well_known_client),
@@ -245,6 +248,17 @@ async fn upload_async_handler(
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
     match media::upload_async(state, req).await {
+        Ok(resp) => resp,
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn capabilities_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    req: crate::Ruma<ruma::api::client::discovery::get_capabilities::v3::Request>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    match discovery::capabilities(&state, &req) {
         Ok(resp) => resp,
         Err(e) => e.into_response(),
     }

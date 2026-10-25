@@ -365,7 +365,7 @@ pub async fn search_users(
     }
     'outer: for room in rooms {
         for m in services.store.members(&room, Some("join")).await? {
-            if !seen.insert(m.user_id.clone()) {
+            if m.user_id == sender.user_id || !seen.insert(m.user_id.clone()) {
                 continue;
             }
             let name = m.display_name.clone().unwrap_or_default().to_lowercase();

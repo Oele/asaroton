@@ -56,19 +56,17 @@ async fn events_json(
     room: &RoomSync,
     aggregations: bool,
 ) -> Result<Vec<Value>> {
-    let mut out = Vec::with_capacity(events.len());
-    for e in events {
-        let mut v = if aggregations {
-            services.client_event(e, Some(user)).await?
-        } else {
-            client_event(e)
-        };
+    let mut out = if aggregations {
+        services.client_events(events, Some(user)).await?
+    } else {
+        events.iter().map(client_event).collect()
+    };
+    for (v, e) in out.iter_mut().zip(events) {
         if let Some(txn) = room.txn_ids.get(e.pdu.event_id())
             && let Some(u) = v.get_mut("unsigned").and_then(|u| u.as_object_mut())
         {
             u.insert("transaction_id".into(), json!(txn));
         }
-        out.push(v);
     }
     Ok(out)
 }

@@ -10,7 +10,7 @@
 //!    current state;
 //! 6. persist with its state group, update forward extremities and the current state.
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use ruma::{
     CanonicalJsonObject, OwnedEventId, OwnedRoomId, OwnedServerName, OwnedUserId, RoomId,
@@ -237,6 +237,18 @@ impl Federation {
         rules: &RoomVersionRules,
         backfilled: bool,
     ) -> Result<Outcome> {
+        self.process_pdu_inner(origin, pdu, rules, backfilled, !backfilled)
+            .await
+    }
+
+    async fn process_pdu_inner(
+        &self,
+        origin: &ServerName,
+        pdu: Pdu,
+        rules: &RoomVersionRules,
+        backfilled: bool,
+        chase_prevs: bool,
+    ) -> Result<Outcome> {
         let services = &self.services;
         let room_id = pdu.room_id().to_owned();
 
@@ -245,7 +257,7 @@ impl Federation {
             .await?;
 
         // 3b. prev events
-        if !backfilled {
+        if chase_prevs {
             self.fetch_missing_prev_events(origin, &room_id, &pdu, rules)
                 .await?;
         }
@@ -581,7 +593,9 @@ impl Federation {
         Ok(pdu)
     }
 
-    /// Fetch and process prev events we do not have, newest-first via `get_missing_events`.
+    /// Fetch and process the prev events we lack. `get_missing_events` is asked repeatedly
+    /// (each round walks back from what is still missing) up to a bound, then everything is
+    /// processed oldest first without further prev-chasing, so deep gaps never recurse.
     async fn fetch_missing_prev_events(
         &self,
         origin: &ServerName,
@@ -589,51 +603,72 @@ impl Federation {
         pdu: &Pdu,
         rules: &RoomVersionRules,
     ) -> Result<()> {
-        let have: HashSet<OwnedEventId> = self
-            .services
-            .store
-            .have_events(pdu.prev_events())
-            .await?
-            .into_iter()
-            .collect();
-        let missing: Vec<OwnedEventId> = pdu
-            .prev_events()
-            .iter()
-            .filter(|p| !have.contains(*p))
-            .cloned()
-            .collect();
-        if missing.is_empty() {
-            return Ok(());
-        }
-        let earliest = self.services.store.forward_extremities(room_id).await?;
-        let min_depth = UInt::from(0u32);
-        let mut req = get_missing_events::v1::Request::new(
-            room_id.to_owned(),
-            earliest,
-            vec![pdu.event_id().to_owned()],
-        );
-        req.limit = UInt::from(MAX_MISSING_EVENTS);
-        req.min_depth = min_depth;
-        let resp = match self.client.send_long(origin, req).await {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!(%origin, error = %e, "get_missing_events failed");
-                return Ok(());
+        const MAX_ROUNDS: usize = 20;
+        let mut fetched: HashMap<OwnedEventId, Pdu> = HashMap::new();
+        let mut latest: Vec<OwnedEventId> = vec![pdu.event_id().to_owned()];
+        let mut frontier: Vec<OwnedEventId> = pdu.prev_events().to_vec();
+        for _ in 0..MAX_ROUNDS {
+            let have: HashSet<OwnedEventId> = self
+                .services
+                .store
+                .have_events(&frontier)
+                .await?
+                .into_iter()
+                .collect();
+            let missing: Vec<OwnedEventId> = frontier
+                .iter()
+                .filter(|p| !have.contains(*p) && !fetched.contains_key(*p))
+                .cloned()
+                .collect();
+            if missing.is_empty() {
+                break;
             }
-        };
-        // Oldest first, so each event's prev events are processed before it.
-        let mut fetched: Vec<Pdu> = Vec::new();
-        for raw in resp.events {
-            if let Ok(obj) = tessera_core::canonical::from_str(raw.get())
-                && let Ok(p) = self.parse_and_verify(origin, obj, rules).await
-                && p.room_id() == room_id
-            {
-                fetched.push(p);
+            let earliest = self.services.store.forward_extremities(room_id).await?;
+            let mut req =
+                get_missing_events::v1::Request::new(room_id.to_owned(), earliest, latest.clone());
+            req.limit = UInt::from(MAX_MISSING_EVENTS);
+            req.min_depth = UInt::from(0u32);
+            let resp = match self.client.send_long(origin, req).await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(%origin, error = %e, "get_missing_events failed");
+                    break;
+                }
+            };
+            let mut progress = false;
+            let mut next_frontier: Vec<OwnedEventId> = Vec::new();
+            for raw in resp.events {
+                if let Ok(obj) = tessera_core::canonical::from_str(raw.get())
+                    && let Ok(p) = self.parse_and_verify(origin, obj, rules).await
+                    && p.room_id() == room_id
+                    && !fetched.contains_key(p.event_id())
+                {
+                    progress = true;
+                    next_frontier.extend(p.prev_events().iter().cloned());
+                    fetched.insert(p.event_id().to_owned(), p);
+                }
             }
+            if !progress {
+                break;
+            }
+            // The next round walks back from the oldest events fetched so far.
+            let oldest_depth = fetched
+                .values()
+                .map(|p| u64::from(p.depth()))
+                .min()
+                .unwrap_or(0);
+            latest = fetched
+                .values()
+                .filter(|p| u64::from(p.depth()) <= oldest_depth + 1)
+                .map(|p| p.event_id().to_owned())
+                .collect();
+            next_frontier.sort();
+            next_frontier.dedup();
+            frontier = next_frontier;
         }
-        fetched.sort_by_key(|p| u64::from(p.depth()));
-        let mut queue: VecDeque<Pdu> = fetched.into();
-        while let Some(p) = queue.pop_front() {
+        let mut queue: Vec<Pdu> = fetched.into_values().collect();
+        queue.sort_by_key(|p| u64::from(p.depth()));
+        for p in queue {
             if self
                 .services
                 .store
@@ -643,9 +678,9 @@ impl Federation {
             {
                 continue;
             }
-            // Each fetched event goes through the full pipeline (without further prev-chasing
-            // beyond what its own processing does).
-            if let Err(e) = Box::pin(self.process_pdu(origin, p.clone(), rules, false)).await {
+            if let Err(e) =
+                Box::pin(self.process_pdu_inner(origin, p.clone(), rules, false, false)).await
+            {
                 tracing::warn!(event_id = %p.event_id(), error = %e, "processing fetched event failed");
             }
         }

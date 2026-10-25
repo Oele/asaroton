@@ -200,6 +200,20 @@ impl Services {
         for e in events {
             out.push(self.client_event(e, user).await?);
         }
+        if let Some(user) = user {
+            for (v, m) in out
+                .iter_mut()
+                .zip(self.membership_at_events(user, events).await?)
+            {
+                if let Some(u) = v
+                    .as_object_mut()
+                    .and_then(|o| o.get_mut("unsigned"))
+                    .and_then(Value::as_object_mut)
+                {
+                    u.insert("membership".into(), json!(m));
+                }
+            }
+        }
         Ok(out)
     }
 }

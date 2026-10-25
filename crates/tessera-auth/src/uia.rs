@@ -102,10 +102,6 @@ impl UiaSessions {
 
         let stage_type = auth.auth_type();
         let session_id = auth.session().map(str::to_owned);
-        // A stage submitted without a session starts a new session and is not evaluated.
-        if session_id.is_none() {
-            return UiaOutcome::Incomplete(Box::new(self.new_session(flows, user_id, params)));
-        }
 
         // Find or create the session.
         let (session_id, mut session) =
@@ -195,7 +191,7 @@ impl UiaSessions {
             completed: Vec::new(),
             created: Instant::now(),
             user_id,
-            params,
+            params: Some(params.unwrap_or_else(|| serde_json::json!({}))),
         };
         let info = info_for(&id, &session, None);
         self.sessions.insert(id, session);

@@ -181,7 +181,12 @@ where
             } else {
                 bytes
             };
-        if !bytes.is_empty() && std::str::from_utf8(&bytes).is_err() {
+        let json_body = parts
+            .headers
+            .get(http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_none_or(|ct| ct.contains("json") || ct.starts_with("text/"));
+        if json_body && !bytes.is_empty() && std::str::from_utf8(&bytes).is_err() {
             return Err(Error::not_json("Request body is not valid UTF-8."));
         }
         let json = if bytes.is_empty() {
