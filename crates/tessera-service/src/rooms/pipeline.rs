@@ -168,6 +168,14 @@ impl Services {
     /// Build and authorise an event against the context without persisting it.
     pub async fn build_local_event_locked(&self, ctx: &RoomContext, ev: LocalEvent) -> Result<Pdu> {
         let rules = ctx.rules.clone();
+        // Spec: events are at most 65536 bytes; leave headroom for hashes, signatures, ids.
+        if tessera_core::canonical::to_string(&ev.content).len() > 60_000 {
+            return Err(Error::matrix(
+                ruma::api::error::ErrorKind::TooLarge,
+                http::StatusCode::PAYLOAD_TOO_LARGE,
+                "Event too large.",
+            ));
+        }
 
         // prev events and depth
         let prev_pdus = self.store.get_events(&ctx.extremities).await?;
@@ -228,13 +236,24 @@ impl Services {
         {
             builder = builder.room_id(ev.room_id.clone());
         }
-        let pdu = builder.build(&rules, &self.signing_key, &self.config.server_name)?;
+        let pdu = builder
+            .build(&rules, &self.signing_key, &self.config.server_name)
+            .map_err(|e| match e {
+                tessera_core::Error::Signing(ruma::signatures::JsonError::PduTooLarge) => {
+                    Error::matrix(
+                        ruma::api::error::ErrorKind::TooLarge,
+                        http::StatusCode::PAYLOAD_TOO_LARGE,
+                        "Event too large.",
+                    )
+                }
+                other => other.into(),
+            })?;
 
         // checks
         auth::check_format(&pdu, &rules).map_err(|e| {
             Error::matrix(
                 ruma::api::error::ErrorKind::TooLarge,
-                http::StatusCode::BAD_REQUEST,
+                http::StatusCode::PAYLOAD_TOO_LARGE,
                 e.to_string(),
             )
         })?;

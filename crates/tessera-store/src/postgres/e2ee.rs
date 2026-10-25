@@ -419,10 +419,11 @@ impl E2eeStore for PostgresStore {
 
     async fn set_pusher(&self, p: Pusher) -> Result<()> {
         sqlx::query(
-            "INSERT INTO pushers (user_id, app_id, pushkey, kind, app_display_name, device_display_name, profile_tag, lang, data, created_ts)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            "INSERT INTO pushers (user_id, app_id, pushkey, kind, app_display_name, device_display_name, profile_tag, lang, data, created_ts, access_token)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
              ON CONFLICT (user_id, app_id, pushkey) DO UPDATE SET kind = EXCLUDED.kind, app_display_name = EXCLUDED.app_display_name,
-                device_display_name = EXCLUDED.device_display_name, profile_tag = EXCLUDED.profile_tag, lang = EXCLUDED.lang, data = EXCLUDED.data",
+                device_display_name = EXCLUDED.device_display_name, profile_tag = EXCLUDED.profile_tag, lang = EXCLUDED.lang,
+                data = EXCLUDED.data, access_token = EXCLUDED.access_token",
         )
         .bind(p.user_id.as_str())
         .bind(&p.app_id)
@@ -434,8 +435,22 @@ impl E2eeStore for PostgresStore {
         .bind(&p.lang)
         .bind(&p.data)
         .bind(now_ts())
+        .bind(&p.access_token)
         .execute(&self.pool)
         .await?;
+        Ok(())
+    }
+
+    async fn delete_pushers_except_token(
+        &self,
+        user_id: &UserId,
+        keep_token: Option<&str>,
+    ) -> Result<()> {
+        sqlx::query("DELETE FROM pushers WHERE user_id = $1 AND ($2::text IS NULL OR access_token IS DISTINCT FROM $2)")
+            .bind(user_id.as_str())
+            .bind(keep_token)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -451,7 +466,7 @@ impl E2eeStore for PostgresStore {
 
     async fn pushers(&self, user_id: &UserId) -> Result<Vec<Pusher>> {
         let rows = sqlx::query(
-            "SELECT user_id, app_id, pushkey, kind, app_display_name, device_display_name, profile_tag, lang, data FROM pushers WHERE user_id = $1",
+            "SELECT user_id, app_id, pushkey, kind, app_display_name, device_display_name, profile_tag, lang, data, access_token FROM pushers WHERE user_id = $1",
         )
         .bind(user_id.as_str())
         .fetch_all(&self.pool)
@@ -469,6 +484,7 @@ impl E2eeStore for PostgresStore {
                     profile_tag: r.get("profile_tag"),
                     lang: r.get("lang"),
                     data: r.get("data"),
+                    access_token: r.get("access_token"),
                 })
             })
             .collect()

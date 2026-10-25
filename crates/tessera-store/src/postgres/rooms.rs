@@ -253,6 +253,21 @@ impl RoomStore for PostgresStore {
         rows.into_iter().map(Membership::try_from).collect()
     }
 
+    async fn memberships_changed_in_rooms(
+        &self,
+        room_ids: &[OwnedRoomId],
+        since: i64,
+    ) -> Result<Vec<Membership>> {
+        let rows: Vec<MembershipRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT {MEMBERSHIP_COLUMNS} FROM room_memberships WHERE room_id = ANY($1) AND stream_ordering > $2 ORDER BY stream_ordering"
+        )))
+        .bind(super::strings(room_ids))
+        .bind(since)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(Membership::try_from).collect()
+    }
+
     async fn set_forgotten(
         &self,
         room_id: &RoomId,

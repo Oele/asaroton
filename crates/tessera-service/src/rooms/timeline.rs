@@ -331,6 +331,21 @@ impl Services {
         if !self.can_read_room(room_id, user).await? {
             return Err(Error::forbidden("You are not allowed to read this room."));
         }
+        // Users who left see the state as of their departure.
+        if let Some(m) = self.store.get_membership(room_id, user).await?
+            && matches!(m.membership, MembershipState::Leave | MembershipState::Ban)
+            && let Some(leave) = self.store.get_event(&m.event_id).await?
+            && let Some(group) = leave.state_group
+        {
+            let ids: Vec<ruma::OwnedEventId> = self
+                .store
+                .state_at_group(group)
+                .await?
+                .into_iter()
+                .map(|e| e.event_id)
+                .collect();
+            return Ok(self.store.get_events(&ids).await?);
+        }
         Ok(self.store.current_state_pdus(room_id).await?)
     }
 }

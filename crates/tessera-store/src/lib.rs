@@ -119,6 +119,12 @@ pub trait RoomStore: Send + Sync {
         user_id: &UserId,
         since: StreamOrdering,
     ) -> Result<Vec<Membership>>;
+    /// Memberships in the given rooms whose current membership event is newer than `since`.
+    async fn memberships_changed_in_rooms(
+        &self,
+        room_ids: &[OwnedRoomId],
+        since: StreamOrdering,
+    ) -> Result<Vec<Membership>>;
     async fn set_forgotten(
         &self,
         room_id: &RoomId,
@@ -426,6 +432,12 @@ pub trait E2eeStore: Send + Sync {
     async fn set_push_rules(&self, user_id: &UserId, ruleset: &serde_json::Value) -> Result<i64>;
     async fn set_pusher(&self, pusher: Pusher) -> Result<()>;
     async fn delete_pusher(&self, user_id: &UserId, app_id: &str, pushkey: &str) -> Result<()>;
+    /// Delete every pusher of the user except those created with `keep_token`.
+    async fn delete_pushers_except_token(
+        &self,
+        user_id: &UserId,
+        keep_token: Option<&str>,
+    ) -> Result<()>;
     async fn pushers(&self, user_id: &UserId) -> Result<Vec<Pusher>>;
 }
 

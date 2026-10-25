@@ -261,6 +261,7 @@ pub async fn change_password(
             &req.body.new_password,
             req.body.logout_devices,
             sender.device_id.as_deref(),
+            Some(&sender.token),
         )
         .await?;
     Ok(change_password::v3::Response::new())

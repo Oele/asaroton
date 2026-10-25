@@ -25,3 +25,7 @@ CREATE TABLE media_thumbnails (
     size            BIGINT NOT NULL,
     PRIMARY KEY (server_name, media_id, width, height, method)
 );
+
+-- Pushers remember the access token that created them so a password change that logs out
+-- other devices also removes their pushers.
+ALTER TABLE pushers ADD COLUMN access_token TEXT;

@@ -287,6 +287,7 @@ impl Services {
         new_password: &str,
         logout_others: bool,
         keep_device: Option<&DeviceId>,
+        keep_token: Option<&str>,
     ) -> Result<()> {
         let pw = new_password.to_owned();
         let hash = tokio::task::spawn_blocking(move || hash_password(&pw))
@@ -295,6 +296,9 @@ impl Services {
             .map_err(|e| Error::internal(e.to_string()))?;
         self.store.set_password_hash(user_id, Some(&hash)).await?;
         if logout_others {
+            self.store
+                .delete_pushers_except_token(user_id, keep_token)
+                .await?;
             for d in self.store.list_devices(user_id).await? {
                 if Some(d.device_id.as_ref()) != keep_device {
                     self.store.delete_device(user_id, &d.device_id).await?;

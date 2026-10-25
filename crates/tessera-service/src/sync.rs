@@ -385,9 +385,39 @@ impl Services {
                 self.unused_fallback_key_algorithms(user, device_id).await?;
         }
         if let Some(s) = since {
-            let (mut changed, left) = self
+            let (mut changed, mut left) = self
                 .device_list_changes_for(user, s.device_lists, now.device_lists)
                 .await?;
+            // Users who joined or left rooms we are in during the window.
+            let all_my_rooms = self.store.rooms_for_user(user, "join").await?;
+            for m in self
+                .store
+                .memberships_changed_in_rooms(&all_my_rooms, s.events)
+                .await?
+            {
+                if m.user_id == *user || m.stream_ordering > now.events {
+                    continue;
+                }
+                match m.membership {
+                    MembershipState::Join => {
+                        if !changed.contains(&m.user_id) {
+                            changed.push(m.user_id.clone());
+                        }
+                    }
+                    MembershipState::Leave | MembershipState::Ban => {
+                        let still_shared = self
+                            .store
+                            .rooms_for_user(&m.user_id, "join")
+                            .await?
+                            .iter()
+                            .any(|r| all_my_rooms.contains(r));
+                        if !still_shared && !left.contains(&m.user_id) {
+                            left.push(m.user_id.clone());
+                        }
+                    }
+                    _ => {}
+                }
+            }
             // Members of newly joined rooms need their device lists fetched.
             for room in &newly_joined {
                 for m in self.store.members(room, Some("join")).await? {
@@ -618,6 +648,22 @@ impl Services {
             }
         }
         if let Some(s) = since {
+            // Members who joined our rooms in the window.
+            let my_rooms = self.store.rooms_for_user(user, "join").await?;
+            for m in self
+                .store
+                .memberships_changed_in_rooms(&my_rooms, s.events)
+                .await?
+            {
+                if m.membership == MembershipState::Join
+                    && m.user_id != *user
+                    && !emitted.contains(&m.user_id)
+                    && let Some(e) = self.presence.get(&m.user_id)
+                {
+                    events.push(presence_event(&m.user_id, &e));
+                    emitted.insert(m.user_id.clone());
+                }
+            }
             // Changed presence of anyone we share a room with.
             let my_rooms = self.store.rooms_for_user(user, "join").await?;
             let mut shared: HashSet<OwnedUserId> = HashSet::new();

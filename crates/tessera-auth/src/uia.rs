@@ -102,6 +102,10 @@ impl UiaSessions {
 
         let stage_type = auth.auth_type();
         let session_id = auth.session().map(str::to_owned);
+        // A stage submitted without a session starts a new session and is not evaluated.
+        if session_id.is_none() {
+            return UiaOutcome::Incomplete(Box::new(self.new_session(flows, user_id, params)));
+        }
 
         // Find or create the session.
         let (session_id, mut session) =

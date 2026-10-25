@@ -181,6 +181,9 @@ where
             } else {
                 bytes
             };
+        if !bytes.is_empty() && std::str::from_utf8(&bytes).is_err() {
+            return Err(Error::not_json("Request body is not valid UTF-8."));
+        }
         let json = if bytes.is_empty() {
             None
         } else {

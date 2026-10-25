@@ -284,6 +284,8 @@ pub struct Pusher {
     pub profile_tag: Option<String>,
     pub lang: String,
     pub data: serde_json::Value,
+    /// Access token that created the pusher (if known).
+    pub access_token: Option<String>,
 }
 
 // ------------------------------------------------------------------ federation

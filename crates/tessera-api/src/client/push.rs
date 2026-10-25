@@ -190,6 +190,7 @@ pub async fn set_pusher(
                         .get("data")
                         .cloned()
                         .unwrap_or(Value::Object(serde_json::Map::new())),
+                    access_token: Some(req.sender()?.token.clone()),
                 })
                 .await?;
         }

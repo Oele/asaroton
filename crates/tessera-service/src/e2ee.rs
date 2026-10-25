@@ -41,9 +41,20 @@ impl Services {
             let uid = dk.get("user_id").and_then(|v| v.as_str());
             let did = dk.get("device_id").and_then(|v| v.as_str());
             if uid != Some(user_id.as_str()) || did != Some(device_id.as_str()) {
-                return Err(Error::forbidden(
+                return Err(Error::invalid_param(
                     "Device keys do not belong to the authenticated device.",
                 ));
+            }
+            let valid = dk
+                .get("algorithms")
+                .is_some_and(serde_json::Value::is_array)
+                && dk.get("keys").is_some_and(serde_json::Value::is_object)
+                && dk
+                    .get("signatures")
+                    .and_then(|s| s.get(user_id.as_str()))
+                    .is_some_and(serde_json::Value::is_object);
+            if !valid {
+                return Err(Error::bad_json("Device keys are missing required fields."));
             }
             let existing = self.store.get_device_keys(user_id, device_id).await?;
             if existing.as_ref() != Some(&dk) {
