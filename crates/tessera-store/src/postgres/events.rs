@@ -238,6 +238,46 @@ impl EventStore for PostgresStore {
         row.map(StoredEvent::try_from).transpose()
     }
 
+    async fn events_after(&self, after: StreamOrdering, limit: usize) -> Result<Vec<StoredEvent>> {
+        let sql = format!(
+            "SELECT {EVENT_COLUMNS} FROM events e JOIN rooms r ON r.room_id = e.room_id
+              WHERE e.stream_ordering > $1 AND NOT e.outlier AND NOT e.rejected
+              ORDER BY e.stream_ordering ASC LIMIT $2"
+        );
+        let rows: Vec<EventRow> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
+            .bind(after.max(0))
+            .bind(i64::try_from(limit).unwrap_or(i64::MAX))
+            .fetch_all(&self.pool)
+            .await?;
+        rows.into_iter().map(StoredEvent::try_from).collect()
+    }
+
+    async fn appservice_position(&self, appservice_id: &str) -> Result<StreamOrdering> {
+        let row = sqlx::query(
+            "SELECT stream_ordering FROM appservice_positions WHERE appservice_id = $1",
+        )
+        .bind(appservice_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map_or(0, |r| r.get::<i64, _>(0)))
+    }
+
+    async fn set_appservice_position(
+        &self,
+        appservice_id: &str,
+        position: StreamOrdering,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO appservice_positions (appservice_id, stream_ordering) VALUES ($1, $2)
+             ON CONFLICT (appservice_id) DO UPDATE SET stream_ordering = EXCLUDED.stream_ordering",
+        )
+        .bind(appservice_id)
+        .bind(position)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     async fn reserve_backfill_orderings(&self, n: usize) -> Result<Vec<StreamOrdering>> {
         let rows = sqlx::query("SELECT nextval('events_backfill_seq') FROM generate_series(1, $1)")
             .bind(i64::try_from(n).unwrap_or(0))
@@ -500,20 +540,23 @@ impl EventStore for PostgresStore {
         Ok(ids_from_rows(rows))
     }
 
-    async fn gap_since(&self, room_id: &RoomId, since: StreamOrdering) -> Result<bool> {
+    async fn gap_position_since(
+        &self,
+        room_id: &RoomId,
+        since: StreamOrdering,
+    ) -> Result<Option<StreamOrdering>> {
         let row = sqlx::query(
-            "SELECT 1 FROM event_edges g
+            "SELECT MIN(e.stream_ordering) FROM event_edges g
                JOIN events e ON e.event_id = g.event_id
                LEFT JOIN events p ON p.event_id = g.prev_event_id
               WHERE e.room_id = $1 AND e.stream_ordering > $2 AND NOT e.outlier AND NOT e.rejected
-                AND (p.event_id IS NULL OR p.outlier)
-              LIMIT 1",
+                AND (p.event_id IS NULL OR p.outlier)",
         )
         .bind(room_id.as_str())
         .bind(since)
-        .fetch_optional(&self.pool)
+        .fetch_one(&self.pool)
         .await?;
-        Ok(row.is_some())
+        Ok(row.get::<Option<i64>, _>(0))
     }
 
     async fn backward_extremities(&self, room_id: &RoomId) -> Result<Vec<OwnedEventId>> {

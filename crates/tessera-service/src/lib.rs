@@ -7,6 +7,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod account;
+pub mod appservice;
 pub mod config;
 pub mod e2ee;
 mod error;
@@ -44,6 +45,7 @@ pub struct Services {
     pub notifier: Notifier,
     pub typing: typing::TypingState,
     pub presence: presence::PresenceMap,
+    pub appservices: appservice::AppserviceRegistry,
     /// Nonces handed out by the shared-secret registration endpoint.
     admin_nonces: dashmap::DashMap<String, std::time::Instant>,
     federation_hooks: federation_hooks::HooksSlot,
@@ -66,8 +68,22 @@ impl Services {
     pub async fn new(config: Config, store: DynStore) -> Result<Arc<Self>> {
         let signing_key = signing::load_or_create_signing_key(&*store).await?;
         let config = Arc::new(config);
+        let appservices =
+            appservice::AppserviceRegistry::new(&config.appservices, &config.server_name)?;
+        let auth = Authenticator::new(Arc::clone(&store)).with_appservices(
+            appservices
+                .all()
+                .iter()
+                .map(|a| tessera_auth::AppserviceToken {
+                    token: a.as_token.clone(),
+                    id: a.id.clone(),
+                    user_id: a.sender.clone(),
+                })
+                .collect(),
+        );
         Ok(Arc::new(Self {
-            auth: Authenticator::new(Arc::clone(&store)),
+            auth,
+            appservices,
             uia: UiaSessions::default(),
             notifier: Notifier::new(),
             typing: typing::TypingState::default(),

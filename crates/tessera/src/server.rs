@@ -33,7 +33,7 @@ async fn connect_store(config: &Config) -> anyhow::Result<Arc<PostgresStore>> {
     Ok(Arc::new(store))
 }
 
-fn service_config(config: &Config) -> tessera_service::Config {
+fn service_config(config: &Config) -> anyhow::Result<tessera_service::Config> {
     let public_base_url = if config.listeners.client.tls().is_some() {
         format!("https://{}", config.server_name)
     } else {
@@ -45,7 +45,7 @@ fn service_config(config: &Config) -> tessera_service::Config {
     {
         trusted.push(m);
     }
-    tessera_service::Config {
+    Ok(tessera_service::Config {
         server_name: config.server_name.clone(),
         default_room_version: config.rooms.default_version.clone(),
         registration_enabled: config.registration.enabled,
@@ -58,13 +58,14 @@ fn service_config(config: &Config) -> tessera_service::Config {
         public_base_url,
         software_version: env!("CARGO_PKG_VERSION").to_owned(),
         media_dir: config.data_dir.join("media"),
+        appservices: load_appservices(config)?,
         server_notices: config.server_notices.enabled.then(|| {
             tessera_service::config::ServerNotices {
                 user_localpart: config.server_notices.user_localpart.clone(),
                 display_name: config.server_notices.display_name.clone(),
             }
         }),
-    }
+    })
 }
 
 fn federation_config(config: &Config) -> FederationConfig {
@@ -92,7 +93,7 @@ pub async fn migrate_only(config: Config) -> anyhow::Result<()> {
 
 pub async fn show_key(config: Config) -> anyhow::Result<()> {
     let store = connect_store(&config).await?;
-    let services = Services::new(service_config(&config), store).await?;
+    let services = Services::new(service_config(&config)?, store).await?;
     println!(
         "{} {}",
         services.signing_key.key_id(),
@@ -107,7 +108,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     std::fs::create_dir_all(&config.data_dir)
         .with_context(|| format!("creating data dir {}", config.data_dir.display()))?;
     let store = connect_store(&config).await?;
-    let services = Services::new(service_config(&config), store).await?;
+    let services = Services::new(service_config(&config)?, store).await?;
     tracing::info!(server_name = %config.server_name, key = %services.signing_key.key_id(), "tessera starting");
 
     let federation = if config.federation.disabled {
@@ -178,4 +179,36 @@ async fn listen(
         }
     }
     Ok(())
+}
+
+/// Read every appservice registration named in the config.
+fn load_appservices(
+    config: &Config,
+) -> anyhow::Result<Vec<tessera_service::appservice::Registration>> {
+    let mut files: Vec<std::path::PathBuf> = config.appservices.registration_files.clone();
+    if let Some(dir) = &config.appservices.registration_dir
+        && let Ok(entries) = std::fs::read_dir(dir)
+    {
+        let mut found: Vec<std::path::PathBuf> = entries
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| {
+                p.extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|e| e == "yaml" || e == "yml")
+            })
+            .collect();
+        found.sort();
+        files.extend(found);
+    }
+    let mut out = Vec::new();
+    for f in files {
+        let text = std::fs::read_to_string(&f)
+            .map_err(|e| anyhow::anyhow!("reading appservice registration {}: {e}", f.display()))?;
+        let reg: tessera_service::appservice::Registration = serde_yaml::from_str(&text)
+            .map_err(|e| anyhow::anyhow!("parsing appservice registration {}: {e}", f.display()))?;
+        tracing::info!(id = %reg.id, file = %f.display(), "loaded appservice registration");
+        out.push(reg);
+    }
+    Ok(out)
 }

@@ -125,7 +125,7 @@ impl Federation {
 }
 
 /// A plain HTTP client for fetching arbitrary URLs (not federation).
-fn plain_http() -> reqwest::Client {
+pub(crate) fn plain_http() -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
         .redirect(reqwest::redirect::Policy::limited(5))

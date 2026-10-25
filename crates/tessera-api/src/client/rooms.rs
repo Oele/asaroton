@@ -808,11 +808,15 @@ pub async fn get_alias(
             .await?;
         return Ok(alias::get_alias::v3::Response::new(room_id, servers));
     }
-    let a = services
-        .store
-        .get_alias(&req.body.room_alias)
-        .await?
-        .ok_or_else(|| Error::not_found("Room alias not found."))?;
+    let mut found = services.store.get_alias(&req.body.room_alias).await?;
+    if found.is_none()
+        && services
+            .query_appservice_alias(&req.body.room_alias)
+            .await?
+    {
+        found = services.store.get_alias(&req.body.room_alias).await?;
+    }
+    let a = found.ok_or_else(|| Error::not_found("Room alias not found."))?;
     let mut servers = services.store.servers_in_room(&a.room_id).await?;
     if servers.is_empty() {
         servers.push(services.config.server_name.clone());

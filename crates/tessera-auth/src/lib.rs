@@ -49,6 +49,7 @@ pub enum AuthError {
 #[derive(Clone)]
 pub struct Authenticator {
     store: DynStore,
+    appservices: Vec<AppserviceToken>,
 }
 
 impl std::fmt::Debug for Authenticator {
@@ -59,11 +60,31 @@ impl std::fmt::Debug for Authenticator {
 
 impl Authenticator {
     pub fn new(store: DynStore) -> Self {
-        Self { store }
+        Self {
+            store,
+            appservices: Vec::new(),
+        }
+    }
+
+    /// Register appservice tokens: a bearer token equal to an `as_token` authenticates as
+    /// that appservice's sender user.
+    #[must_use]
+    pub fn with_appservices(mut self, tokens: Vec<AppserviceToken>) -> Self {
+        self.appservices = tokens;
+        self
     }
 
     /// Look up a bearer token.
     pub async fn authenticate(&self, token: &str) -> Result<Sender, AuthError> {
+        if let Some(a) = self.appservices.iter().find(|a| a.token == token) {
+            return Ok(Sender {
+                user_id: a.user_id.clone(),
+                device_id: None,
+                is_guest: false,
+                appservice_id: Some(a.id.clone()),
+                token: token.to_owned(),
+            });
+        }
         let Some(t) = self.store.get_access_token(token).await? else {
             return Err(AuthError::UnknownToken { soft_logout: false });
         };
@@ -104,4 +125,12 @@ impl Authenticator {
             token: token.to_owned(),
         })
     }
+}
+
+/// An appservice's `as_token`, the appservice it belongs to, and its sender user.
+#[derive(Clone, Debug)]
+pub struct AppserviceToken {
+    pub token: String,
+    pub id: String,
+    pub user_id: OwnedUserId,
 }

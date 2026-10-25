@@ -154,6 +154,24 @@ where
                 "This endpoint is for application services only.",
             ));
         }
+        // Appservices act as any user in their namespaces via `?user_id=`.
+        let mut sender = sender;
+        if let Some(s) = sender.as_mut()
+            && let Some(as_id) = s.appservice_id.clone()
+            && let Some(query) = req.uri().query()
+            && let Some(raw_user) = query
+                .split('&')
+                .find_map(|kv| kv.strip_prefix("user_id="))
+                .and_then(percent_decode)
+        {
+            let user = ruma::OwnedUserId::try_from(raw_user.as_str())
+                .map_err(|_| Error::invalid_param("Invalid user_id."))?;
+            let Some(appservice) = services.appservices.by_id(&as_id) else {
+                return Err(Error::forbidden("Unknown appservice."));
+            };
+            services.ensure_appservice_user(&appservice, &user).await?;
+            s.user_id = user;
+        }
 
         // --- path args ------------------------------------------------------------------
         let (mut parts, body) = req.into_parts();

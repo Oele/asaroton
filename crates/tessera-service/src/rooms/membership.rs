@@ -271,7 +271,10 @@ impl Services {
         reason: Option<&str>,
         is_direct: bool,
     ) -> Result<StoredEvent> {
-        if self.is_local(invitee) && self.store.get_user(invitee).await?.is_none() {
+        if self.is_local(invitee)
+            && self.store.get_user(invitee).await?.is_none()
+            && !self.query_appservice_user(invitee).await.unwrap_or(false)
+        {
             return Err(Error::not_found("Invitee does not exist."));
         }
         match ctx.membership(invitee) {

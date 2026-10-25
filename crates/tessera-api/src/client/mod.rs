@@ -211,6 +211,7 @@ pub fn routes(router: Router<AppState>) -> Router<AppState> {
     let r = route::<c::presence::set_presence::v3::Request, _, _>(r, misc::set_presence);
     let r = route::<c::presence::get_presence::v3::Request, _, _>(r, misc::get_presence);
     let r = route::<c::user_directory::search_users::v3::Request, _, _>(r, misc::search_users);
+    let r = route::<c::appservice::request_ping::v1::Request, _, _>(r, misc::appservice_ping);
     let r = route::<c::thirdparty::get_protocols::v3::Request, _, _>(r, misc::thirdparty_protocols);
     let r = route::<c::voip::get_turn_server_info::v3::Request, _, _>(r, misc::turn_server);
     // media

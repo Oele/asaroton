@@ -183,6 +183,15 @@ pub trait EventStore: Send + Sync {
         ts: i64,
         direction: Direction,
     ) -> Result<Option<StoredEvent>>;
+    /// Live (non-backfilled, non-outlier, non-rejected) events after a global stream position.
+    async fn events_after(&self, after: StreamOrdering, limit: usize) -> Result<Vec<StoredEvent>>;
+    /// The last stream position delivered to an appservice (0 if none).
+    async fn appservice_position(&self, appservice_id: &str) -> Result<StreamOrdering>;
+    async fn set_appservice_position(
+        &self,
+        appservice_id: &str,
+        position: StreamOrdering,
+    ) -> Result<()>;
     /// Reserve `n` stream orderings from the backfill sequence (descending), so a batch of
     /// backfilled events can be stored oldest-first yet ordered correctly.
     async fn reserve_backfill_orderings(&self, n: usize) -> Result<Vec<StreamOrdering>>;
@@ -203,9 +212,13 @@ pub trait EventStore: Send + Sync {
     ) -> Result<()>;
     /// Prev events that are referenced but not stored.
     async fn missing_prev_events(&self, room_id: &RoomId) -> Result<Vec<OwnedEventId>>;
-    /// Whether an event stored after `since` references prev events we do not have (a gap
-    /// in the timeline clients should paginate).
-    async fn gap_since(&self, room_id: &RoomId, since: StreamOrdering) -> Result<bool>;
+    /// The earliest event stored after `since` whose prev events we do not have (or hold only
+    /// as outliers): the start of a gap in the timeline clients should paginate.
+    async fn gap_position_since(
+        &self,
+        room_id: &RoomId,
+        since: StreamOrdering,
+    ) -> Result<Option<StreamOrdering>>;
     /// Oldest events in the room that have missing prev events (backfill points).
     async fn backward_extremities(&self, room_id: &RoomId) -> Result<Vec<OwnedEventId>>;
 

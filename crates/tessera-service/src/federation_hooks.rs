@@ -69,6 +69,16 @@ pub trait FederationHooks: Send + Sync {
     async fn backfill(&self, room_id: &RoomId, limit: usize) -> Result<usize>;
     /// Open Graph preview data for a URL.
     async fn preview_url(&self, url: &str) -> Result<Value>;
+    /// Ask an appservice whether it knows a user (`GET /users/{userId}`).
+    async fn appservice_query_user(&self, appservice_id: &str, user: &UserId) -> Result<bool>;
+    /// Ask an appservice whether it knows an alias (`GET /rooms/{alias}`).
+    async fn appservice_query_alias(
+        &self,
+        appservice_id: &str,
+        alias: &RoomAliasId,
+    ) -> Result<bool>;
+    /// Ping an appservice; returns the round trip in milliseconds.
+    async fn appservice_ping(&self, appservice_id: &str, txn_id: &str) -> Result<u64>;
     /// Fetch remote device keys (`/user/keys/query`): user -> device -> keys, plus cross-signing.
     async fn remote_query_keys(
         &self,
@@ -137,6 +147,15 @@ impl FederationHooks for NoFederation {
         Ok(0)
     }
     async fn preview_url(&self, _: &str) -> Result<Value> {
+        Err(disabled())
+    }
+    async fn appservice_query_user(&self, _: &str, _: &UserId) -> Result<bool> {
+        Ok(false)
+    }
+    async fn appservice_query_alias(&self, _: &str, _: &RoomAliasId) -> Result<bool> {
+        Ok(false)
+    }
+    async fn appservice_ping(&self, _: &str, _: &str) -> Result<u64> {
         Err(disabled())
     }
     async fn remote_query_keys(

@@ -115,6 +115,21 @@ pub async fn register(
         let Some(sender) = req.sender.as_ref().filter(|s| s.appservice_id.is_some()) else {
             return Err(Error::missing_token());
         };
+        let appservice = sender
+            .appservice_id
+            .as_deref()
+            .and_then(|id| services.appservices.by_id(id))
+            .ok_or_else(|| Error::forbidden("Unknown appservice."))?;
+        if let Some(username) = &body.username {
+            let candidate = services.validate_localpart(username)?;
+            if !appservice.controls_user(&candidate) {
+                return Err(Error::matrix(
+                    ErrorKind::Exclusive,
+                    http::StatusCode::BAD_REQUEST,
+                    "User ID is not in the appservice's namespace.",
+                ));
+            }
+        }
         let user = services
             .register(Registration {
                 localpart: body.username.clone(),
@@ -147,7 +162,18 @@ pub async fn register(
 
     // Validate the username up front so clients get M_INVALID_USERNAME before UIA.
     if let Some(username) = &body.username {
-        services.validate_localpart(username)?;
+        let candidate = services.validate_localpart(username)?;
+        if services
+            .appservices
+            .exclusive_owner_of_user(&candidate)
+            .is_some()
+        {
+            return Err(Error::matrix(
+                ErrorKind::Exclusive,
+                http::StatusCode::BAD_REQUEST,
+                "User ID is reserved by an application service.",
+            ));
+        }
         if !services.is_username_available(username).await? {
             return Err(Error::matrix(
                 ErrorKind::UserInUse,
@@ -385,11 +411,19 @@ async fn local_user(services: &Services, user_id: &OwnedUserId) -> Result<tesser
             created_ts: 0,
         });
     }
-    services
-        .store
-        .get_user(user_id)
-        .await?
-        .ok_or_else(|| Error::not_found("Profile not found."))
+    {
+        let mut user = services.store.get_user(user_id).await?;
+        if user.is_none()
+            && services
+                .query_appservice_user(user_id)
+                .await
+                .unwrap_or(false)
+        {
+            user = services.store.get_user(user_id).await?;
+        }
+        user
+    }
+    .ok_or_else(|| Error::not_found("Profile not found."))
 }
 
 pub async fn get_profile(

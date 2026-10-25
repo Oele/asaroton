@@ -54,12 +54,20 @@ pub async fn login(
                     "Application service login requires an appservice token.",
                 ));
             };
-            let _ = sender;
+            let appservice = sender
+                .appservice_id
+                .as_deref()
+                .and_then(|id| services.appservices.by_id(id))
+                .ok_or_else(|| Error::forbidden("Unknown appservice."))?;
             let ident = match &a.identifier {
                 Some(UserIdentifier::Matrix(m)) => m.user.clone(),
                 _ => return Err(Error::bad_json("Missing user identifier.")),
             };
-            services.resolve_user_identifier(&ident)?
+            let user_id = services.resolve_user_identifier(&ident)?;
+            services
+                .ensure_appservice_user(&appservice, &user_id)
+                .await?;
+            user_id
         }
         _ => return Err(Error::unknown("Unsupported login type.")),
     };

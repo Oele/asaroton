@@ -542,16 +542,21 @@ impl Services {
                 }
             }
         }
-        let limited = events.len() > limit;
+        let mut limited = events.len() > limit;
         events.truncate(limit);
         events.reverse();
-        let timeline_start = events.first().map(|e| e.stream_ordering);
-        // A gap (events arrived whose history we do not have) also forces pagination.
+        // A gap (events arrived whose history we do not have) cuts the timeline: only the
+        // events from the gap onwards are shown, marked limited so the client paginates.
         let gap = match lower {
-            Some(l) => self.store.gap_since(room_id, l).await?,
-            None => false,
+            Some(l) => self.store.gap_position_since(room_id, l).await?,
+            None => None,
         };
-        room.limited = limited || newly_joined || gap;
+        if let Some(g) = gap {
+            events.retain(|e| e.stream_ordering >= g);
+            limited = true;
+        }
+        let timeline_start = events.first().map(|e| e.stream_ordering);
+        room.limited = limited || newly_joined;
         if let Some(first) = events.first() {
             room.prev_batch =
                 Some(super::rooms::timeline::StreamToken(first.stream_ordering - 1).to_string());
@@ -645,7 +650,13 @@ impl Services {
                         if let Some(t) = &r.thread_id {
                             data["thread_id"] = json!(t);
                         }
-                        users.insert(r.user_id.to_string(), data);
+                        // MSC4102: an unthreaded receipt takes precedence over a threaded one.
+                        let existing_unthreaded = users
+                            .get(r.user_id.as_str())
+                            .is_some_and(|d| d.get("thread_id").is_none());
+                        if !(existing_unthreaded && r.thread_id.is_some()) {
+                            users.insert(r.user_id.to_string(), data);
+                        }
                     }
                 }
                 room.ephemeral

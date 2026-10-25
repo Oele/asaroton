@@ -187,6 +187,30 @@ impl FederationHooks for Hooks {
             .map_err(tessera_service::Error::from)
     }
 
+    async fn appservice_query_user(
+        &self,
+        appservice_id: &str,
+        user: &UserId,
+    ) -> tessera_service::Result<bool> {
+        self.0.appservice_query_user(appservice_id, user).await
+    }
+
+    async fn appservice_query_alias(
+        &self,
+        appservice_id: &str,
+        alias: &ruma::RoomAliasId,
+    ) -> tessera_service::Result<bool> {
+        self.0.appservice_query_alias(appservice_id, alias).await
+    }
+
+    async fn appservice_ping(
+        &self,
+        appservice_id: &str,
+        txn_id: &str,
+    ) -> tessera_service::Result<u64> {
+        self.0.appservice_ping(appservice_id, txn_id).await
+    }
+
     async fn preview_url(&self, url: &str) -> tessera_service::Result<Value> {
         self.0
             .preview_url(url)

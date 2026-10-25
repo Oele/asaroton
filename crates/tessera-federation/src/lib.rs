@@ -10,6 +10,7 @@
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod appservice;
 pub mod backfill;
 pub mod client;
 pub mod discovery;
@@ -79,6 +80,7 @@ impl Federation {
         });
         let _ = fed.weak_self.set(Arc::downgrade(&fed));
         sender::start(Arc::clone(&fed));
+        appservice::start(&fed);
         // Keep the event cache bounded.
         let cache_owner = Arc::clone(&fed);
         tokio::spawn(async move {

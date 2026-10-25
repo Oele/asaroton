@@ -651,11 +651,11 @@ pub async fn query_directory(
     if req.body.room_alias.server_name() != app.server_name() {
         return Err(Error::not_found("Alias is not on this server."));
     }
-    let alias = app
-        .store
-        .get_alias(&req.body.room_alias)
-        .await?
-        .ok_or_else(|| Error::not_found("Room alias not found."))?;
+    let mut found = app.store.get_alias(&req.body.room_alias).await?;
+    if found.is_none() && app.query_appservice_alias(&req.body.room_alias).await? {
+        found = app.store.get_alias(&req.body.room_alias).await?;
+    }
+    let alias = found.ok_or_else(|| Error::not_found("Room alias not found."))?;
     let servers = app.store.servers_in_room(&alias.room_id).await?;
     Ok(get_room_information::v1::Response::new(
         alias.room_id,

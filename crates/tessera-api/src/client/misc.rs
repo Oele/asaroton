@@ -408,3 +408,30 @@ pub async fn turn_server(
         Duration::from_hours(24),
     ))
 }
+
+/// `POST /_matrix/client/v1/appservice/{appserviceId}/ping`.
+pub async fn appservice_ping(
+    services: AppState,
+    req: Ruma<ruma::api::client::appservice::request_ping::v1::Request>,
+) -> Result<ruma::api::client::appservice::request_ping::v1::Response> {
+    let sender = req.sender()?;
+    if sender.appservice_id.as_deref() != Some(req.body.appservice_id.as_str()) {
+        return Err(Error::forbidden(
+            "Only the appservice itself may ping its URL.",
+        ));
+    }
+    let txn = req
+        .body
+        .transaction_id
+        .as_ref()
+        .map_or_else(String::new, ToString::to_string);
+    let ms = services
+        .federation()
+        .appservice_ping(&req.body.appservice_id, &txn)
+        .await?;
+    Ok(
+        ruma::api::client::appservice::request_ping::v1::Response::new(
+            std::time::Duration::from_millis(ms),
+        ),
+    )
+}

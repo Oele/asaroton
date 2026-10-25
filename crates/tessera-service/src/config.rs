@@ -22,6 +22,8 @@ pub struct Config {
     pub media_dir: std::path::PathBuf,
     /// Server notices, when enabled.
     pub server_notices: Option<ServerNotices>,
+    /// Application service registrations.
+    pub appservices: Vec<crate::appservice::Registration>,
 }
 
 /// Server notices settings.

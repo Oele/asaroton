@@ -55,6 +55,9 @@ enabled = false
 [server_notices]
 enabled = true
 user_localpart = "_server"
+
+[appservices]
+registration_dir = "/complement/appservice"
 CFG
 
 export RUST_LOG="${RUST_LOG:-info,tessera_federation=debug}"

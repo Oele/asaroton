@@ -30,6 +30,9 @@ pub struct Config {
     /// Server notices (admin messages delivered in a dedicated room).
     #[serde(default)]
     pub server_notices: ServerNoticesConfig,
+    /// Application services.
+    #[serde(default)]
+    pub appservices: AppservicesConfig,
     #[serde(default)]
     pub rooms: RoomsConfig,
     #[serde(default)]
@@ -242,4 +245,16 @@ fn default_notices_localpart() -> String {
 
 fn default_notices_name() -> String {
     "Server Notices".to_owned()
+}
+
+/// Where application service registration files live.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppservicesConfig {
+    /// Individual registration files (YAML).
+    #[serde(default)]
+    pub registration_files: Vec<PathBuf>,
+    /// A directory whose `*.yaml`/`*.yml` files are registrations; missing is fine.
+    #[serde(default)]
+    pub registration_dir: Option<PathBuf>,
 }
