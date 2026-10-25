@@ -203,6 +203,42 @@ pub trait EventStore: Send + Sync {
         latest: &[OwnedEventId],
         limit: usize,
     ) -> Result<Vec<StoredEvent>>;
+    /// Events relating to `event_id`, optionally filtered by relation and event type, paged
+    /// by stream ordering. With `recurse`, relations of relations (up to depth 3) count too.
+    #[allow(clippy::too_many_arguments)]
+    async fn relations(
+        &self,
+        room_id: &RoomId,
+        event_id: &EventId,
+        rel_type: Option<&str>,
+        event_type: Option<&str>,
+        recurse: bool,
+        from: Option<StreamOrdering>,
+        to: Option<StreamOrdering>,
+        direction: Direction,
+        limit: usize,
+    ) -> Result<Vec<StoredEvent>>;
+    /// Every relation pointing at `event_id`, oldest first.
+    async fn relation_summary(&self, event_id: &EventId) -> Result<Vec<RelationRow>>;
+    /// Thread roots in a room ordered by latest activity (newest first), paged by the latest
+    /// reply's stream ordering.
+    async fn threads(
+        &self,
+        room_id: &RoomId,
+        participant: Option<&UserId>,
+        before: Option<StreamOrdering>,
+        limit: usize,
+    ) -> Result<Vec<ThreadSummary>>;
+    /// Full-text search over message bodies, names and topics in the given rooms. Returns the
+    /// page plus the total hit count.
+    async fn search_events(
+        &self,
+        room_ids: &[OwnedRoomId],
+        term: &str,
+        order_recent: bool,
+        offset: usize,
+        limit: usize,
+    ) -> Result<(Vec<SearchHit>, usize)>;
     /// Events between `earliest` (exclusive) and `latest` (inclusive) by walking prev events.
     async fn missing_events_between(
         &self,

@@ -49,25 +49,39 @@ pub fn sync_filter(f: &FilterDefinition) -> SyncFilter {
     out
 }
 
-fn events_json(events: &[StoredEvent], room: &RoomSync) -> Vec<Value> {
-    events
-        .iter()
-        .map(|e| {
-            let mut v = client_event(e);
-            if let Some(txn) = room.txn_ids.get(e.pdu.event_id())
-                && let Some(u) = v.get_mut("unsigned").and_then(|u| u.as_object_mut())
-            {
-                u.insert("transaction_id".into(), json!(txn));
-            }
-            v
-        })
-        .collect()
+async fn events_json(
+    services: &AppState,
+    user: &ruma::UserId,
+    events: &[StoredEvent],
+    room: &RoomSync,
+    aggregations: bool,
+) -> Result<Vec<Value>> {
+    let mut out = Vec::with_capacity(events.len());
+    for e in events {
+        let mut v = if aggregations {
+            services.client_event(e, Some(user)).await?
+        } else {
+            client_event(e)
+        };
+        if let Some(txn) = room.txn_ids.get(e.pdu.event_id())
+            && let Some(u) = v.get_mut("unsigned").and_then(|u| u.as_object_mut())
+        {
+            u.insert("transaction_id".into(), json!(txn));
+        }
+        out.push(v);
+    }
+    Ok(out)
 }
 
-fn room_json(room: &RoomSync, joined: bool) -> Value {
+async fn room_json(
+    services: &AppState,
+    user: &ruma::UserId,
+    room: &RoomSync,
+    joined: bool,
+) -> Result<Value> {
     let mut v = Map::new();
     let mut timeline = json!({
-        "events": events_json(&room.timeline, room),
+        "events": events_json(services, user, &room.timeline, room, true).await?,
         "limited": room.limited,
     });
     if let Some(pb) = &room.prev_batch {
@@ -76,7 +90,7 @@ fn room_json(room: &RoomSync, joined: bool) -> Value {
     v.insert("timeline".into(), timeline);
     v.insert(
         "state".into(),
-        json!({ "events": events_json(&room.state, room) }),
+        json!({ "events": events_json(services, user, &room.state, room, false).await? }),
     );
     v.insert(
         "account_data".into(),
@@ -97,7 +111,7 @@ fn room_json(room: &RoomSync, joined: bool) -> Value {
             json!({ "notification_count": room.unread_notifications, "highlight_count": room.unread_highlights }),
         );
     }
-    Value::Object(v)
+    Ok(Value::Object(v))
 }
 
 pub async fn sync(
@@ -148,11 +162,17 @@ pub async fn sync(
 
     let mut join = Map::new();
     for (room_id, r) in &result.join {
-        join.insert(room_id.to_string(), room_json(r, true));
+        join.insert(
+            room_id.to_string(),
+            room_json(&services, &sender.user_id, r, true).await?,
+        );
     }
     let mut leave = Map::new();
     for (room_id, r) in &result.leave {
-        leave.insert(room_id.to_string(), room_json(r, false));
+        leave.insert(
+            room_id.to_string(),
+            room_json(&services, &sender.user_id, r, false).await?,
+        );
     }
     let mut invite = Map::new();
     for (room_id, state) in &result.invite {

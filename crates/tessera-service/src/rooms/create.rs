@@ -341,7 +341,7 @@ impl Services {
         Ok(room_id)
     }
 
-    async fn send_state_locked(
+    pub(crate) async fn send_state_locked(
         &self,
         ctx: &mut RoomContext,
         room_id: &ruma::RoomId,

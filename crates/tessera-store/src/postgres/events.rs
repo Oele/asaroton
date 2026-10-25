@@ -1,12 +1,12 @@
 use async_trait::async_trait;
-use ruma::{EventId, OwnedEventId, OwnedRoomId, RoomId};
-use sqlx::{PgConnection, Row};
+use ruma::{EventId, OwnedEventId, OwnedRoomId, RoomId, UserId};
+use sqlx::{FromRow, PgConnection, Row};
 use tessera_core::Pdu;
 
 use super::{EVENT_COLUMNS, EventRow, PostgresStore, strings};
 use crate::{
-    Direction, Error, EventState, EventStore, PersistEvent, PersistedEvent, Result, StoredEvent,
-    StreamOrdering, now_ts, parse_ids, uint_to_i64,
+    Direction, Error, EventState, EventStore, PersistEvent, PersistedEvent, RelationRow, Result,
+    SearchHit, StoredEvent, StreamOrdering, ThreadSummary, now_ts, parse_ids, uint_to_i64,
 };
 
 async fn persist_one(conn: &mut PgConnection, ev: PersistEvent) -> Result<PersistedEvent> {
@@ -104,6 +104,9 @@ async fn persist_one(conn: &mut PgConnection, ev: PersistEvent) -> Result<Persis
         .bind(&prev)
         .execute(&mut *conn)
         .await?;
+    }
+    if !pdu.rejected() {
+        index_relation_and_search(&mut *conn, pdu, stream_ordering).await?;
     }
     let auth = strings(pdu.auth_events());
     if !auth.is_empty() {
@@ -227,7 +230,184 @@ impl EventStore for PostgresStore {
         .bind(&json)
         .execute(&self.pool)
         .await?;
+        sqlx::query("DELETE FROM event_relations WHERE event_id = $1")
+            .bind(event_id.as_str())
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("DELETE FROM event_search WHERE event_id = $1")
+            .bind(event_id.as_str())
+            .execute(&self.pool)
+            .await?;
         Ok(())
+    }
+
+    async fn relations(
+        &self,
+        room_id: &RoomId,
+        event_id: &EventId,
+        rel_type: Option<&str>,
+        event_type: Option<&str>,
+        recurse: bool,
+        from: Option<StreamOrdering>,
+        to: Option<StreamOrdering>,
+        direction: Direction,
+        limit: usize,
+    ) -> Result<Vec<StoredEvent>> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let (cmp_from, cmp_to, order) = match direction {
+            Direction::Forwards => (">", "<=", "ASC"),
+            Direction::Backwards => ("<", ">=", "DESC"),
+        };
+        let source = if recurse {
+            "WITH RECURSIVE rel AS (
+                SELECT event_id, rel_type, event_type, stream_ordering, 1 AS depth
+                  FROM event_relations WHERE relates_to = $2
+                UNION ALL
+                SELECT r.event_id, r.rel_type, r.event_type, r.stream_ordering, rel.depth + 1
+                  FROM event_relations r JOIN rel ON r.relates_to = rel.event_id
+                 WHERE rel.depth < 3
+            ) SELECT DISTINCT ON (event_id) * FROM rel"
+        } else {
+            "SELECT event_id, rel_type, event_type, stream_ordering FROM event_relations WHERE relates_to = $2"
+        };
+        let sql = format!(
+            "SELECT {EVENT_COLUMNS} FROM ({source}) x
+               JOIN events e ON e.event_id = x.event_id JOIN rooms r ON r.room_id = e.room_id
+              WHERE e.room_id = $1 AND NOT e.rejected
+                AND ($3::text IS NULL OR x.rel_type = $3)
+                AND ($4::text IS NULL OR x.event_type = $4)
+                AND ($5::bigint IS NULL OR x.stream_ordering {cmp_from} $5)
+                AND ($6::bigint IS NULL OR x.stream_ordering {cmp_to} $6)
+              ORDER BY x.stream_ordering {order} LIMIT $7"
+        );
+        let rows: Vec<EventRow> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
+            .bind(room_id.as_str())
+            .bind(event_id.as_str())
+            .bind(rel_type)
+            .bind(event_type)
+            .bind(from)
+            .bind(to)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?;
+        rows.into_iter().map(StoredEvent::try_from).collect()
+    }
+
+    async fn relation_summary(&self, event_id: &EventId) -> Result<Vec<RelationRow>> {
+        let rows = sqlx::query(
+            "SELECT r.event_id, r.rel_type, r.event_type, r.sender, r.origin_server_ts, r.stream_ordering
+               FROM event_relations r JOIN events e ON e.event_id = r.event_id
+              WHERE r.relates_to = $1 AND NOT e.rejected
+              ORDER BY r.stream_ordering ASC",
+        )
+        .bind(event_id.as_str())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|r| {
+                Ok(RelationRow {
+                    event_id: OwnedEventId::try_from(r.get::<String, _>(0))
+                        .map_err(|e| Error::Corrupt(format!("event id: {e}")))?,
+                    rel_type: r.get(1),
+                    event_type: r.get(2),
+                    sender: ruma::OwnedUserId::try_from(r.get::<String, _>(3))
+                        .map_err(|e| Error::Corrupt(format!("user id: {e}")))?,
+                    origin_server_ts: r.get(4),
+                    stream_ordering: r.get(5),
+                })
+            })
+            .collect()
+    }
+
+    async fn threads(
+        &self,
+        room_id: &RoomId,
+        participant: Option<&UserId>,
+        before: Option<StreamOrdering>,
+        limit: usize,
+    ) -> Result<Vec<ThreadSummary>> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let rows = sqlx::query(
+            "SELECT r.relates_to, MAX(r.stream_ordering) AS latest
+               FROM event_relations r JOIN events root ON root.event_id = r.relates_to
+              WHERE r.room_id = $1 AND r.rel_type = 'm.thread' AND NOT root.rejected
+              GROUP BY r.relates_to
+             HAVING ($2::bigint IS NULL OR MAX(r.stream_ordering) < $2)
+                AND ($3::text IS NULL OR MAX(root.sender) = $3
+                     OR bool_or(r.sender = $3))
+              ORDER BY latest DESC LIMIT $4",
+        )
+        .bind(room_id.as_str())
+        .bind(before)
+        .bind(participant.map(UserId::as_str))
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for r in rows {
+            let root_id = OwnedEventId::try_from(r.get::<String, _>(0))
+                .map_err(|e| Error::Corrupt(format!("event id: {e}")))?;
+            if let Some(root) = self.get_event(&root_id).await? {
+                out.push(ThreadSummary {
+                    root,
+                    latest_stream_ordering: r.get(1),
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    async fn search_events(
+        &self,
+        room_ids: &[OwnedRoomId],
+        term: &str,
+        order_recent: bool,
+        offset: usize,
+        limit: usize,
+    ) -> Result<(Vec<SearchHit>, usize)> {
+        if room_ids.is_empty() {
+            return Ok((Vec::new(), 0));
+        }
+        let rooms = strings(room_ids);
+        let count: i64 = sqlx::query(
+            "SELECT COUNT(*) FROM event_search s
+              WHERE s.room_id = ANY($1) AND s.vector @@ websearch_to_tsquery('english', $2)",
+        )
+        .bind(&rooms)
+        .bind(term)
+        .fetch_one(&self.pool)
+        .await?
+        .get(0);
+        let order = if order_recent {
+            "s.origin_server_ts DESC, s.stream_ordering DESC"
+        } else {
+            "rank DESC, s.stream_ordering DESC"
+        };
+        let sql = format!(
+            "SELECT {EVENT_COLUMNS}, ts_rank(s.vector, websearch_to_tsquery('english', $2)) AS rank
+               FROM event_search s JOIN events e ON e.event_id = s.event_id
+               JOIN rooms r ON r.room_id = e.room_id
+              WHERE s.room_id = ANY($1) AND s.vector @@ websearch_to_tsquery('english', $2)
+                AND NOT e.rejected
+              ORDER BY {order} OFFSET $3 LIMIT $4"
+        );
+        let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(&rooms)
+            .bind(term)
+            .bind(i64::try_from(offset).unwrap_or(i64::MAX))
+            .bind(i64::try_from(limit).unwrap_or(i64::MAX))
+            .fetch_all(&self.pool)
+            .await?;
+        let mut hits = Vec::with_capacity(rows.len());
+        for row in rows {
+            let rank: f32 = row.get("rank");
+            let ev = StoredEvent::try_from(EventRow::from_row(&row)?)?;
+            hits.push(SearchHit {
+                event: ev,
+                rank: f64::from(rank),
+            });
+        }
+        Ok((hits, usize::try_from(count).unwrap_or(0)))
     }
 
     async fn de_outlier(&self, event_id: &EventId, state_group: i64) -> Result<()> {
@@ -425,4 +605,55 @@ impl From<ruma::IdParseError> for Error {
     fn from(e: ruma::IdParseError) -> Self {
         Error::Corrupt(e.to_string())
     }
+}
+
+/// Record `m.relates_to` and index searchable text for a freshly persisted event.
+async fn index_relation_and_search(
+    conn: &mut PgConnection,
+    pdu: &Pdu,
+    stream_ordering: i64,
+) -> Result<()> {
+    let content: serde_json::Value = serde_json::from_str(pdu.content().get()).unwrap_or_default();
+    if let Some(rel) = content.get("m.relates_to")
+        && let (Some(rel_type), Some(target)) = (
+            rel.get("rel_type").and_then(|v| v.as_str()),
+            rel.get("event_id").and_then(|v| v.as_str()),
+        )
+        && ruma::EventId::parse(target).is_ok()
+    {
+        sqlx::query(
+            "INSERT INTO event_relations (event_id, room_id, relates_to, rel_type, event_type, sender, origin_server_ts, stream_ordering)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT DO NOTHING",
+        )
+        .bind(pdu.event_id().as_str())
+        .bind(pdu.room_id().as_str())
+        .bind(target)
+        .bind(rel_type)
+        .bind(pdu.event_type().to_string())
+        .bind(pdu.sender().as_str())
+        .bind(uint_to_i64(pdu.origin_server_ts().0))
+        .bind(stream_ordering)
+        .execute(&mut *conn)
+        .await?;
+    }
+    let text = match pdu.event_type().to_string().as_str() {
+        "m.room.message" => content.get("body").and_then(|v| v.as_str()),
+        "m.room.name" => content.get("name").and_then(|v| v.as_str()),
+        "m.room.topic" => content.get("topic").and_then(|v| v.as_str()),
+        _ => None,
+    };
+    if let Some(text) = text {
+        sqlx::query(
+            "INSERT INTO event_search (event_id, room_id, stream_ordering, origin_server_ts, vector)
+             VALUES ($1, $2, $3, $4, to_tsvector('english', $5)) ON CONFLICT DO NOTHING",
+        )
+        .bind(pdu.event_id().as_str())
+        .bind(pdu.room_id().as_str())
+        .bind(stream_ordering)
+        .bind(uint_to_i64(pdu.origin_server_ts().0))
+        .bind(text)
+        .execute(&mut *conn)
+        .await?;
+    }
+    Ok(())
 }

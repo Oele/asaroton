@@ -357,3 +357,28 @@ pub struct ThumbnailInfo {
 pub fn uint_to_i64(v: UInt) -> i64 {
     i64::try_from(u64::from(v)).unwrap_or(i64::MAX)
 }
+
+/// One relation (`m.relates_to`) pointing at an event.
+#[derive(Debug, Clone)]
+pub struct RelationRow {
+    pub event_id: OwnedEventId,
+    pub rel_type: String,
+    pub event_type: String,
+    pub sender: OwnedUserId,
+    pub origin_server_ts: i64,
+    pub stream_ordering: StreamOrdering,
+}
+
+/// A thread root with the position of its latest reply.
+#[derive(Debug, Clone)]
+pub struct ThreadSummary {
+    pub root: StoredEvent,
+    pub latest_stream_ordering: StreamOrdering,
+}
+
+/// A full-text search hit.
+#[derive(Debug, Clone)]
+pub struct SearchHit {
+    pub event: StoredEvent,
+    pub rank: f64,
+}

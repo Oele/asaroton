@@ -14,6 +14,7 @@ use ruma::{
         room::{self, create_room, get_room_event},
         state::{get_state_event_for_key, get_state_events, send_state_event},
     },
+    api::client::{relations, search, threads},
     events::room::member::MembershipState,
     serde::Raw,
 };
@@ -520,10 +521,11 @@ pub async fn messages(
     let mut resp = get_message_events::v3::Response::new();
     resp.start = page.start.to_string();
     resp.end = page.end.map(|t| t.to_string());
-    resp.chunk = page
-        .events
+    resp.chunk = services
+        .client_events(&page.events, Some(&sender.user_id))
+        .await?
         .iter()
-        .map(|e| raw(&client_event(e)))
+        .map(raw)
         .collect::<Result<Vec<_>>>()?;
     // Lazy-loaded membership: the member events of everyone who sent something in the chunk.
     if matches!(
@@ -555,7 +557,9 @@ pub async fn context(
     let ev = services
         .get_room_event(&req.body.room_id, &sender.user_id, &req.body.event_id)
         .await?;
-    Ok(get_room_event::v3::Response::new(raw(&client_event(&ev))?))
+    Ok(get_room_event::v3::Response::new(raw(&services
+        .client_event(&ev, Some(&sender.user_id))
+        .await?)?))
 }
 
 pub async fn event_context(
@@ -576,14 +580,19 @@ pub async fn event_context(
     let mut resp = get_context::v3::Response::new();
     resp.start = Some(start.to_string());
     resp.end = Some(end.to_string());
-    resp.events_before = before
+    let user = Some(&*sender.user_id);
+    resp.events_before = services
+        .client_events(&before, user)
+        .await?
         .iter()
-        .map(|e| raw(&client_event(e)))
+        .map(raw)
         .collect::<Result<Vec<_>>>()?;
-    resp.event = Some(raw(&client_event(&ev))?);
-    resp.events_after = after
+    resp.event = Some(raw(&services.client_event(&ev, user).await?)?);
+    resp.events_after = services
+        .client_events(&after, user)
+        .await?
         .iter()
-        .map(|e| raw(&client_event(e)))
+        .map(raw)
         .collect::<Result<Vec<_>>>()?;
     let state = services.store.current_state_pdus(&req.body.room_id).await?;
     resp.state = state
@@ -859,3 +868,332 @@ pub async fn public_rooms_chunk(
 /// Silence unused-import lints for module aliases used only in paths.
 #[allow(dead_code)]
 fn _unused(_: Option<membership::joined_rooms::v3::Request>) {}
+
+// ---------------------------------------------------------------- relations & threads
+
+fn relation_dir(d: ruma::api::Direction) -> Direction {
+    match d {
+        ruma::api::Direction::Forward => Direction::Forwards,
+        ruma::api::Direction::Backward => Direction::Backwards,
+    }
+}
+
+fn parse_token(s: Option<&str>, what: &str) -> Result<Option<StreamToken>> {
+    s.map(|t| {
+        StreamToken::parse(t).ok_or_else(|| Error::invalid_param(format!("Invalid {what} token.")))
+    })
+    .transpose()
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn relations_common(
+    services: &AppState,
+    sender: &tessera_auth::Sender,
+    room_id: &ruma::RoomId,
+    event_id: &ruma::EventId,
+    rel_type: Option<&str>,
+    event_type: Option<&str>,
+    recurse: bool,
+    from: Option<&str>,
+    to: Option<&str>,
+    dir: ruma::api::Direction,
+    limit: Option<ruma::UInt>,
+) -> Result<(
+    Vec<Raw<ruma::events::AnyMessageLikeEvent>>,
+    Option<String>,
+    Option<String>,
+)> {
+    let limit = limit.map_or(5, |l| usize::try_from(u64::from(l)).unwrap_or(5));
+    let page = services
+        .relations(
+            room_id,
+            &sender.user_id,
+            event_id,
+            rel_type,
+            event_type,
+            recurse,
+            parse_token(from, "from")?,
+            parse_token(to, "to")?,
+            relation_dir(dir),
+            limit,
+        )
+        .await?;
+    let chunk = services
+        .client_events(&page.events, Some(&sender.user_id))
+        .await?
+        .iter()
+        .map(raw)
+        .collect::<Result<Vec<_>>>()?;
+    Ok((
+        chunk,
+        page.next_batch.map(|t| t.to_string()),
+        page.prev_batch.map(|t| t.to_string()),
+    ))
+}
+
+pub async fn relations(
+    services: AppState,
+    req: Ruma<relations::get_relating_events::v1::Request>,
+) -> Result<relations::get_relating_events::v1::Response> {
+    let sender = req.sender()?;
+    let b = &req.body;
+    let (chunk, next, prev) = relations_common(
+        &services,
+        sender,
+        &b.room_id,
+        &b.event_id,
+        None,
+        None,
+        b.recurse,
+        b.from.as_deref(),
+        b.to.as_deref(),
+        b.dir,
+        b.limit,
+    )
+    .await?;
+    let mut resp = relations::get_relating_events::v1::Response::new(chunk);
+    resp.next_batch = next;
+    resp.prev_batch = prev;
+    resp.recursion_depth = b.recurse.then_some(ruma::UInt::from(3u32));
+    Ok(resp)
+}
+
+pub async fn relations_with_rel_type(
+    services: AppState,
+    req: Ruma<relations::get_relating_events_with_rel_type::v1::Request>,
+) -> Result<relations::get_relating_events_with_rel_type::v1::Response> {
+    let sender = req.sender()?;
+    let b = &req.body;
+    let rel = b.rel_type.to_string();
+    let (chunk, next, prev) = relations_common(
+        &services,
+        sender,
+        &b.room_id,
+        &b.event_id,
+        Some(&rel),
+        None,
+        b.recurse,
+        b.from.as_deref(),
+        b.to.as_deref(),
+        b.dir,
+        b.limit,
+    )
+    .await?;
+    let mut resp = relations::get_relating_events_with_rel_type::v1::Response::new(chunk);
+    resp.next_batch = next;
+    resp.prev_batch = prev;
+    resp.recursion_depth = b.recurse.then_some(ruma::UInt::from(3u32));
+    Ok(resp)
+}
+
+pub async fn relations_with_rel_and_event_type(
+    services: AppState,
+    req: Ruma<relations::get_relating_events_with_rel_type_and_event_type::v1::Request>,
+) -> Result<relations::get_relating_events_with_rel_type_and_event_type::v1::Response> {
+    let sender = req.sender()?;
+    let b = &req.body;
+    let rel = b.rel_type.to_string();
+    let ty = b.event_type.to_string();
+    let (chunk, next, prev) = relations_common(
+        &services,
+        sender,
+        &b.room_id,
+        &b.event_id,
+        Some(&rel),
+        Some(&ty),
+        b.recurse,
+        b.from.as_deref(),
+        b.to.as_deref(),
+        b.dir,
+        b.limit,
+    )
+    .await?;
+    let mut resp =
+        relations::get_relating_events_with_rel_type_and_event_type::v1::Response::new(chunk);
+    resp.next_batch = next;
+    resp.prev_batch = prev;
+    resp.recursion_depth = b.recurse.then_some(ruma::UInt::from(3u32));
+    Ok(resp)
+}
+
+pub async fn threads(
+    services: AppState,
+    req: Ruma<threads::get_threads::v1::Request>,
+) -> Result<threads::get_threads::v1::Response> {
+    let sender = req.sender()?;
+    let b = &req.body;
+    let limit = b
+        .limit
+        .map_or(10, |l| usize::try_from(u64::from(l)).unwrap_or(10));
+    let participated = matches!(
+        b.include,
+        threads::get_threads::v1::IncludeThreads::Participated
+    );
+    let (summaries, next) = services
+        .threads(
+            &b.room_id,
+            &sender.user_id,
+            participated,
+            parse_token(b.from.as_deref(), "from")?,
+            limit,
+        )
+        .await?;
+    let roots: Vec<StoredEvent> = summaries.into_iter().map(|t| t.root).collect();
+    let chunk = services
+        .client_events(&roots, Some(&sender.user_id))
+        .await?
+        .iter()
+        .map(raw)
+        .collect::<Result<Vec<_>>>()?;
+    let mut resp = threads::get_threads::v1::Response::new(chunk);
+    resp.next_batch = next.map(|t| t.to_string());
+    Ok(resp)
+}
+
+// ---------------------------------------------------------------- upgrade, reports, search
+
+pub async fn upgrade(
+    services: AppState,
+    req: Ruma<room::upgrade_room::v3::Request>,
+) -> Result<room::upgrade_room::v3::Response> {
+    let sender = req.sender()?;
+    if !tessera_core::room_version::is_supported(&req.body.new_version) {
+        return Err(Error::matrix(
+            ruma::api::error::ErrorKind::UnsupportedRoomVersion,
+            http::StatusCode::BAD_REQUEST,
+            "Unsupported room version.",
+        ));
+    }
+    let new_room = services
+        .upgrade_room(
+            &sender.user_id,
+            &req.body.room_id,
+            req.body.new_version.clone(),
+            req.body.additional_creators.clone(),
+        )
+        .await?;
+    Ok(room::upgrade_room::v3::Response::new(new_room))
+}
+
+pub async fn report_event(
+    services: AppState,
+    req: Ruma<room::report_content::v3::Request>,
+) -> Result<room::report_content::v3::Response> {
+    let sender = req.sender()?;
+    // The event must be visible to the reporter; otherwise 404 (after a short delay, so the
+    // endpoint cannot be used to probe for events).
+    if services
+        .get_room_event(&req.body.room_id, &sender.user_id, &req.body.event_id)
+        .await
+        .is_err()
+    {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        return Err(Error::not_found("Event not found."));
+    }
+    tracing::info!(reporter = %sender.user_id, room = %req.body.room_id, event = %req.body.event_id, reason = ?req.body.reason, "event reported");
+    Ok(room::report_content::v3::Response::new())
+}
+
+pub async fn report_room(
+    services: AppState,
+    req: Ruma<room::report_room::v3::Request>,
+) -> Result<room::report_room::v3::Response> {
+    let sender = req.sender()?;
+    if services.store.get_room(&req.body.room_id).await?.is_none()
+        || !services
+            .can_read_room(&req.body.room_id, &sender.user_id)
+            .await?
+    {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        return Err(Error::not_found("Room not found."));
+    }
+    tracing::info!(reporter = %sender.user_id, room = %req.body.room_id, reason = %req.body.reason, "room reported");
+    Ok(room::report_room::v3::Response::new())
+}
+
+pub async fn report_user(
+    _services: AppState,
+    req: Ruma<ruma::api::client::reporting::report_user::v3::Request>,
+) -> Result<ruma::api::client::reporting::report_user::v3::Response> {
+    let sender = req.sender()?;
+    tracing::info!(reporter = %sender.user_id, user = %req.body.user_id, reason = %req.body.reason, "user reported");
+    Ok(ruma::api::client::reporting::report_user::v3::Response::new())
+}
+
+pub async fn search(
+    services: AppState,
+    req: Ruma<search::search_events::v3::Request>,
+) -> Result<search::search_events::v3::Response> {
+    use search::search_events::v3::{
+        EventContextResult, OrderBy, ResultCategories, ResultRoomEvents, SearchResult, UserProfile,
+    };
+    use tessera_service::rooms::search::SearchRequest;
+    let sender = req.sender()?;
+    let mut categories = ResultCategories::new();
+    let Some(c) = &req.body.search_categories.room_events else {
+        return Ok(search::search_events::v3::Response::new(categories));
+    };
+    let offset = match req.body.next_batch.as_deref() {
+        Some(t) => t
+            .parse::<usize>()
+            .map_err(|_| Error::invalid_param("Invalid next_batch token."))?,
+        None => 0,
+    };
+    let page = services
+        .search(
+            &sender.user_id,
+            SearchRequest {
+                term: c.search_term.clone(),
+                rooms: c.filter.rooms.clone(),
+                not_rooms: c.filter.not_rooms.clone(),
+                senders: c.filter.senders.clone(),
+                not_senders: c.filter.not_senders.clone(),
+                types: c.filter.types.clone(),
+                not_types: c.filter.not_types.clone(),
+                order_recent: matches!(c.order_by, Some(OrderBy::Recent)),
+                before_limit: usize::try_from(u64::from(c.event_context.before_limit)).unwrap_or(5),
+                after_limit: usize::try_from(u64::from(c.event_context.after_limit)).unwrap_or(5),
+                include_profile: c.event_context.include_profile,
+                offset,
+                limit: c
+                    .filter
+                    .limit
+                    .map_or(10, |l| usize::try_from(u64::from(l)).unwrap_or(10)),
+            },
+        )
+        .await?;
+    let user = Some(&*sender.user_id);
+    let mut room_events = ResultRoomEvents::new();
+    room_events.count = Some(ruma::UInt::try_from(page.count).unwrap_or(ruma::UInt::MAX));
+    room_events.next_batch = page.next_offset.map(|o| o.to_string());
+    for r in &page.results {
+        let mut sr = SearchResult::new();
+        sr.rank = Some(r.rank);
+        sr.result = Some(raw(&services.client_event(&r.event, user).await?)?);
+        let mut ctx = EventContextResult::new();
+        ctx.events_before = services
+            .client_events(&r.before, user)
+            .await?
+            .iter()
+            .map(raw)
+            .collect::<Result<Vec<_>>>()?;
+        ctx.events_after = services
+            .client_events(&r.after, user)
+            .await?
+            .iter()
+            .map(raw)
+            .collect::<Result<Vec<_>>>()?;
+        ctx.start = Some(r.start.to_string());
+        ctx.end = Some(r.end.to_string());
+        for (u, name, avatar) in &r.profiles {
+            let mut p = UserProfile::new();
+            p.displayname.clone_from(name);
+            p.avatar_url = avatar.as_deref().map(ruma::OwnedMxcUri::from);
+            ctx.profile_info.insert(u.clone(), p);
+        }
+        sr.context = ctx;
+        room_events.results.push(sr);
+    }
+    categories.room_events = room_events;
+    Ok(search::search_events::v3::Response::new(categories))
+}

@@ -103,6 +103,22 @@ pub fn routes(router: Router<AppState>) -> Router<AppState> {
     let r = route::<c::message::get_message_events::v3::Request, _, _>(r, rooms::messages);
     let r = route::<c::room::get_room_event::v3::Request, _, _>(r, rooms::context);
     let r = route::<c::context::get_context::v3::Request, _, _>(r, rooms::event_context);
+    let r = route::<c::relations::get_relating_events::v1::Request, _, _>(r, rooms::relations);
+    let r = route::<c::relations::get_relating_events_with_rel_type::v1::Request, _, _>(
+        r,
+        rooms::relations_with_rel_type,
+    );
+    let r = route::<
+        c::relations::get_relating_events_with_rel_type_and_event_type::v1::Request,
+        _,
+        _,
+    >(r, rooms::relations_with_rel_and_event_type);
+    let r = route::<c::threads::get_threads::v1::Request, _, _>(r, rooms::threads);
+    let r = route::<c::room::upgrade_room::v3::Request, _, _>(r, rooms::upgrade);
+    let r = route::<c::room::report_content::v3::Request, _, _>(r, rooms::report_event);
+    let r = route::<c::room::report_room::v3::Request, _, _>(r, rooms::report_room);
+    let r = route::<c::reporting::report_user::v3::Request, _, _>(r, rooms::report_user);
+    let r = route::<c::search::search_events::v3::Request, _, _>(r, rooms::search);
     // aliases & directory
     let r = route::<c::alias::create_alias::v3::Request, _, _>(r, rooms::create_alias);
     let r = route::<c::alias::get_alias::v3::Request, _, _>(r, rooms::get_alias);
