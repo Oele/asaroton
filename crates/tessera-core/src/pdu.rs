@@ -78,6 +78,14 @@ impl Pdu {
             OwnedEventId::try_from(format!("${hash}"))?
         };
 
+        Self::parse(raw, rules, event_id)
+    }
+
+    fn parse(
+        raw: CanonicalJsonObject,
+        rules: &RoomVersionRules,
+        event_id: OwnedEventId,
+    ) -> Result<Self> {
         let event_type: TimelineEventType = required_str(&raw, "type")?.into();
         let sender = OwnedUserId::try_from(required_str(&raw, "sender")?)?;
 
@@ -163,6 +171,21 @@ impl Pdu {
                 raw,
             }),
         })
+    }
+
+    /// Like [`Pdu::from_canonical`], but trusts `event_id` instead of recomputing the reference
+    /// hash. For loading events we persisted ourselves.
+    pub fn from_canonical_trusted(
+        mut raw: CanonicalJsonObject,
+        rules: &RoomVersionRules,
+        event_id: OwnedEventId,
+    ) -> Result<Self> {
+        if rules.event_id_format == EventIdFormatVersion::V1 {
+            raw.insert("event_id".into(), event_id.as_str().into());
+        } else {
+            raw.remove("event_id");
+        }
+        Self::parse(raw, rules, event_id)
     }
 
     /// Parse a PDU from JSON bytes.
