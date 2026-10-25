@@ -1532,11 +1532,13 @@ pub async fn timestamp_to_event(
     )
 }
 
+/// `/room_summary/{roomIdOrAlias}`, rendered as explicit JSON so every summary field is
+/// present (the typed response drops default values such as a public join rule).
 pub async fn room_summary(
     services: AppState,
     req: Ruma<ruma::api::client::room::get_summary::v1::Request>,
-) -> Result<ruma::api::client::room::get_summary::v1::Response> {
-    use ruma::api::client::room::get_summary::v1::Response;
+) -> Result<axum::response::Response> {
+    use axum::response::IntoResponse;
     let mut via = req.body.via.clone();
     let room_id: OwnedRoomId = match <&ruma::RoomId>::try_from(req.body.room_id_or_alias.as_str()) {
         Ok(id) => id.to_owned(),
@@ -1593,15 +1595,13 @@ pub async fn room_summary(
         }
         room
     };
-    let summary: ruma::room::RoomSummary = serde_json::from_value(summary_json)
-        .map_err(|e| Error::internal(format!("room summary: {e}")))?;
-    let mut resp = Response::new(summary);
-    if let Some(u) = &user {
-        resp.membership = services
-            .store
-            .get_membership(&room_id, u)
-            .await?
-            .map(|m| m.membership);
+    let mut body = summary_json;
+    if let Some(u) = &user
+        && let Some(m) = services.store.get_membership(&room_id, u).await?
+    {
+        body["membership"] = json!(m.membership);
     }
+    let mut resp = axum::Json(body).into_response();
+    crate::extract::add_cors(resp.headers_mut());
     Ok(resp)
 }

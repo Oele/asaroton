@@ -67,7 +67,15 @@ pub fn routes(router: Router<AppState>) -> Router<AppState> {
     let r = route::<c::knock::knock_room::v3::Request, _, _>(r, rooms::knock);
     let r =
         route::<c::room::get_event_by_timestamp::v1::Request, _, _>(r, rooms::timestamp_to_event);
-    let r = route::<c::room::get_summary::v1::Request, _, _>(r, rooms::room_summary);
+    let r = r
+        .route(
+            "/_matrix/client/v1/room_summary/{room_id_or_alias}",
+            axum::routing::get(room_summary_handler),
+        )
+        .route(
+            "/_matrix/client/unstable/im.nheko.summary/rooms/{room_id_or_alias}/summary",
+            axum::routing::get(room_summary_handler),
+        );
     let r = r.route(
         "/_matrix/client/v1/rooms/{room_id}/hierarchy",
         axum::routing::get(hierarchy_handler),
@@ -379,6 +387,17 @@ async fn hierarchy_handler(
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
     match rooms::hierarchy(state, req).await {
+        Ok(resp) => resp,
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn room_summary_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    req: crate::Ruma<ruma::api::client::room::get_summary::v1::Request>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    match rooms::room_summary(state, req).await {
         Ok(resp) => resp,
         Err(e) => e.into_response(),
     }
