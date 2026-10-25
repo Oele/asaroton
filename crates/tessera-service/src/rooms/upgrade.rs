@@ -97,6 +97,20 @@ impl Services {
                 users.remove(c.as_str());
             }
         }
+        // The other way round: a creator whose power was implicit needs an explicit level in a
+        // version without privileged creators, or they could not even restore the state.
+        if !new_rules.authorization.explicitly_privilege_room_creators
+            && let Some(Value::Object(pl)) = new_pl.as_mut()
+            && let Value::Object(users) = pl.entry("users").or_insert_with(|| json!({}))
+        {
+            let current = users
+                .get(user.as_str())
+                .and_then(Value::as_i64)
+                .unwrap_or(0);
+            if current < 100 {
+                users.insert(user.to_string(), json!(100));
+            }
+        }
         let new_room = self
             .create_room(CreateRoomRequest {
                 creator: user.to_owned(),
