@@ -1,6 +1,7 @@
 //! Client-Server API handlers.
 
 pub mod account;
+pub mod admin;
 pub mod backup;
 pub mod discovery;
 pub mod keys;
@@ -188,6 +189,70 @@ pub fn routes(router: Router<AppState>) -> Router<AppState> {
         .route(
             "/_synapse/admin/v1/send_server_notice/{txn_id}",
             axum::routing::put(synapse_admin::send_server_notice),
+        )
+        .route(
+            "/_synapse/admin/v1/server_version",
+            axum::routing::get(admin::server_version),
+        )
+        .route(
+            "/_synapse/admin/v2/users",
+            axum::routing::get(admin::list_users),
+        )
+        .route(
+            "/_synapse/admin/v2/users/{user_id}",
+            axum::routing::get(admin::get_user).put(admin::put_user),
+        )
+        .route(
+            "/_synapse/admin/v2/users/{user_id}/devices",
+            axum::routing::get(admin::list_devices),
+        )
+        .route(
+            "/_synapse/admin/v1/users/{user_id}/admin",
+            axum::routing::get(admin::get_admin).put(admin::set_admin),
+        )
+        .route(
+            "/_synapse/admin/v1/users/{user_id}/joined_rooms",
+            axum::routing::get(admin::joined_rooms),
+        )
+        .route(
+            "/_synapse/admin/v1/deactivate/{user_id}",
+            axum::routing::post(admin::deactivate),
+        )
+        .route(
+            "/_synapse/admin/v1/reset_password/{user_id}",
+            axum::routing::post(admin::reset_password),
+        )
+        .route(
+            "/_synapse/admin/v1/rooms",
+            axum::routing::get(admin::list_rooms),
+        )
+        .route(
+            "/_synapse/admin/v1/rooms/{room_id}",
+            axum::routing::get(admin::get_room).delete(admin::delete_room),
+        )
+        .route(
+            "/_synapse/admin/v1/rooms/{room_id}/members",
+            axum::routing::get(admin::room_members),
+        )
+        .route(
+            "/_synapse/admin/v1/rooms/{room_id}/state",
+            axum::routing::get(admin::room_state),
+        )
+        .route(
+            "/_synapse/admin/v1/purge_history/{room_id}",
+            axum::routing::post(admin::purge_history),
+        )
+        .route(
+            "/_synapse/admin/v1/purge_history/{room_id}/{event_id}",
+            axum::routing::post(admin::purge_history_at),
+        )
+        .route(
+            "/_synapse/admin/v1/purge_history_status/{purge_id}",
+            axum::routing::get(admin::purge_status),
+        )
+        .route(
+            "/_synapse/admin/v1/join/{room}",
+            axum::routing::post(admin::force_join),
         );
     let r = route::<c::config::set_global_account_data::v3::Request, _, _>(
         r,

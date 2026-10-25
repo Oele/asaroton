@@ -42,6 +42,8 @@ pub trait UserStore: Send + Sync {
     ) -> Result<()>;
     async fn set_deactivated(&self, user_id: &UserId, deactivated: bool) -> Result<()>;
     async fn set_admin(&self, user_id: &UserId, admin: bool) -> Result<()>;
+    /// A page of users (admin listing) and the total matching count.
+    async fn list_users(&self, query: &UserListQuery) -> Result<(Vec<User>, i64)>;
 
     async fn create_device(
         &self,
@@ -94,6 +96,21 @@ pub trait RoomStore: Send + Sync {
     async fn room_exists(&self, room_id: &RoomId) -> Result<bool>;
     async fn set_room_public(&self, room_id: &RoomId, public: bool) -> Result<()>;
     async fn list_public_rooms(&self, limit: i64, offset: i64) -> Result<Vec<RoomInfo>>;
+    /// A page of all rooms (admin listing, optionally filtered by ID/alias/name substring
+    /// via `search`), newest first, and the total count.
+    async fn list_rooms(
+        &self,
+        search: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<(Vec<RoomInfo>, i64)>;
+    /// Rooms whose current state has an event of this type.
+    async fn rooms_with_state_type(&self, event_type: &str) -> Result<Vec<OwnedRoomId>>;
+    /// Remove every trace of a room: events, state, memberships, aliases, receipts...
+    async fn purge_room(&self, room_id: &RoomId) -> Result<()>;
+    /// Delete non-state events of a room with a stream position below `before` (keeping
+    /// forward extremities); returns how many were deleted.
+    async fn purge_history(&self, room_id: &RoomId, before: StreamOrdering) -> Result<u64>;
 
     async fn create_alias(&self, alias: RoomAlias) -> Result<()>;
     async fn get_alias(&self, alias: &RoomAliasId) -> Result<Option<RoomAlias>>;

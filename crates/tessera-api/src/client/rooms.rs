@@ -124,7 +124,7 @@ fn extra_join_content(json: Option<&Value>) -> Option<serde_json::Map<String, Va
     (!extra.is_empty()).then_some(extra)
 }
 
-async fn join_room(
+pub(crate) async fn join_room(
     services: &AppState,
     sender: &tessera_auth::Sender,
     room_id: &ruma::RoomId,

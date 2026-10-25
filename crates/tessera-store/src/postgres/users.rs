@@ -3,7 +3,10 @@ use ruma::{DeviceId, OwnedDeviceId, OwnedUserId, UserId};
 use sqlx::Row;
 
 use super::PostgresStore;
-use crate::{AccessToken, Device, Error, NewUser, RefreshToken, Result, User, UserStore, now_ts};
+use crate::{
+    AccessToken, Device, Error, NewUser, RefreshToken, Result, User, UserListQuery, UserStore,
+    now_ts,
+};
 
 #[derive(sqlx::FromRow)]
 struct UserRow {
@@ -142,6 +145,39 @@ impl UserStore for PostgresStore {
         .fetch_optional(&self.pool)
         .await?;
         row.map(User::try_from).transpose()
+    }
+
+    async fn list_users(&self, q: &UserListQuery) -> Result<(Vec<User>, i64)> {
+        let pattern = q.name.as_ref().map(|n| format!("%{n}%"));
+        let where_clause = "WHERE ($1::text IS NULL OR user_id ILIKE $1 OR display_name ILIKE $1)
+              AND ($2 OR NOT is_guest) AND ($3 OR NOT is_deactivated) AND (NOT $4 OR is_admin)";
+        let rows: Vec<UserRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT {USER_COLUMNS} FROM users {where_clause} ORDER BY user_id LIMIT $5 OFFSET $6"
+        )))
+        .bind(&pattern)
+        .bind(q.include_guests)
+        .bind(q.include_deactivated)
+        .bind(q.admins_only)
+        .bind(q.limit)
+        .bind(q.offset)
+        .fetch_all(&self.pool)
+        .await?;
+        let total = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT count(*) FROM users {where_clause}"
+        )))
+        .bind(&pattern)
+        .bind(q.include_guests)
+        .bind(q.include_deactivated)
+        .bind(q.admins_only)
+        .fetch_one(&self.pool)
+        .await?
+        .get::<i64, _>(0);
+        Ok((
+            rows.into_iter()
+                .map(User::try_from)
+                .collect::<Result<Vec<_>>>()?,
+            total,
+        ))
     }
 
     async fn user_exists(&self, user_id: &UserId) -> Result<bool> {

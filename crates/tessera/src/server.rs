@@ -165,6 +165,13 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         services.set_federation(Arc::new(Hooks(Arc::clone(&fed))));
         Some(fed)
     };
+    if config.retention.enabled {
+        tessera_service::admin::start_retention(
+            Arc::clone(&services),
+            std::time::Duration::from_secs(config.retention.interval_secs.max(60)),
+            config.retention.default_max_lifetime_ms,
+        );
+    }
     // Configured admins get the flag (they must have registered already).
     for admin in &services.config.admins {
         match services.store.get_user(admin).await? {

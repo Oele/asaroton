@@ -38,6 +38,9 @@ pub struct Config {
     /// Delegate authentication to Matrix Authentication Service (MSC3861).
     #[serde(default)]
     pub mas: MasConfig,
+    /// Message retention (purging old history).
+    #[serde(default)]
+    pub retention: RetentionConfig,
     #[serde(default)]
     pub logging: LoggingConfig,
     /// User IDs made server admins at startup (they must exist).
@@ -328,6 +331,24 @@ pub struct MasConfig {
     pub secret: Option<String>,
     /// File holding the shared secret, as an alternative to `secret`.
     pub secret_file: Option<PathBuf>,
+}
+
+/// Message retention: rooms with an `m.room.retention` policy (and, with
+/// `default_max_lifetime`, every room) lose old non-state events.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetentionConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// How often to look for events to purge, in seconds (default one hour).
+    #[serde(default = "default_retention_interval_secs")]
+    pub interval_secs: u64,
+    /// Lifetime applied to rooms without a policy, in milliseconds.
+    pub default_max_lifetime_ms: Option<i64>,
+}
+
+fn default_retention_interval_secs() -> u64 {
+    3600
 }
 
 fn default_mas_endpoint() -> String {

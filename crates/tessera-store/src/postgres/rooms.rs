@@ -6,7 +6,9 @@ use ruma::{
 use sqlx::Row;
 
 use super::PostgresStore;
-use crate::{Error, Membership, Result, RoomAlias, RoomInfo, RoomStore, now_ts, parse_ids};
+use crate::{
+    Error, Membership, Result, RoomAlias, RoomInfo, RoomStore, StreamOrdering, now_ts, parse_ids,
+};
 
 #[derive(sqlx::FromRow)]
 struct RoomRow {
@@ -122,6 +124,120 @@ impl RoomStore for PostgresStore {
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter().map(RoomInfo::try_from).collect()
+    }
+
+    async fn list_rooms(
+        &self,
+        search: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<(Vec<RoomInfo>, i64)> {
+        let pattern = search.map(|n| format!("%{n}%"));
+        let where_clause = "WHERE $1::text IS NULL OR room_id ILIKE $1
+              OR EXISTS (SELECT 1 FROM room_aliases a WHERE a.room_id = rooms.room_id AND a.alias ILIKE $1)
+              OR EXISTS (SELECT 1 FROM current_state_events c JOIN events e ON e.event_id = c.event_id
+                         WHERE c.room_id = rooms.room_id AND c.event_type = 'm.room.name'
+                           AND e.json ILIKE $1)";
+        let rows: Vec<RoomRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT {ROOM_COLUMNS} FROM rooms {where_clause} ORDER BY created_ts DESC LIMIT $2 OFFSET $3"
+        )))
+        .bind(&pattern)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await?;
+        let total = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT count(*) FROM rooms {where_clause}"
+        )))
+        .bind(&pattern)
+        .fetch_one(&self.pool)
+        .await?
+        .get::<i64, _>(0);
+        Ok((
+            rows.into_iter()
+                .map(RoomInfo::try_from)
+                .collect::<Result<Vec<_>>>()?,
+            total,
+        ))
+    }
+
+    async fn rooms_with_state_type(&self, event_type: &str) -> Result<Vec<OwnedRoomId>> {
+        let rows = sqlx::query(
+            "SELECT DISTINCT room_id FROM current_state_events WHERE event_type = $1 AND state_key = ''",
+        )
+        .bind(event_type)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|r| OwnedRoomId::try_from(r.get::<String, _>(0)).ok())
+            .collect())
+    }
+
+    async fn purge_room(&self, room_id: &RoomId) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        let r = room_id.as_str();
+        // Tables keyed by event: find the room's event IDs first.
+        for sql in [
+            "DELETE FROM event_edges WHERE event_id IN (SELECT event_id FROM events WHERE room_id = $1)",
+            "DELETE FROM event_auth WHERE event_id IN (SELECT event_id FROM events WHERE room_id = $1)",
+            "DELETE FROM event_txn_ids WHERE event_id IN (SELECT event_id FROM events WHERE room_id = $1)",
+            "DELETE FROM federation_outbox WHERE event_id IN (SELECT event_id FROM events WHERE room_id = $1)",
+            "DELETE FROM event_relations WHERE room_id = $1",
+            "DELETE FROM event_search WHERE room_id = $1",
+            "DELETE FROM receipts WHERE room_id = $1",
+            "DELETE FROM missing_events WHERE room_id = $1",
+            "DELETE FROM forward_extremities WHERE room_id = $1",
+            "DELETE FROM current_state_events WHERE room_id = $1",
+            "DELETE FROM room_memberships WHERE room_id = $1",
+            "DELETE FROM invite_state WHERE room_id = $1",
+            "DELETE FROM account_data WHERE room_id = $1",
+            "DELETE FROM room_aliases WHERE room_id = $1",
+            "UPDATE events SET state_group = NULL WHERE room_id = $1",
+            "DELETE FROM state_groups WHERE room_id = $1",
+            "DELETE FROM events WHERE room_id = $1",
+            "DELETE FROM rooms WHERE room_id = $1",
+        ] {
+            sqlx::query(sql).bind(r).execute(&mut *tx).await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn purge_history(&self, room_id: &RoomId, before: StreamOrdering) -> Result<u64> {
+        let mut tx = self.pool.begin().await?;
+        let r = room_id.as_str();
+        // Non-state events only: state events are needed to authorise what remains.
+        let selector = "SELECT event_id FROM events WHERE room_id = $1 AND stream_ordering < $2
+             AND state_key IS NULL
+             AND event_id NOT IN (SELECT event_id FROM forward_extremities WHERE room_id = $1)";
+        for table in [
+            "event_edges",
+            "event_auth",
+            "event_txn_ids",
+            "federation_outbox",
+            "event_relations",
+            "event_search",
+            "receipts",
+        ] {
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "DELETE FROM {table} WHERE event_id IN ({selector})"
+            )))
+            .bind(r)
+            .bind(before)
+            .execute(&mut *tx)
+            .await?;
+        }
+        let deleted = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DELETE FROM events WHERE event_id IN ({selector})"
+        )))
+        .bind(r)
+        .bind(before)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        tx.commit().await?;
+        Ok(deleted)
     }
 
     async fn create_alias(&self, alias: RoomAlias) -> Result<()> {

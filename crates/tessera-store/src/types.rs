@@ -421,3 +421,15 @@ impl BackupKey {
         new.forwarded_count < self.forwarded_count
     }
 }
+
+/// Filters for the admin user listing.
+#[derive(Clone, Debug, Default)]
+pub struct UserListQuery {
+    /// Substring of the user ID or display name.
+    pub name: Option<String>,
+    pub include_guests: bool,
+    pub include_deactivated: bool,
+    pub admins_only: bool,
+    pub limit: i64,
+    pub offset: i64,
+}

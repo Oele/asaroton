@@ -7,6 +7,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod account;
+pub mod admin;
 pub mod appservice;
 pub mod config;
 pub mod e2ee;
