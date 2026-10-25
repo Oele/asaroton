@@ -21,6 +21,9 @@ pub struct Registration {
     pub namespaces: Namespaces,
     #[serde(default)]
     pub rate_limited: Option<bool>,
+    /// Receive typing, receipts and presence (`ephemeral` in transactions).
+    #[serde(default)]
+    pub receive_ephemeral: Option<bool>,
     #[serde(default)]
     pub protocols: Option<Vec<String>>,
 }
@@ -72,6 +75,7 @@ pub struct Appservice {
     pub aliases: Vec<Namespace>,
     pub rooms: Vec<Namespace>,
     pub rate_limited: bool,
+    pub receive_ephemeral: bool,
     pub protocols: Vec<String>,
 }
 
@@ -130,6 +134,7 @@ impl AppserviceRegistry {
                 aliases: compile(&r.namespaces.aliases)?,
                 rooms: compile(&r.namespaces.rooms)?,
                 rate_limited: r.rate_limited.unwrap_or(true),
+                receive_ephemeral: r.receive_ephemeral.unwrap_or(false),
                 protocols: r.protocols.clone().unwrap_or_default(),
             }));
         }

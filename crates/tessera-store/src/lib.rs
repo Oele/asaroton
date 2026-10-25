@@ -188,6 +188,8 @@ pub trait RoomStore: Send + Sync {
     /// Receipts.
     async fn set_receipt(&self, receipt: Receipt) -> Result<i64>;
     async fn receipts_for_room(&self, room_id: &RoomId, since: i64) -> Result<Vec<Receipt>>;
+    /// Receipts in any room newer than `since`, oldest first (bounded by `limit`).
+    async fn receipts_since(&self, since: i64, limit: usize) -> Result<Vec<Receipt>>;
     /// Of the given rooms, those with receipts newer than `since`.
     async fn rooms_with_receipts_since(
         &self,

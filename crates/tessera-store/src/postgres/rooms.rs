@@ -495,6 +495,18 @@ impl RoomStore for PostgresStore {
         Ok(row.get::<i64, _>(0))
     }
 
+    async fn receipts_since(&self, since: i64, limit: usize) -> Result<Vec<crate::Receipt>> {
+        let rows = sqlx::query(
+            "SELECT room_id, user_id, receipt_type, thread_id, event_id, data, stream_id FROM receipts
+             WHERE stream_id > $1 ORDER BY stream_id LIMIT $2",
+        )
+        .bind(since)
+        .bind(i64::try_from(limit).unwrap_or(i64::MAX))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(receipt_from_row).collect()
+    }
+
     async fn rooms_with_receipts_since(
         &self,
         room_ids: &[OwnedRoomId],

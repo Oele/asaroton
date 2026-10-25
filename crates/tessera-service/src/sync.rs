@@ -1021,7 +1021,7 @@ pub fn is_stripped_state_type(ty: Option<&StateEventType>) -> bool {
 
 /// The content of an `m.receipt` ephemeral event for a room's receipts, as seen by `user`
 /// (other users' private receipts are left out).
-pub(crate) fn receipts_content(
+pub fn receipts_content(
     receipts: Vec<tessera_store::Receipt>,
     user: &UserId,
 ) -> serde_json::Map<String, Value> {

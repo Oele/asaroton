@@ -182,12 +182,26 @@ pub fn start(fed: &Arc<Federation>) {
     }
 }
 
+/// Positions of the ephemeral streams an appservice has been sent (not persisted: ephemeral
+/// data is best effort and a restart simply starts from "now").
+#[derive(Debug)]
+struct EphemeralCursor {
+    typing: i64,
+    receipts: i64,
+    presence: i64,
+}
+
 async fn worker(fed: Arc<Federation>, a: Arc<tessera_service::appservice::Appservice>) {
     let services: &Services = &fed.services;
     let mut rx = services.notifier.subscribe();
     let mut retry = MIN_RETRY;
+    let mut ephemeral = EphemeralCursor {
+        typing: services.typing.position(),
+        receipts: services.store.max_receipt_stream_id().await.unwrap_or(0),
+        presence: services.presence.position(),
+    };
     loop {
-        match push_pending(services, &a).await {
+        match push_pending(services, &a, &mut ephemeral).await {
             Ok(true) => {
                 // More may be waiting: go straight round again.
                 retry = MIN_RETRY;
@@ -213,13 +227,11 @@ async fn worker(fed: Arc<Federation>, a: Arc<tessera_service::appservice::Appser
 async fn push_pending(
     services: &Services,
     a: &tessera_service::appservice::Appservice,
+    cursor: &mut EphemeralCursor,
 ) -> ServiceResult<bool> {
     let position = services.store.appservice_position(&a.id).await?;
     let events = services.store.events_after(position, BATCH).await?;
-    let Some(last) = events.last() else {
-        return Ok(false);
-    };
-    let last_pos = last.stream_ordering;
+    let last_pos = events.last().map_or(position, |e| e.stream_ordering);
     let mut interest: HashMap<ruma::OwnedRoomId, bool> = HashMap::new();
     let mut payload: Vec<Value> = Vec::new();
     for ev in &events {
@@ -236,18 +248,96 @@ async fn push_pending(
             payload.push(services.client_event_plain(ev));
         }
     }
-    if !payload.is_empty() {
+    // Ephemeral data (typing, receipts, presence) for appservices that asked for it.
+    let mut ephemeral: Vec<Value> = Vec::new();
+    let (typing_now, receipts_now, presence_now) = (
+        services.typing.position(),
+        services.store.max_receipt_stream_id().await?,
+        services.presence.position(),
+    );
+    if a.receive_ephemeral {
+        for room in services.typing.rooms_changed_since(cursor.typing) {
+            let interested = match interest.get(&room) {
+                Some(i) => *i,
+                None => {
+                    let i = services.appservice_interested_in_room(a, &room).await?;
+                    interest.insert(room.clone(), i);
+                    i
+                }
+            };
+            if interested {
+                ephemeral.push(json!({
+                    "type": "m.typing",
+                    "room_id": room,
+                    "content": { "user_ids": services.typing.typing_users(&room) },
+                }));
+            }
+        }
+        let mut by_room: HashMap<ruma::OwnedRoomId, Vec<tessera_store::Receipt>> = HashMap::new();
+        for r in services.store.receipts_since(cursor.receipts, 1000).await? {
+            if r.receipt_type == "m.read.private" {
+                continue;
+            }
+            by_room.entry(r.room_id.clone()).or_default().push(r);
+        }
+        for (room, receipts) in by_room {
+            let interested = match interest.get(&room) {
+                Some(i) => *i,
+                None => {
+                    let i = services.appservice_interested_in_room(a, &room).await?;
+                    interest.insert(room.clone(), i);
+                    i
+                }
+            };
+            if interested {
+                let content = tessera_service::sync::receipts_content(receipts, &a.sender);
+                if !content.is_empty() {
+                    ephemeral
+                        .push(json!({ "type": "m.receipt", "room_id": room, "content": content }));
+                }
+            }
+        }
+        for (user, entry) in services.presence.changed_since(cursor.presence) {
+            // Presence of the appservice's own users, and of anyone sharing a room with its
+            // sender.
+            let relevant = a.controls_user(&user) || {
+                let mine = services.store.rooms_for_user(&a.sender, "join").await?;
+                services
+                    .store
+                    .rooms_for_user(&user, "join")
+                    .await?
+                    .iter()
+                    .any(|r| mine.contains(r))
+            };
+            if relevant {
+                ephemeral.push(tessera_service::presence::presence_event(&user, &entry));
+            }
+        }
+    }
+    if !payload.is_empty() || !ephemeral.is_empty() {
         let base = a.url.as_deref().unwrap_or("").trim_end_matches('/');
         let client = plain_http();
         let mut ok = false;
+        // Transaction IDs must be unique per transaction; ephemeral-only ones use the
+        // receipt/typing positions so they never collide with event positions.
+        let txn_id = if payload.is_empty() {
+            format!("e{receipts_now}-{typing_now}-{presence_now}")
+        } else {
+            last_pos.to_string()
+        };
+        let mut body = json!({ "events": payload });
+        if a.receive_ephemeral {
+            body["ephemeral"] = json!(ephemeral);
+            body["de.sorunome.msc2409.ephemeral"] = json!(ephemeral);
+        }
         for path in [
-            format!("{base}/_matrix/app/v1/transactions/{last_pos}"),
-            format!("{base}/transactions/{last_pos}"),
+            format!("{base}/_matrix/app/v1/transactions/{txn_id}"),
+            format!("{base}/transactions/{txn_id}"),
         ] {
             let resp = client
                 .put(&path)
                 .bearer_auth(&a.hs_token)
-                .json(&json!({ "events": payload }))
+                .json(&body)
                 .send()
                 .await
                 .map_err(|e| ServiceError::internal(format!("appservice request: {e}")))?;
@@ -267,11 +357,16 @@ async fn push_pending(
                 "appservice does not accept transactions",
             ));
         }
-        tracing::debug!(appservice = %a.id, events = payload.len(), txn = last_pos, "appservice transaction sent");
+        tracing::debug!(appservice = %a.id, events = payload.len(), ephemeral = ephemeral.len(), txn = %txn_id, "appservice transaction sent");
     }
-    services
-        .store
-        .set_appservice_position(&a.id, last_pos)
-        .await?;
+    cursor.typing = typing_now;
+    cursor.receipts = receipts_now;
+    cursor.presence = presence_now;
+    if last_pos != position {
+        services
+            .store
+            .set_appservice_position(&a.id, last_pos)
+            .await?;
+    }
     Ok(events.len() == BATCH)
 }

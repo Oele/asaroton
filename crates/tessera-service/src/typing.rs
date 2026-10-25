@@ -66,6 +66,15 @@ impl TypingState {
     }
 
     /// Whether the room's typing set changed after `since`.
+    /// Rooms whose typing set changed after `since`.
+    pub fn rooms_changed_since(&self, since: i64) -> Vec<OwnedRoomId> {
+        self.rooms
+            .iter()
+            .filter(|r| r.last_change > since)
+            .map(|r| r.key().clone())
+            .collect()
+    }
+
     pub fn changed_since(&self, room_id: &RoomId, since: i64) -> bool {
         self.rooms
             .get(room_id)

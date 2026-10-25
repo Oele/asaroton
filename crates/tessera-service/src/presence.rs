@@ -67,6 +67,15 @@ impl PresenceMap {
     }
 
     /// Mark activity (a sync) without necessarily changing state.
+    /// Users whose presence changed after `since`.
+    pub fn changed_since(&self, since: i64) -> Vec<(OwnedUserId, PresenceEntry)> {
+        self.users
+            .iter()
+            .filter(|e| e.stream > since)
+            .map(|e| (e.key().clone(), e.value().clone()))
+            .collect()
+    }
+
     pub fn touch(&self, user: &UserId) {
         if let Some(mut e) = self.users.get_mut(user) {
             e.last_active_ts = now_ts();
