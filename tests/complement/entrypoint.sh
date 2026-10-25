@@ -51,6 +51,10 @@ shared_secret = "complement"
 
 [rate_limiting]
 enabled = false
+
+[server_notices]
+enabled = true
+user_localpart = "_server"
 CFG
 
 exec tessera --config /etc/tessera/tessera.toml

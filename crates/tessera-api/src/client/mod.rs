@@ -158,6 +158,14 @@ pub fn routes(router: Router<AppState>) -> Router<AppState> {
         .route(
             "/_synapse/admin/v1/register",
             axum::routing::get(synapse_admin::get_nonce).post(synapse_admin::register),
+        )
+        .route(
+            "/_synapse/admin/v1/send_server_notice",
+            axum::routing::post(synapse_admin::send_server_notice),
+        )
+        .route(
+            "/_synapse/admin/v1/send_server_notice/{txn_id}",
+            axum::routing::put(synapse_admin::send_server_notice),
         );
     let r = route::<c::config::set_global_account_data::v3::Request, _, _>(
         r,

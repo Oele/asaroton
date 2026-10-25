@@ -58,6 +58,12 @@ fn service_config(config: &Config) -> tessera_service::Config {
         public_base_url,
         software_version: env!("CARGO_PKG_VERSION").to_owned(),
         media_dir: config.data_dir.join("media"),
+        server_notices: config.server_notices.enabled.then(|| {
+            tessera_service::config::ServerNotices {
+                user_localpart: config.server_notices.user_localpart.clone(),
+                display_name: config.server_notices.display_name.clone(),
+            }
+        }),
     }
 }
 

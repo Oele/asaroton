@@ -209,6 +209,21 @@ pub async fn leave(
     req: Ruma<leave_room::v3::Request>,
 ) -> Result<leave_room::v3::Response> {
     let sender = req.sender()?;
+    if services
+        .store
+        .get_membership(&req.body.room_id, &sender.user_id)
+        .await?
+        .is_some_and(|m| m.membership == ruma::events::room::member::MembershipState::Invite)
+        && services
+            .is_server_notice_room(&sender.user_id, &req.body.room_id)
+            .await?
+    {
+        return Err(Error::matrix(
+            ruma::api::error::ErrorKind::CannotLeaveServerNoticeRoom,
+            http::StatusCode::FORBIDDEN,
+            "You cannot reject this invite.",
+        ));
+    }
     let in_room = services
         .store
         .members(&req.body.room_id, Some("join"))

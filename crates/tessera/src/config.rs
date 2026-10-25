@@ -27,6 +27,9 @@ pub struct Config {
     pub registration: RegistrationConfig,
     #[serde(default)]
     pub rate_limiting: RateLimitingConfig,
+    /// Server notices (admin messages delivered in a dedicated room).
+    #[serde(default)]
+    pub server_notices: ServerNoticesConfig,
     #[serde(default)]
     pub rooms: RoomsConfig,
     #[serde(default)]
@@ -207,4 +210,36 @@ impl Config {
             .map_err(|e| anyhow::anyhow!("parsing config {}: {e}", path.display()))?;
         Ok(cfg)
     }
+}
+
+/// Server notices settings.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServerNoticesConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Localpart of the user that sends notices.
+    #[serde(default = "default_notices_localpart")]
+    pub user_localpart: String,
+    /// Display name of that user and of the notices rooms.
+    #[serde(default = "default_notices_name")]
+    pub display_name: String,
+}
+
+impl Default for ServerNoticesConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            user_localpart: default_notices_localpart(),
+            display_name: default_notices_name(),
+        }
+    }
+}
+
+fn default_notices_localpart() -> String {
+    "server".to_owned()
+}
+
+fn default_notices_name() -> String {
+    "Server Notices".to_owned()
 }

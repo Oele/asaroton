@@ -20,4 +20,13 @@ pub struct Config {
     pub software_version: String,
     /// Directory for media files.
     pub media_dir: std::path::PathBuf,
+    /// Server notices, when enabled.
+    pub server_notices: Option<ServerNotices>,
+}
+
+/// Server notices settings.
+#[derive(Clone, Debug)]
+pub struct ServerNotices {
+    pub user_localpart: String,
+    pub display_name: String,
 }

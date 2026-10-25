@@ -116,3 +116,70 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     }
     a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
+
+/// `POST /_synapse/admin/v1/send_server_notice` and `PUT .../{txn_id}`.
+pub async fn send_server_notice(
+    State(services): State<AppState>,
+    txn_id: Option<axum::extract::Path<String>>,
+    req: axum::extract::Request,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    match send_server_notice_inner(&services, txn_id.map(|p| p.0), req).await {
+        Ok(event_id) => {
+            let mut resp = axum::Json(serde_json::json!({ "event_id": event_id })).into_response();
+            crate::extract::add_cors(resp.headers_mut());
+            resp
+        }
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn send_server_notice_inner(
+    services: &AppState,
+    txn_id: Option<String>,
+    req: axum::extract::Request,
+) -> crate::Result<ruma::OwnedEventId> {
+    let token = req
+        .headers()
+        .get(http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .map(|s| s.trim().to_owned())
+        .ok_or_else(crate::Error::missing_token)?;
+    let sender = services
+        .auth
+        .authenticate(&token)
+        .await
+        .map_err(|_| crate::Error::forbidden("Invalid access token."))?;
+    let is_admin = services
+        .store
+        .get_user(&sender.user_id)
+        .await?
+        .is_some_and(|u| u.is_admin);
+    if !is_admin {
+        return Err(crate::Error::forbidden("You are not a server admin."));
+    }
+    let bytes = axum::body::to_bytes(req.into_body(), 1024 * 1024)
+        .await
+        .map_err(|e| crate::Error::bad_json(e.to_string()))?;
+    let body: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|e| crate::Error::bad_json(e.to_string()))?;
+    let user_id = body
+        .get("user_id")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|u| ruma::OwnedUserId::try_from(u).ok())
+        .ok_or_else(|| crate::Error::invalid_param("Missing or invalid user_id."))?;
+    let content = body
+        .get("content")
+        .cloned()
+        .filter(serde_json::Value::is_object)
+        .ok_or_else(|| crate::Error::invalid_param("Missing content."))?;
+    let event_type = body
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("m.room.message");
+    services
+        .send_server_notice(&user_id, event_type, content, txn_id.as_deref())
+        .await
+        .map_err(Into::into)
+}
