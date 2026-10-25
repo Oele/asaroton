@@ -1,0 +1,124 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/sanderoele/tessera"
+authors = ["Sander Oele <sander@oele.net>"]
+
+[workspace.dependencies]
+# internal crates
+tessera-core = { path = "crates/tessera-core" }
+tessera-store = { path = "crates/tessera-store" }
+tessera-federation = { path = "crates/tessera-federation" }
+tessera-api = { path = "crates/tessera-api" }
+tessera-service = { path = "crates/tessera-service" }
+tessera-auth = { path = "crates/tessera-auth" }
+
+# Matrix protocol
+ruma = { version = "0.17.2", features = [
+  "client-api-s",
+  "federation-api-s",
+  "federation-api-c",
+  "appservice-api-s",
+  "appservice-api-c",
+  "push-gateway-api-c",
+  "state-res",
+  "signatures",
+  "rand",
+  "compat-null",
+  "compat-optional",
+  "compat-empty-string-null",
+  "compat-arbitrary-length-ids",
+  "compat-server-signing-key-version",
+  "compat-optional-txn-pdus",
+  "compat-lax-room-create-deser",
+  "compat-lax-room-topic-deser",
+  "compat-upload-signatures",
+  "compat-tag-info",
+  "compat-unset-avatar",
+  "compat-get-3pids",
+  "unstable-msc4186",
+] }
+
+# async runtime / web
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+axum = { version = "0.8", features = ["http2", "macros"] }
+axum-server = { version = "0.8", features = ["tls-rustls"] }
+tower = "0.5"
+tower-http = { version = "0.7", features = ["trace", "cors", "limit", "timeout", "compression-gzip"] }
+http = "1"
+http-body-util = "0.1"
+hyper = "1"
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "stream", "http2", "hickory-dns", "charset"] }
+hickory-resolver = "0.26"
+rustls = "0.23"
+rustls-pemfile = "2"
+
+# storage
+sqlx = { version = "0.9", features = ["runtime-tokio", "tls-rustls", "postgres", "migrate", "json", "chrono", "uuid"] }
+
+# serialization & data
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value", "preserve_order"] }
+toml = "1"
+bytes = "1"
+base64 = "0.22"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+rand = "0.9"
+sha2 = "0.10"
+ed25519-dalek = "2"
+argon2 = "0.5"
+regex = "1"
+url = "2"
+futures = "0.3"
+async-trait = "0.1"
+dashmap = "6"
+lru = "0.19"
+parking_lot = "0.12"
+
+# errors & observability
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.18", default-features = false, features = ["http-listener"] }
+clap = { version = "4", features = ["derive", "env"] }
+
+# testing
+proptest = "1"
+assert_matches2 = "0.1"
+insta = { version = "1", features = ["json"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+too_many_lines = "allow"
+unwrap_used = "warn"
+expect_used = "warn"
+dbg_macro = "warn"
+todo = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = 1
+
+[profile.dev.package."*"]
+opt-level = 2

@@ -1,0 +1,23 @@
+[package]
+name = "tessera-core"
+description = "Matrix event model, room versions, signing, auth rules and state resolution (no I/O)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ruma.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+base64.workspace = true
+sha2.workspace = true
+ed25519-dalek.workspace = true
+rand.workspace = true
