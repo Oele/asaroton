@@ -1007,7 +1007,11 @@ impl Services {
     }
 
     /// Current state events that differ from the state as of stream position `since`.
-    async fn state_changes_since(&self, room_id: &RoomId, since: i64) -> Result<Vec<StoredEvent>> {
+    pub(crate) async fn state_changes_since(
+        &self,
+        room_id: &RoomId,
+        since: i64,
+    ) -> Result<Vec<StoredEvent>> {
         let at = self
             .store
             .room_events_in_range(room_id, since + 1, None, Direction::Backwards, 1)

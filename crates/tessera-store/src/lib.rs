@@ -40,6 +40,13 @@ pub trait UserStore: Send + Sync {
         display_name: Option<Option<&str>>,
         avatar_url: Option<Option<&str>>,
     ) -> Result<()>;
+    /// Set (`Some`) or remove (`None`) one custom profile field.
+    async fn set_profile_field(
+        &self,
+        user_id: &UserId,
+        key: &str,
+        value: Option<&serde_json::Value>,
+    ) -> Result<()>;
     async fn set_deactivated(&self, user_id: &UserId, deactivated: bool) -> Result<()>;
     async fn set_admin(&self, user_id: &UserId, admin: bool) -> Result<()>;
     /// A page of users (admin listing) and the total matching count.

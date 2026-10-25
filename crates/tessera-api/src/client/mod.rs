@@ -59,6 +59,24 @@ pub fn routes(router: Router<AppState>) -> Router<AppState> {
     let r = route::<c::profile::set_display_name::v3::Request, _, _>(r, account::set_display_name);
     let r = route::<c::profile::get_avatar_url::v3::Request, _, _>(r, account::get_avatar_url);
     let r = route::<c::profile::set_avatar_url::v3::Request, _, _>(r, account::set_avatar_url);
+    // Custom profile fields (v1.16). Static `displayname`/`avatar_url` routes above win.
+    let r = r
+        .route(
+            "/_matrix/client/v3/profile/{user_id}/{key}",
+            axum::routing::get(profile_field_get_handler)
+                .put(account::set_profile_field)
+                .delete(profile_field_delete_handler),
+        )
+        .route(
+            "/_matrix/client/unstable/uk.tcpip.msc4133/profile/{user_id}/{key}",
+            axum::routing::get(profile_field_get_handler)
+                .put(account::set_profile_field)
+                .delete(profile_field_delete_handler),
+        )
+        .route(
+            "/_matrix/client/v1/mutual_rooms",
+            axum::routing::get(misc::mutual_rooms),
+        );
     // rooms & membership
     let r = route::<c::room::create_room::v3::Request, _, _>(r, rooms::create);
     let r = route::<c::membership::join_room_by_id::v3::Request, _, _>(r, rooms::join_by_id);
@@ -664,4 +682,14 @@ raw_json_handler!(
     sliding_sync_handler,
     ruma::api::client::sync::sync_events::v5::Request,
     sliding_sync::sliding_sync
+);
+raw_json_handler!(
+    profile_field_get_handler,
+    ruma::api::client::profile::get_profile_field::v3::Request,
+    account::get_profile_field
+);
+raw_json_handler!(
+    profile_field_delete_handler,
+    ruma::api::client::profile::delete_profile_field::v3::Request,
+    account::delete_profile_field
 );

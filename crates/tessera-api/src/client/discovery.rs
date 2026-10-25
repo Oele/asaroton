@@ -50,6 +50,7 @@ pub fn capabilities(
             "m.set_avatar_url": { "enabled": true },
             "m.3pid_changes": { "enabled": false },
             "m.get_login_token": { "enabled": false },
+            "m.forget_forced_upon_leave": { "enabled": false },
             "m.profile_fields": { "enabled": true },
         }
     });

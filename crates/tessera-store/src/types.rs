@@ -34,6 +34,8 @@ pub struct User {
     pub is_deactivated: bool,
     pub appservice_id: Option<String>,
     pub created_ts: Ts,
+    /// Custom profile fields (anything besides `displayname` and `avatar_url`).
+    pub profile_fields: serde_json::Map<String, serde_json::Value>,
 }
 
 /// Parameters for creating a user.

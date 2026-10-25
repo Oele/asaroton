@@ -88,10 +88,20 @@ async fn room_json(
         timeline["prev_batch"] = json!(pb);
     }
     v.insert("timeline".into(), timeline);
-    v.insert(
-        "state".into(),
-        json!({ "events": events_json(services, user, &room.state, room, false).await? }),
-    );
+    match &room.state_after {
+        Some(after) => {
+            v.insert(
+                "state_after".into(),
+                json!({ "events": events_json(services, user, after, room, false).await? }),
+            );
+        }
+        None => {
+            v.insert(
+                "state".into(),
+                json!({ "events": events_json(services, user, &room.state, room, false).await? }),
+            );
+        }
+    }
     v.insert(
         "account_data".into(),
         json!({ "events": room.account_data }),
@@ -170,6 +180,7 @@ pub async fn sync(
             full_state: req.body.full_state,
             filter,
             set_presence: req.body.set_presence.clone(),
+            use_state_after: req.body.use_state_after,
         })
         .await?;
 

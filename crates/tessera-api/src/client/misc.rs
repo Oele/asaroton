@@ -530,3 +530,53 @@ pub async fn thirdparty_user_by_id(
     let items = services.thirdparty_lookup("user", None, &q).await?;
     Ok(axum::Json(Value::Array(items)).into_response())
 }
+
+/// `GET /_matrix/client/v1/mutual_rooms?user_id=` (spec v1.19): rooms both users are joined to.
+pub async fn mutual_rooms(
+    axum::extract::State(services): axum::extract::State<AppState>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<std::collections::BTreeMap<String, String>>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let result: Result<Value> = async {
+        let token = headers
+            .get(http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.strip_prefix("Bearer "))
+            .map(str::trim)
+            .ok_or_else(Error::missing_token)?;
+        let sender = services.auth.authenticate(token).await?;
+        let other = q
+            .get("user_id")
+            .and_then(|u| ruma::OwnedUserId::try_from(u.as_str()).ok())
+            .ok_or_else(|| Error::invalid_param("Missing or invalid user_id."))?;
+        if other == sender.user_id {
+            return Err(Error::invalid_param(
+                "Cannot look up mutual rooms with yourself.",
+            ));
+        }
+        let mine: std::collections::HashSet<ruma::OwnedRoomId> = services
+            .store
+            .rooms_for_user(&sender.user_id, "join")
+            .await?
+            .into_iter()
+            .collect();
+        let shared: Vec<ruma::OwnedRoomId> = services
+            .store
+            .rooms_for_user(&other, "join")
+            .await?
+            .into_iter()
+            .filter(|r| mine.contains(r))
+            .collect();
+        Ok(json!({ "joined": shared }))
+    }
+    .await;
+    match result {
+        Ok(v) => {
+            let mut resp = axum::Json(v).into_response();
+            crate::extract::add_cors(resp.headers_mut());
+            resp
+        }
+        Err(e) => e.into_response(),
+    }
+}

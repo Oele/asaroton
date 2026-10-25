@@ -184,19 +184,10 @@ impl Services {
             }
         }
         if let Some(Value::Object(over)) = &req.power_level_content_override {
+            // Each key given replaces the default wholesale, maps included (as the reference
+            // implementation does), so `"events": {}` really means no per-type levels.
             for (k, v) in over {
-                match (pl.get_mut(k), v) {
-                    (Some(Value::Object(existing)), Value::Object(new))
-                        if k == "users" || k == "events" || k == "notifications" =>
-                    {
-                        for (ik, iv) in new {
-                            existing.insert(ik.clone(), iv.clone());
-                        }
-                    }
-                    _ => {
-                        pl[k] = v.clone();
-                    }
-                }
+                pl[k] = v.clone();
             }
         }
         self.send_local_event_locked(

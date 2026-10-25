@@ -169,12 +169,18 @@ pub struct SyncRequest {
     pub full_state: bool,
     pub filter: SyncFilter,
     pub set_presence: PresenceState,
+    /// `use_state_after`: report the state at the end of the timeline (`state_after`) instead
+    /// of the state at its start.
+    pub use_state_after: bool,
 }
 
 /// A room timeline/state delta.
 #[derive(Debug, Default)]
 pub struct RoomSync {
     pub state: Vec<StoredEvent>,
+    /// `state_after` (MSC4222 / v1.16) when requested: state changes up to the end of the
+    /// timeline, including those the timeline carries.
+    pub state_after: Option<Vec<StoredEvent>>,
     pub timeline: Vec<StoredEvent>,
     pub limited: bool,
     pub prev_batch: Option<String>,
@@ -634,6 +640,27 @@ impl Services {
         } else {
             Vec::new()
         };
+        if req.use_state_after {
+            // State at the end of the timeline: everything for a full view, otherwise what
+            // changed since the token (timeline events included, as the spec requires).
+            let mut after: Vec<StoredEvent> = if full_state {
+                match leave_at {
+                    Some(_) => {
+                        let mut s = state.clone();
+                        s.extend(room.timeline.iter().filter(|e| e.pdu.is_state()).cloned());
+                        s
+                    }
+                    None => self.store.current_state_pdus(room_id).await?,
+                }
+            } else if let Some(s) = since {
+                self.state_changes_since(room_id, s.events).await?
+            } else {
+                Vec::new()
+            };
+            after.retain(|e| filter.state_allows(e));
+            room.state_after = Some(after);
+            state.clear();
+        }
         state.retain(|e| filter.state_allows(e));
         if filter.lazy_load_members && !filter.include_redundant_members {
             let senders: HashSet<&UserId> = room.timeline.iter().map(|e| e.pdu.sender()).collect();
@@ -733,6 +760,7 @@ impl Services {
             && leave_at.is_none()
             && room.timeline.is_empty()
             && room.state.is_empty()
+            && room.state_after.as_ref().is_none_or(Vec::is_empty)
             && room.ephemeral.is_empty();
         if nothing_new {
             return Ok(None);

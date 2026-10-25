@@ -65,6 +65,18 @@ impl Services {
             return Ok(existing);
         }
         self.require_joined(room_id, sender).await?;
+        // A redaction sent through the generic endpoint (v1.18) is a redaction.
+        if event_type == "m.room.redaction" {
+            let target = content
+                .get("redacts")
+                .and_then(Value::as_str)
+                .and_then(|t| ruma::OwnedEventId::try_from(t).ok())
+                .ok_or_else(|| Error::bad_json("Missing `redacts` in redaction content."))?;
+            let reason = content.get("reason").and_then(Value::as_str);
+            return self
+                .redact(room_id, sender, device_id, txn_id, &target, reason)
+                .await;
+        }
         let mut ev = LocalEvent::new(room_id.to_owned(), sender.to_owned(), event_type.to_owned())
             .content(&content)?;
         ev.origin_server_ts = origin_server_ts;

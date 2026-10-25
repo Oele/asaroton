@@ -172,6 +172,34 @@ where
             services.ensure_appservice_user(&appservice, &user).await?;
             s.user_id = user;
         }
+        // ... and as a specific device of that user via `?device_id=` (v1.17), created on
+        // first use.
+        if let Some(s) = sender.as_mut()
+            && s.appservice_id.is_some()
+            && let Some(query) = req.uri().query()
+            && let Some(raw_device) = query
+                .split('&')
+                .find_map(|kv| {
+                    kv.strip_prefix("device_id=")
+                        .or_else(|| kv.strip_prefix("org.matrix.msc3202.device_id="))
+                })
+                .and_then(percent_decode)
+            && !raw_device.is_empty()
+        {
+            let device_id = ruma::OwnedDeviceId::from(raw_device);
+            if services
+                .store
+                .get_device(&s.user_id, &device_id)
+                .await?
+                .is_none()
+            {
+                services
+                    .store
+                    .create_device(&s.user_id, &device_id, None)
+                    .await?;
+            }
+            s.device_id = Some(device_id);
+        }
 
         // --- path args ------------------------------------------------------------------
         let (mut parts, body) = req.into_parts();

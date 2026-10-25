@@ -695,6 +695,11 @@ pub async fn query_profile(
     {
         data.set("avatar_url".to_owned(), json!(url));
     }
+    for (k, v) in user.profile_fields {
+        if include(&k) {
+            data.set(k, v);
+        }
+    }
     let mut resp = get_profile_information::v1::Response::new();
     resp.data = data;
     Ok(resp)

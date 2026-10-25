@@ -370,6 +370,21 @@ pub async fn update_device(
                 .await?;
             Ok(update_device::v3::Response::new())
         }
+        // Application services create devices for their users this way (v1.17).
+        Err(tessera_store::Error::NotFound(_)) if req.sender()?.appservice_id.is_some() => {
+            services
+                .store
+                .create_device(
+                    user_id,
+                    &req.body.device_id,
+                    req.body.display_name.as_deref(),
+                )
+                .await?;
+            services
+                .notify_device_list_change(user_id, Some(&req.body.device_id))
+                .await?;
+            Ok(update_device::v3::Response::new())
+        }
         Err(tessera_store::Error::NotFound(_)) => Err(Error::not_found("Device not found.")),
         Err(e) => Err(e.into()),
     }
@@ -418,6 +433,15 @@ async fn local_user(services: &Services, user_id: &OwnedUserId) -> Result<tesser
             is_deactivated: false,
             appservice_id: None,
             created_ts: 0,
+            profile_fields: v
+                .as_object()
+                .map(|o| {
+                    o.iter()
+                        .filter(|(k, _)| k.as_str() != "displayname" && k.as_str() != "avatar_url")
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect()
+                })
+                .unwrap_or_default(),
         });
     }
     {
@@ -447,7 +471,167 @@ pub async fn get_profile(
     if let Some(url) = user.avatar_url {
         resp.set("avatar_url".to_owned(), serde_json::Value::String(url));
     }
+    for (k, v) in user.profile_fields {
+        resp.set(k, v);
+    }
     Ok(resp)
+}
+
+/// Custom profile fields (spec v1.16): keys other than `displayname` and `avatar_url`.
+const MAX_PROFILE_KEY_LEN: usize = 255;
+const MAX_PROFILE_BYTES: usize = 64 * 1024;
+
+fn check_profile_key(key: &str) -> Result<()> {
+    if key.is_empty() || key.len() > MAX_PROFILE_KEY_LEN || key.contains('\0') {
+        return Err(Error::matrix(
+            ruma::api::error::ErrorKind::BadJson,
+            http::StatusCode::BAD_REQUEST,
+            "Invalid profile field name.",
+        ));
+    }
+    Ok(())
+}
+
+/// `GET /_matrix/client/v3/profile/{userId}/{key}`
+pub async fn get_profile_field(
+    services: AppState,
+    req: Ruma<ruma::api::client::profile::get_profile_field::v3::Request>,
+) -> Result<axum::response::Response> {
+    use axum::response::IntoResponse;
+    let key = req.body.field.to_string();
+    let user = local_user(&services, &req.body.user_id).await?;
+    let value = match key.as_str() {
+        "displayname" => user.display_name.map(serde_json::Value::String),
+        "avatar_url" => user.avatar_url.map(serde_json::Value::String),
+        k => user.profile_fields.get(k).cloned(),
+    };
+    let Some(value) = value else {
+        return Err(Error::not_found("Profile field not set."));
+    };
+    let mut resp = axum::Json(serde_json::json!({ key: value })).into_response();
+    crate::extract::add_cors(resp.headers_mut());
+    Ok(resp)
+}
+
+/// `PUT /_matrix/client/v3/profile/{userId}/{key}` (raw: the body is `{key: value}`).
+pub async fn set_profile_field(
+    axum::extract::State(services): axum::extract::State<AppState>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Path((user_id, key)): axum::extract::Path<(String, String)>,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    match set_profile_field_inner(&services, &headers, &user_id, &key, &body).await {
+        Ok(()) => {
+            let mut resp = axum::Json(serde_json::json!({})).into_response();
+            crate::extract::add_cors(resp.headers_mut());
+            resp
+        }
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn set_profile_field_inner(
+    services: &AppState,
+    headers: &axum::http::HeaderMap,
+    user_id: &str,
+    key: &str,
+    body: &[u8],
+) -> Result<()> {
+    let sender = authenticate_headers(services, headers).await?;
+    let user = ruma::OwnedUserId::try_from(user_id)
+        .map_err(|_| Error::invalid_param("Invalid user ID."))?;
+    if sender.user_id != user {
+        return Err(Error::forbidden("Cannot change another user's profile."));
+    }
+    check_profile_key(key)?;
+    if body.len() > MAX_PROFILE_BYTES {
+        return Err(Error::matrix(
+            ruma::api::error::ErrorKind::TooLarge,
+            http::StatusCode::PAYLOAD_TOO_LARGE,
+            "Profile field too large.",
+        ));
+    }
+    let parsed: serde_json::Value =
+        serde_json::from_slice(body).map_err(|e| Error::bad_json(e.to_string()))?;
+    let Some(value) = parsed.get(key).cloned() else {
+        return Err(Error::bad_json(format!("Body must contain `{key}`.")));
+    };
+    match key {
+        "displayname" => {
+            let name = value
+                .as_str()
+                .ok_or_else(|| Error::bad_json("displayname must be a string."))?;
+            services.set_display_name(&user, Some(name)).await?;
+        }
+        "avatar_url" => {
+            let url = value
+                .as_str()
+                .ok_or_else(|| Error::bad_json("avatar_url must be a string."))?;
+            services.set_avatar_url(&user, Some(url)).await?;
+        }
+        _ => {
+            // The whole profile stays under the size limit.
+            let current = services.store.get_user(&user).await?.map_or(0, |u| {
+                serde_json::Value::Object(u.profile_fields)
+                    .to_string()
+                    .len()
+            });
+            if current + body.len() > MAX_PROFILE_BYTES {
+                return Err(Error::matrix(
+                    ruma::api::error::ErrorKind::TooLarge,
+                    http::StatusCode::PAYLOAD_TOO_LARGE,
+                    "Profile too large.",
+                ));
+            }
+            services
+                .store
+                .set_profile_field(&user, key, Some(&value))
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+/// `DELETE /_matrix/client/v3/profile/{userId}/{key}`
+pub async fn delete_profile_field(
+    services: AppState,
+    req: Ruma<ruma::api::client::profile::delete_profile_field::v3::Request>,
+) -> Result<axum::response::Response> {
+    use axum::response::IntoResponse;
+    let sender = req.sender()?;
+    if sender.user_id != req.body.user_id {
+        return Err(Error::forbidden("Cannot change another user's profile."));
+    }
+    let key = req.body.field.to_string();
+    match key.as_str() {
+        "displayname" => services.set_display_name(&sender.user_id, None).await?,
+        "avatar_url" => services.set_avatar_url(&sender.user_id, None).await?,
+        k => {
+            check_profile_key(k)?;
+            services
+                .store
+                .set_profile_field(&sender.user_id, k, None)
+                .await?;
+        }
+    }
+    let mut resp = axum::Json(serde_json::json!({})).into_response();
+    crate::extract::add_cors(resp.headers_mut());
+    Ok(resp)
+}
+
+/// Bearer authentication for raw handlers.
+async fn authenticate_headers(
+    services: &AppState,
+    headers: &axum::http::HeaderMap,
+) -> Result<tessera_auth::Sender> {
+    let token = headers
+        .get(http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .map(str::trim)
+        .ok_or_else(Error::missing_token)?;
+    Ok(services.auth.authenticate(token).await?)
 }
 
 pub async fn get_display_name(

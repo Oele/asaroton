@@ -18,6 +18,7 @@ struct UserRow {
     is_deactivated: bool,
     appservice_id: Option<String>,
     created_ts: i64,
+    profile_fields: serde_json::Value,
 }
 
 impl TryFrom<UserRow> for User {
@@ -32,6 +33,10 @@ impl TryFrom<UserRow> for User {
             is_deactivated: r.is_deactivated,
             appservice_id: r.appservice_id,
             created_ts: r.created_ts,
+            profile_fields: match r.profile_fields {
+                serde_json::Value::Object(m) => m,
+                _ => serde_json::Map::new(),
+            },
         })
     }
 }
@@ -92,7 +97,7 @@ impl TryFrom<TokenRow> for AccessToken {
     }
 }
 
-const USER_COLUMNS: &str = "user_id, display_name, avatar_url, is_admin, is_guest, is_deactivated, appservice_id, created_ts";
+const USER_COLUMNS: &str = "user_id, display_name, avatar_url, is_admin, is_guest, is_deactivated, appservice_id, created_ts, profile_fields";
 const DEVICE_COLUMNS: &str = "user_id, device_id, display_name, created_ts, last_seen_ts, last_seen_ip, last_seen_user_agent";
 const TOKEN_COLUMNS: &str =
     "token, user_id, device_id, created_ts, expires_ts, refresh_token, puppets_user_id";
@@ -134,6 +139,7 @@ impl UserStore for PostgresStore {
             is_deactivated: false,
             appservice_id: user.appservice_id,
             created_ts: now,
+            profile_fields: serde_json::Map::new(),
         })
     }
 
@@ -210,6 +216,37 @@ impl UserStore for PostgresStore {
             .bind(hash)
             .execute(&self.pool)
             .await?;
+        Ok(())
+    }
+
+    async fn set_profile_field(
+        &self,
+        user_id: &UserId,
+        key: &str,
+        value: Option<&serde_json::Value>,
+    ) -> Result<()> {
+        let res = match value {
+            Some(v) => {
+                sqlx::query(
+                    "UPDATE users SET profile_fields = profile_fields || jsonb_build_object($2::text, $3::jsonb) WHERE user_id = $1",
+                )
+                .bind(user_id.as_str())
+                .bind(key)
+                .bind(v)
+                .execute(&self.pool)
+                .await?
+            }
+            None => {
+                sqlx::query("UPDATE users SET profile_fields = profile_fields - $2::text WHERE user_id = $1")
+                    .bind(user_id.as_str())
+                    .bind(key)
+                    .execute(&self.pool)
+                    .await?
+            }
+        };
+        if res.rows_affected() == 0 {
+            return Err(Error::NotFound("user"));
+        }
         Ok(())
     }
 
