@@ -629,12 +629,22 @@ pub async fn get_alias(
     services: AppState,
     req: Ruma<alias::get_alias::v3::Request>,
 ) -> Result<alias::get_alias::v3::Response> {
+    if req.body.room_alias.server_name() != services.server_name() {
+        let (room_id, servers) = services
+            .federation()
+            .resolve_alias(&req.body.room_alias)
+            .await?;
+        return Ok(alias::get_alias::v3::Response::new(room_id, servers));
+    }
     let a = services
         .store
         .get_alias(&req.body.room_alias)
         .await?
         .ok_or_else(|| Error::not_found("Room alias not found."))?;
-    let servers = services.store.servers_in_room(&a.room_id).await?;
+    let mut servers = services.store.servers_in_room(&a.room_id).await?;
+    if servers.is_empty() {
+        servers.push(services.config.server_name.clone());
+    }
     Ok(alias::get_alias::v3::Response::new(a.room_id, servers))
 }
 

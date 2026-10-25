@@ -90,6 +90,54 @@ pub async fn query(
     for (user, k) in result.user_signing_keys {
         resp.user_signing_keys.insert(user, raw(&k)?);
     }
+    // Remote users: ask their servers.
+    let mut by_server: BTreeMap<ruma::OwnedServerName, Vec<OwnedUserId>> = BTreeMap::new();
+    for user in req.body.device_keys.keys() {
+        if !services.is_local(user) {
+            by_server
+                .entry(user.server_name().to_owned())
+                .or_default()
+                .push(user.clone());
+        }
+    }
+    if !by_server.is_empty() {
+        let remote = services
+            .federation()
+            .remote_query_keys(by_server.into_iter().collect())
+            .await?;
+        if let Some(Value::Object(dk)) = remote.get("device_keys") {
+            for (user, devices) in dk {
+                let Ok(user) = OwnedUserId::try_from(user.as_str()) else {
+                    continue;
+                };
+                let Some(devices) = devices.as_object() else {
+                    continue;
+                };
+                let mut per = BTreeMap::new();
+                for (d, v) in devices {
+                    per.insert(OwnedDeviceId::from(d.as_str()), raw(v)?);
+                }
+                resp.device_keys.insert(user, per);
+            }
+        }
+        for (field, target) in [
+            ("master_keys", &mut resp.master_keys),
+            ("self_signing_keys", &mut resp.self_signing_keys),
+        ] {
+            if let Some(Value::Object(m)) = remote.get(field) {
+                for (user, k) in m {
+                    if let Ok(user) = OwnedUserId::try_from(user.as_str()) {
+                        target.insert(user, raw(k)?);
+                    }
+                }
+            }
+        }
+        if let Some(Value::Object(f)) = remote.get("failures") {
+            for (server, v) in f {
+                resp.failures.insert(server.clone(), v.clone());
+            }
+        }
+    }
     Ok(resp)
 }
 
@@ -127,7 +175,63 @@ pub async fn claim(
         }
         one_time_keys.insert(user, per_user);
     }
-    Ok(claim_keys::v3::Response::new(one_time_keys))
+    // Remote users: claim on their servers.
+    let mut by_server: BTreeMap<ruma::OwnedServerName, serde_json::Map<String, Value>> =
+        BTreeMap::new();
+    for (user, devs) in &wanted {
+        if !services.is_local(user) {
+            let m: serde_json::Map<String, Value> = devs
+                .iter()
+                .map(|(d, a)| (d.to_string(), Value::String(a.clone())))
+                .collect();
+            by_server
+                .entry(user.server_name().to_owned())
+                .or_default()
+                .insert(user.to_string(), Value::Object(m));
+        }
+    }
+    let mut resp = claim_keys::v3::Response::new(one_time_keys);
+    if !by_server.is_empty() {
+        let remote = services
+            .federation()
+            .remote_claim_keys(
+                by_server
+                    .into_iter()
+                    .map(|(s, m)| (s, Value::Object(m)))
+                    .collect(),
+            )
+            .await?;
+        if let Some(Value::Object(otk)) = remote.get("one_time_keys") {
+            for (user, devices) in otk {
+                let Ok(user) = OwnedUserId::try_from(user.as_str()) else {
+                    continue;
+                };
+                let Some(devices) = devices.as_object() else {
+                    continue;
+                };
+                let mut per_user = BTreeMap::new();
+                for (d, keys) in devices {
+                    let Some(keys) = keys.as_object() else {
+                        continue;
+                    };
+                    let mut per_device = BTreeMap::new();
+                    for (id, key) in keys {
+                        if let Ok(id) = id.parse::<ruma::OwnedOneTimeKeyId>() {
+                            per_device.insert(id, raw(key)?);
+                        }
+                    }
+                    per_user.insert(OwnedDeviceId::from(d.as_str()), per_device);
+                }
+                resp.one_time_keys.insert(user, per_user);
+            }
+        }
+        if let Some(Value::Object(f)) = remote.get("failures") {
+            for (server, v) in f {
+                resp.failures.insert(server.clone(), v.clone());
+            }
+        }
+    }
+    Ok(resp)
 }
 
 pub async fn changes(

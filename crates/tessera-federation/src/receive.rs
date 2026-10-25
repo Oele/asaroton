@@ -339,6 +339,30 @@ impl Federation {
             self.apply_remote_redaction(&room_id, &pdu, rules, &current)
                 .await?;
         }
+        // A remote user joining: that server needs our members' device lists.
+        if !soft_failed
+            && pdu.event_type() == &ruma::events::TimelineEventType::RoomMember
+            && pdu
+                .state_key()
+                .is_some_and(|k| k.ends_with(&format!(":{origin}")))
+            && serde_json::from_str::<Value>(pdu.content().get())
+                .ok()
+                .and_then(|c| {
+                    c.get("membership")
+                        .and_then(|m| m.as_str())
+                        .map(str::to_owned)
+                })
+                .as_deref()
+                == Some("join")
+        {
+            for m in services.store.members(&room_id, Some("join")).await? {
+                if services.is_local(&m.user_id) {
+                    let _ = services
+                        .send_device_lists_to(&m.user_id, vec![origin.to_owned()])
+                        .await;
+                }
+            }
+        }
         if !soft_failed {
             services.notifier.notify(Notification::RoomEvent {
                 room_id: room_id.clone(),
@@ -478,8 +502,11 @@ impl Federation {
         }
         let earliest = self.services.store.forward_extremities(room_id).await?;
         let min_depth = UInt::from(0u32);
-        let mut req =
-            get_missing_events::v1::Request::new(room_id.to_owned(), earliest, missing.clone());
+        let mut req = get_missing_events::v1::Request::new(
+            room_id.to_owned(),
+            earliest,
+            vec![pdu.event_id().to_owned()],
+        );
         req.limit = UInt::from(MAX_MISSING_EVENTS);
         req.min_depth = min_depth;
         let resp = match self.client.send_long(origin, req).await {

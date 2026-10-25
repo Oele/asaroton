@@ -112,6 +112,23 @@ impl Services {
             };
             return Ok(ev.pdu.event_id().to_owned());
         }
+        // Re-sending the exact current state is idempotent: return the existing event.
+        if let Some(current_id) = self
+            .store
+            .current_state_event(room_id, &StateEventType::from(event_type), state_key)
+            .await?
+            && let Some(current) = self.store.get_event(&current_id).await?
+            && serde_json::from_str::<Value>(current.pdu.content().get())
+                .ok()
+                .as_ref()
+                == Some(&content)
+            && current.pdu.sender() == sender
+        {
+            return Ok(current_id);
+        }
+        if event_type == "m.room.canonical_alias" {
+            self.validate_canonical_alias(room_id, &content).await?;
+        }
         let ev = LocalEvent::new(room_id.to_owned(), sender.to_owned(), event_type.to_owned())
             .state_key(state_key)
             .content(&content)?;
@@ -357,4 +374,49 @@ fn is_content_error(message: &str) -> bool {
         || m.contains("integer")
         || m.contains("invalid")
         || m.contains("must be")
+}
+
+impl Services {
+    /// `m.room.canonical_alias`: every alias named must be well-formed and point at this room.
+    async fn validate_canonical_alias(&self, room_id: &RoomId, content: &Value) -> Result<()> {
+        let mut aliases: Vec<&str> = Vec::new();
+        if let Some(a) = content.get("alias") {
+            match a {
+                Value::Null => {}
+                Value::String(s) if s.is_empty() => {}
+                Value::String(s) => aliases.push(s),
+                _ => return Err(Error::bad_json("`alias` must be a string.")),
+            }
+        }
+        if let Some(alt) = content.get("alt_aliases") {
+            let Some(list) = alt.as_array() else {
+                return Err(Error::bad_json("`alt_aliases` must be an array."));
+            };
+            for a in list {
+                match a.as_str() {
+                    Some(s) => aliases.push(s),
+                    None => return Err(Error::bad_json("`alt_aliases` entries must be strings.")),
+                }
+            }
+        }
+        for a in aliases {
+            let alias = ruma::OwnedRoomAliasId::try_from(a)
+                .map_err(|_| Error::bad_json(format!("Invalid room alias: {a}")))?;
+            let target = if alias.server_name() == self.config.server_name {
+                self.store.get_alias(&alias).await?.map(|a| a.room_id)
+            } else {
+                self.federation()
+                    .resolve_alias(&alias)
+                    .await
+                    .ok()
+                    .map(|(r, _)| r)
+            };
+            if target.as_deref() != Some(room_id) {
+                return Err(Error::bad_json(format!(
+                    "Room alias {a} does not point to this room."
+                )));
+            }
+        }
+        Ok(())
+    }
 }

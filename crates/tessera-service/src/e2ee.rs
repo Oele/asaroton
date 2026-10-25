@@ -465,3 +465,36 @@ impl Services {
         Ok(())
     }
 }
+
+impl Services {
+    /// Send `m.device_list_update` for every device of `user` to `servers` (used when a
+    /// membership change makes them share a room for the first time).
+    pub async fn send_device_lists_to(
+        &self,
+        user: &UserId,
+        servers: Vec<OwnedServerName>,
+    ) -> Result<()> {
+        if servers.is_empty() || !self.is_local(user) {
+            return Ok(());
+        }
+        let stream_id = self.store.max_device_list_stream_id().await?;
+        for (device_id, keys) in self.store.all_device_keys(user).await? {
+            let mut content = json!({
+                "user_id": user, "device_id": device_id, "stream_id": stream_id, "prev_id": [], "keys": keys,
+            });
+            if let Some(n) = self
+                .store
+                .get_device(user, &device_id)
+                .await?
+                .and_then(|d| d.display_name)
+            {
+                content["device_display_name"] = json!(n);
+            }
+            self.send_edu_to(
+                servers.clone(),
+                json!({ "edu_type": "m.device_list_update", "content": content }),
+            );
+        }
+        Ok(())
+    }
+}

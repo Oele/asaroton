@@ -424,6 +424,7 @@ pub async fn backfill(
         .store
         .backfill_from(&req.body.room_id, &req.body.v, limit)
         .await?;
+    let events = filter_visible_to_server(&app, &origin, events).await?;
     Ok(get_backfill::v1::Response::new(
         app.config.server_name.clone(),
         ruma::MilliSecondsSinceUnixEpoch::now(),
@@ -445,7 +446,7 @@ pub async fn missing_events(
         .unwrap_or(10)
         .clamp(1, 20);
     let min_depth = i64::try_from(u64::from(req.body.min_depth)).unwrap_or(0);
-    let events = app
+    let mut events = app
         .store
         .missing_events_between(
             &req.body.room_id,
@@ -455,6 +456,14 @@ pub async fn missing_events(
             min_depth,
         )
         .await?;
+    // Newest first, as the reference implementation returns them.
+    events.sort_by(|a, b| {
+        b.pdu
+            .depth()
+            .cmp(&a.pdu.depth())
+            .then(b.stream_ordering.cmp(&a.stream_ordering))
+    });
+    let events = filter_visible_to_server(&app, &origin, events).await?;
     Ok(get_missing_events::v1::Response::new(
         events
             .iter()
@@ -683,3 +692,81 @@ pub async fn public_rooms(
 /// Keep `RoomVersionId` referenced for readers of this module.
 #[allow(dead_code)]
 fn _versions(_: RoomVersionId) {}
+
+/// History-visibility filtering for events served to another server: an event is visible if
+/// the room's visibility at that point allows it for the origin's members at that point.
+async fn filter_visible_to_server(
+    app: &AppState,
+    origin: &ruma::ServerName,
+    events: Vec<tessera_store::StoredEvent>,
+) -> Result<Vec<tessera_store::StoredEvent>> {
+    use ruma::events::StateEventType;
+    let suffix = format!(":{origin}");
+    let mut out = Vec::with_capacity(events.len());
+    for ev in events {
+        let group = if ev.pdu.is_state() {
+            app.store.state_group_before(ev.pdu.event_id()).await?
+        } else {
+            ev.state_group
+        };
+        let Some(group) = group else {
+            out.push(ev);
+            continue;
+        };
+        let state = app.store.state_at_group(group).await?;
+        let hv_id = state
+            .iter()
+            .find(|e| {
+                e.event_type == StateEventType::RoomHistoryVisibility && e.state_key.is_empty()
+            })
+            .map(|e| e.event_id.clone());
+        let visibility = match hv_id {
+            Some(id) => app
+                .store
+                .get_event(&id)
+                .await?
+                .and_then(|e| serde_json::from_str::<Value>(e.pdu.content().get()).ok())
+                .and_then(|v| {
+                    v.get("history_visibility")
+                        .and_then(|h| h.as_str())
+                        .map(str::to_owned)
+                })
+                .unwrap_or_else(|| "shared".to_owned()),
+            None => "shared".to_owned(),
+        };
+        let member_ids: Vec<OwnedEventId> = state
+            .iter()
+            .filter(|e| {
+                e.event_type == StateEventType::RoomMember && e.state_key.ends_with(&suffix)
+            })
+            .map(|e| e.event_id.clone())
+            .collect();
+        let mut best = String::new();
+        for m in app.store.get_events(&member_ids).await? {
+            if let Ok(v) = serde_json::from_str::<Value>(m.pdu.content().get())
+                && let Some(ms) = v.get("membership").and_then(|m| m.as_str())
+            {
+                if ms == "join" {
+                    best = "join".into();
+                } else if ms == "invite" && best != "join" {
+                    best = "invite".into();
+                }
+            }
+        }
+        // A membership change is visible to the server of its subject.
+        if ev.pdu.event_type() == &ruma::events::TimelineEventType::RoomMember
+            && ev.pdu.state_key().is_some_and(|k| k.ends_with(&suffix))
+        {
+            best = "join".into();
+        }
+        let visible = match visibility.as_str() {
+            "world_readable" | "shared" => true,
+            "invited" => best == "join" || best == "invite",
+            _ => best == "join",
+        };
+        if visible {
+            out.push(ev);
+        }
+    }
+    Ok(out)
+}

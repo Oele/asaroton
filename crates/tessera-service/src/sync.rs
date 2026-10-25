@@ -445,7 +445,7 @@ impl Services {
     ) -> Result<Option<RoomSync>> {
         let user = &req.user_id;
         let filter = &req.filter;
-        let limit = filter.timeline_limit.clamp(1, 1000);
+        let limit = filter.timeline_limit.min(1000);
         let mut room = RoomSync::default();
 
         // Timeline: newest `limit` matching events in (since, upper], oldest first.
@@ -511,7 +511,35 @@ impl Services {
 
         // State.
         let mut state: Vec<StoredEvent> = if full_state {
-            let mut s = self.store.current_state_pdus(room_id).await?;
+            let mut s = match leave_at {
+                // A room we left: the state as of the leave event (which it includes).
+                Some(leave_stream) => {
+                    let leave = self
+                        .store
+                        .room_events_in_range(
+                            room_id,
+                            leave_stream + 1,
+                            None,
+                            Direction::Backwards,
+                            1,
+                        )
+                        .await?;
+                    match leave.first().and_then(|e| e.state_group) {
+                        Some(g) => {
+                            let ids: Vec<OwnedEventId> = self
+                                .store
+                                .state_at_group(g)
+                                .await?
+                                .into_iter()
+                                .map(|e| e.event_id)
+                                .collect();
+                            self.store.get_events(&ids).await?
+                        }
+                        None => self.store.current_state_pdus(room_id).await?,
+                    }
+                }
+                None => self.store.current_state_pdus(room_id).await?,
+            };
             if let Some(start) = timeline_start {
                 s.retain(|e| e.stream_ordering < start);
             }
