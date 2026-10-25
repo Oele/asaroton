@@ -1,9 +1,7 @@
 //! Room creation, membership, state and timeline endpoints.
 
-use std::collections::BTreeMap;
-
 use ruma::{
-    OwnedRoomId, OwnedUserId, UInt,
+    OwnedRoomId, UInt,
     api::client::{
         alias,
         membership::{
