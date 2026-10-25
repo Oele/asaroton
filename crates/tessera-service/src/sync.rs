@@ -861,6 +861,34 @@ impl Services {
         room_id: &RoomId,
         invitee: Option<&UserId>,
     ) -> Result<Vec<Value>> {
+        // For an invite or knock received over federation the remote server sent us the
+        // stripped state; our own copy of the room state is incomplete.
+        let own_event = match invitee {
+            Some(u) => match self.store.get_membership(room_id, u).await? {
+                Some(m) => self.store.get_event(&m.event_id).await?,
+                None => None,
+            },
+            None => None,
+        };
+        if let Some(u) = invitee
+            && own_event.as_ref().is_some_and(|e| e.outlier)
+            && let Some(mut stored) = self.store.get_invite_state(room_id, u).await?
+        {
+            let has_own_membership = stored.iter().any(|e| {
+                e.get("type").and_then(Value::as_str) == Some("m.room.member")
+                    && e.get("state_key").and_then(Value::as_str) == Some(u.as_str())
+            });
+            if !has_own_membership && let Some(ev) = own_event {
+                let mut v = ev.pdu.to_client_json();
+                if let Value::Object(o) = &mut v {
+                    o.retain(|k, _| {
+                        matches!(k.as_str(), "type" | "state_key" | "content" | "sender")
+                    });
+                }
+                stored.push(v);
+            }
+            return Ok(stored);
+        }
         let state = self.store.current_state_pdus(room_id).await?;
         let inviter = match invitee {
             Some(u) => self

@@ -759,7 +759,9 @@ impl Federation {
         pdu: &Pdu,
         rules: &RoomVersionRules,
     ) -> Result<()> {
-        const MAX_ROUNDS: usize = 20;
+        // One round, like the reference implementation: older gaps are bridged by fetching
+        // the state at the oldest fetched event instead of walking the whole history.
+        const MAX_ROUNDS: usize = 1;
         let mut fetched: HashMap<OwnedEventId, Pdu> = HashMap::new();
         let mut latest: Vec<OwnedEventId> = vec![pdu.event_id().to_owned()];
         let mut frontier: Vec<OwnedEventId> = pdu.prev_events().to_vec();
