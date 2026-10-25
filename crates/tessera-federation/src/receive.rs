@@ -559,6 +559,11 @@ impl Federation {
             },
         };
 
+        // State resolution below looks events up through the cache; the event being
+        // processed is not persisted yet, so it must be cached first or a fork would resolve
+        // without it and silently drop it from the current state.
+        self.event_cache
+            .insert(pdu.event_id().to_owned(), pdu.clone());
         let (delta, extremities) = if soft_failed || backfilled {
             (None, None)
         } else {
@@ -1075,7 +1080,18 @@ impl Federation {
         let mut all_ids: HashSet<OwnedEventId> = HashSet::new();
         for m in maps {
             let ids: Vec<OwnedEventId> = m.values().cloned().collect();
-            let chain = self.services.store.auth_chain(&ids).await?;
+            let mut chain = self.services.store.auth_chain(&ids).await?;
+            // An event not yet persisted (the one being processed) has no stored auth edges;
+            // its auth events are known from the cache, and their own chains are stored.
+            for id in &ids {
+                if let Some(p) = self.cached_event(id) {
+                    for a in p.auth_events() {
+                        if !chain.contains(a) {
+                            chain.push(a.clone());
+                        }
+                    }
+                }
+            }
             let mut set = EventIdSet::new();
             for id in &chain {
                 set.insert(id.clone());
