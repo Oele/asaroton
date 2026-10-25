@@ -474,6 +474,18 @@ impl EventStore for PostgresStore {
         Ok(ids_from_rows(rows))
     }
 
+    async fn gap_since(&self, room_id: &RoomId, since: StreamOrdering) -> Result<bool> {
+        let row = sqlx::query(
+            "SELECT 1 FROM missing_events m JOIN events e ON e.event_id = m.referenced_by
+              WHERE m.room_id = $1 AND e.stream_ordering > $2 AND NOT e.outlier LIMIT 1",
+        )
+        .bind(room_id.as_str())
+        .bind(since)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.is_some())
+    }
+
     async fn backward_extremities(&self, room_id: &RoomId) -> Result<Vec<OwnedEventId>> {
         let rows = sqlx::query(
             "SELECT DISTINCT m.referenced_by FROM missing_events m JOIN events e ON e.event_id = m.referenced_by

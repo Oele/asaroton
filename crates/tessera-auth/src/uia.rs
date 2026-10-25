@@ -220,5 +220,9 @@ fn info_for(id: &str, session: &UiaSession, error: Option<StandardErrorBody>) ->
     info.completed.clone_from(&session.completed);
     info.session = Some(id.to_owned());
     info.auth_error = error.map(Box::new);
+    info.params = session
+        .params
+        .as_ref()
+        .and_then(|p| serde_json::value::to_raw_value(p).ok());
     info
 }

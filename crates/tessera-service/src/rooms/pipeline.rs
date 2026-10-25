@@ -250,13 +250,15 @@ impl Services {
             })?;
 
         // checks
-        auth::check_format(&pdu, &rules).map_err(|e| {
-            Error::matrix(
-                ruma::api::error::ErrorKind::TooLarge,
-                http::StatusCode::PAYLOAD_TOO_LARGE,
-                e.to_string(),
-            )
-        })?;
+        auth::check_format(&pdu, &rules)
+            .and_then(|()| auth::check_size_limits(&pdu))
+            .map_err(|e| {
+                Error::matrix(
+                    ruma::api::error::ErrorKind::TooLarge,
+                    http::StatusCode::PAYLOAD_TOO_LARGE,
+                    e.to_string(),
+                )
+            })?;
         auth::check_against_state(&pdu, &rules, &ctx.state).map_err(|e| match e {
             tessera_core::Error::Auth(msg) => Error::forbidden(msg),
             other => other.into(),

@@ -20,6 +20,7 @@ use ruma::{
         transactions::{edu::Edu, send_transaction_message},
     },
     events::StateEventType,
+    events::room::member::MembershipState,
     room_version_rules::RoomVersionRules,
     signatures::Verified,
     state_res::{StateMap, utils::event_id_set::EventIdSet},
@@ -168,7 +169,28 @@ impl Federation {
                 pdu.sender()
             )));
         }
-        if !self.we_are_in_room(room_id).await? {
+        // A user we invited (or who knocked) may still leave after our last member left.
+        let membership_change_of_known_user = pdu.event_type()
+            == &ruma::events::TimelineEventType::RoomMember
+            && match pdu
+                .state_key()
+                .and_then(|k| ruma::OwnedUserId::try_from(k).ok())
+            {
+                Some(target) => services
+                    .store
+                    .get_membership(room_id, &target)
+                    .await?
+                    .is_some_and(|m| {
+                        matches!(
+                            m.membership,
+                            MembershipState::Invite
+                                | MembershipState::Knock
+                                | MembershipState::Join
+                        )
+                    }),
+                None => false,
+            };
+        if !self.we_are_in_room(room_id).await? && !membership_change_of_known_user {
             return Err(Error::Rejected("this server is not in the room".into()));
         }
 
@@ -271,7 +293,9 @@ impl Federation {
         // 5. authorisation
         let fetch = |id: &ruma::EventId| self.cached_event(id);
         let mut rejected_reason: Option<String> = None;
-        if let Err(e) = auth::check_state_independent(&pdu, rules, fetch) {
+        if let Err(e) = auth::check_size_limits(&pdu) {
+            rejected_reason = Some(e.to_string());
+        } else if let Err(e) = auth::check_state_independent(&pdu, rules, fetch) {
             rejected_reason = Some(e.to_string());
         } else if self.auth_events_rejected(&pdu) {
             rejected_reason = Some("event references a rejected auth event".into());
@@ -531,7 +555,12 @@ impl Federation {
         }
         chain.sort_by_key(|p| u64::from(p.depth()));
         let ids: Vec<OwnedEventId> = chain.iter().map(|p| p.event_id().to_owned()).collect();
-        if self.warm_cache(&ids).await.is_err() {
+        let mut referenced: Vec<OwnedEventId> = chain
+            .iter()
+            .flat_map(|p| p.auth_events().iter().cloned())
+            .collect();
+        referenced.extend(ids.iter().cloned());
+        if self.warm_cache(&referenced).await.is_err() {
             return;
         }
         let have: HashSet<OwnedEventId> = self

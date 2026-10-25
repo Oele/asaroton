@@ -26,7 +26,13 @@ use crate::{Error, Pdu, Result, state::StateMap};
 /// Check the PDU's shape and size limits for its room version.
 pub fn check_format(pdu: &Pdu, rules: &RoomVersionRules) -> Result<()> {
     check_pdu_format(pdu.raw(), &rules.event_format).map_err(Error::InvalidPdu)?;
-    // Size limits the spec puts on individual fields (bytes).
+    Ok(())
+}
+
+/// Size limits the spec puts on individual fields (bytes). Exceeding them makes an event
+/// *rejected* like any other auth failure, so (as in the reference implementation) it is
+/// kept as a rejected event that later events can still build on.
+pub fn check_size_limits(pdu: &Pdu) -> Result<()> {
     let too_long = |what: &str, len: usize, max: usize| -> Result<()> {
         if len > max {
             Err(Error::InvalidPdu(format!(

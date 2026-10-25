@@ -60,6 +60,7 @@ impl Services {
             .store
             .search_events(&rooms, &req.term, req.order_recent, req.offset, limit)
             .await?;
+        let page_full = hits.len() >= limit;
         let mut results = Vec::with_capacity(hits.len());
         for hit in hits {
             let ev = hit.event;
@@ -133,7 +134,7 @@ impl Services {
                 profiles,
             });
         }
-        let next_offset = (req.offset + limit < count).then_some(req.offset + limit);
+        let next_offset = page_full.then_some(req.offset + limit);
         Ok(SearchPage {
             results,
             count,

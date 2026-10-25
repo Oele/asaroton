@@ -428,6 +428,29 @@ impl Services {
                     _ => {}
                 }
             }
+            // Rooms we left in the window: their members, unless still shared elsewhere.
+            for m in &memberships {
+                if !matches!(m.membership, MembershipState::Leave | MembershipState::Ban)
+                    || m.stream_ordering <= s.events
+                    || m.stream_ordering > now.events
+                {
+                    continue;
+                }
+                for other in self.store.members(&m.room_id, Some("join")).await? {
+                    if other.user_id == *user || left.contains(&other.user_id) {
+                        continue;
+                    }
+                    let still_shared = self
+                        .store
+                        .rooms_for_user(&other.user_id, "join")
+                        .await?
+                        .iter()
+                        .any(|r| all_my_rooms.contains(r));
+                    if !still_shared {
+                        left.push(other.user_id);
+                    }
+                }
+            }
             // Members of newly joined rooms need their device lists fetched.
             for room in &newly_joined {
                 for m in self.store.members(room, Some("join")).await? {
@@ -511,7 +534,12 @@ impl Services {
         events.truncate(limit);
         events.reverse();
         let timeline_start = events.first().map(|e| e.stream_ordering);
-        room.limited = limited || newly_joined;
+        // A gap (events arrived whose history we do not have) also forces pagination.
+        let gap = match lower {
+            Some(l) => self.store.gap_since(room_id, l).await?,
+            None => false,
+        };
+        room.limited = limited || newly_joined || gap;
         if let Some(first) = events.first() {
             room.prev_batch =
                 Some(super::rooms::timeline::StreamToken(first.stream_ordering).to_string());

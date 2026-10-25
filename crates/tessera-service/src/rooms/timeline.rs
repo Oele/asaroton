@@ -242,7 +242,10 @@ impl Services {
         Ok(hv.as_deref() == Some("world_readable"))
     }
 
-    /// `/messages`: paginate the room timeline.
+    /// `/messages`: paginate the room timeline. `keep` is the client's event filter; history
+    /// visibility is applied here too. Pages are filled up to `limit` matching events as long
+    /// as more history exists (fetched over federation when we run out locally).
+    #[allow(clippy::too_many_arguments)]
     pub async fn messages(
         &self,
         room_id: &RoomId,
@@ -251,6 +254,7 @@ impl Services {
         to: Option<StreamToken>,
         direction: Direction,
         limit: usize,
+        keep: &(dyn Fn(&StoredEvent) -> bool + Sync),
     ) -> Result<TimelinePage> {
         if !self.can_read_room(room_id, user).await? {
             return Err(Error::forbidden("You are not allowed to read this room."));
@@ -263,38 +267,46 @@ impl Services {
             }
             (None, Direction::Forwards) => StreamToken(i64::MIN + 1),
         };
-        let mut events = self
-            .store
-            .room_events_in_range(room_id, from.0, to.map(|t| t.0), direction, limit)
-            .await?;
-        // Paginating backwards past what we hold: pull older history over federation.
-        if direction == Direction::Backwards && events.len() < limit {
-            for _ in 0..3 {
-                let got = self
-                    .federation()
-                    .backfill(room_id, limit.max(100))
-                    .await
-                    .unwrap_or_else(|e| {
-                        tracing::debug!(%room_id, error = %e, "backfill failed");
-                        0
-                    });
-                if got == 0 {
-                    break;
+        let mut events: Vec<StoredEvent> = Vec::new();
+        let mut cursor = from;
+        let mut exhausted = false;
+        let mut backfills = 0;
+        for _ in 0..20 {
+            let batch = self
+                .store
+                .room_events_in_range(room_id, cursor.0, to.map(|t| t.0), direction, limit)
+                .await?;
+            let batch_len = batch.len();
+            if let Some(last) = batch.last() {
+                cursor = StreamToken(last.stream_ordering);
+            }
+            let visible = self.filter_visible(room_id, user, batch).await?;
+            events.extend(visible.into_iter().filter(|e| keep(e)));
+            if events.len() >= limit {
+                break;
+            }
+            if batch_len < limit {
+                // Out of local history: paginating backwards may pull more over federation.
+                if direction == Direction::Backwards && to.is_none() && backfills < 3 {
+                    backfills += 1;
+                    let got = self
+                        .federation()
+                        .backfill(room_id, limit.max(100))
+                        .await
+                        .unwrap_or_else(|e| {
+                            tracing::debug!(%room_id, error = %e, "backfill failed");
+                            0
+                        });
+                    if got > 0 {
+                        continue;
+                    }
                 }
-                events = self
-                    .store
-                    .room_events_in_range(room_id, from.0, to.map(|t| t.0), direction, limit)
-                    .await?;
-                if events.len() >= limit {
-                    break;
-                }
+                exhausted = true;
+                break;
             }
         }
-        let end = if events.len() < limit {
-            None
-        } else {
-            events.last().map(|e| StreamToken(e.stream_ordering))
-        };
+        events.truncate(limit);
+        let end = if exhausted { None } else { Some(cursor) };
         Ok(TimelinePage {
             events,
             start: from,

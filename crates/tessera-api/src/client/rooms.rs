@@ -540,11 +540,47 @@ pub async fn messages(
         .map(|f| StreamToken::parse(f).ok_or_else(|| Error::invalid_param("Invalid to token.")))
         .transpose()?;
     let limit = usize::try_from(u64::from(req.body.limit)).unwrap_or(10);
-    let mut page = services
-        .messages(&req.body.room_id, &sender.user_id, from, to, dir, limit)
-        .await?;
-    page.events = services
-        .filter_visible(&req.body.room_id, &sender.user_id, page.events)
+    let f = &req.body.filter;
+    let keep = |e: &StoredEvent| -> bool {
+        let ty = e.pdu.event_type().to_string();
+        if f.types
+            .as_ref()
+            .is_some_and(|t| !t.iter().any(|p| glob_match(p, &ty)))
+        {
+            return false;
+        }
+        if f.not_types.iter().any(|p| glob_match(p, &ty)) {
+            return false;
+        }
+        if f.senders
+            .as_ref()
+            .is_some_and(|s| !s.iter().any(|u| u == e.pdu.sender()))
+        {
+            return false;
+        }
+        if f.not_senders.iter().any(|u| u == e.pdu.sender()) {
+            return false;
+        }
+        if let Some(want) = f.url_filter {
+            let has_url = serde_json::from_str::<Value>(e.pdu.content().get())
+                .is_ok_and(|c| c.get("url").is_some());
+            let want = matches!(want, ruma::api::client::filter::UrlFilter::EventsWithUrl);
+            if has_url != want {
+                return false;
+            }
+        }
+        true
+    };
+    let page = services
+        .messages(
+            &req.body.room_id,
+            &sender.user_id,
+            from,
+            to,
+            dir,
+            limit,
+            &keep,
+        )
         .await?;
     let mut resp = get_message_events::v3::Response::new();
     resp.start = page.start.to_string();
@@ -581,9 +617,12 @@ pub async fn context(
     req: Ruma<room::get_room_event::v3::Request>,
 ) -> Result<get_room_event::v3::Response> {
     let sender = req.sender()?;
+    // Whether the room is unreadable or the event invisible, the answer is the same 404, so
+    // the endpoint cannot be used to probe for rooms or events.
     let ev = services
         .get_room_event(&req.body.room_id, &sender.user_id, &req.body.event_id)
-        .await?;
+        .await
+        .map_err(|_| Error::not_found("Event not found."))?;
     if !services.event_visible_to(&ev, &sender.user_id).await? {
         return Err(Error::not_found("Event not found."));
     }
@@ -1334,4 +1373,20 @@ pub async fn preview_url_legacy(
     resp.data =
         Some(serde_json::value::to_raw_value(&data).map_err(|e| Error::internal(e.to_string()))?);
     Ok(resp)
+}
+
+/// Matrix filter globs: `*` matches anything, `?` one character.
+fn glob_match(pattern: &str, value: &str) -> bool {
+    fn rec(p: &[char], v: &[char]) -> bool {
+        match (p.first(), v.first()) {
+            (None, None) => true,
+            (Some('*'), _) => rec(&p[1..], v) || (!v.is_empty() && rec(p, &v[1..])),
+            (Some('?'), Some(_)) => rec(&p[1..], &v[1..]),
+            (Some(a), Some(b)) if a == b => rec(&p[1..], &v[1..]),
+            _ => false,
+        }
+    }
+    let p: Vec<char> = pattern.chars().collect();
+    let v: Vec<char> = value.chars().collect();
+    rec(&p, &v)
 }

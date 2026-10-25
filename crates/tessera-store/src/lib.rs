@@ -195,6 +195,9 @@ pub trait EventStore: Send + Sync {
     ) -> Result<()>;
     /// Prev events that are referenced but not stored.
     async fn missing_prev_events(&self, room_id: &RoomId) -> Result<Vec<OwnedEventId>>;
+    /// Whether an event stored after `since` references prev events we do not have (a gap
+    /// in the timeline clients should paginate).
+    async fn gap_since(&self, room_id: &RoomId, since: StreamOrdering) -> Result<bool>;
     /// Oldest events in the room that have missing prev events (backfill points).
     async fn backward_extremities(&self, room_id: &RoomId) -> Result<Vec<OwnedEventId>>;
 
