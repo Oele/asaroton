@@ -257,6 +257,48 @@ impl EventStore for PostgresStore {
         rows.into_iter().map(StoredEvent::try_from).collect()
     }
 
+    async fn latest_stream_orderings(
+        &self,
+        room_ids: &[OwnedRoomId],
+        event_types: Option<&[String]>,
+    ) -> Result<std::collections::HashMap<OwnedRoomId, StreamOrdering>> {
+        if room_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let ids: Vec<String> = room_ids.iter().map(ToString::to_string).collect();
+        let rows = match event_types {
+            Some(types) => {
+                sqlx::query(
+                    "SELECT room_id, MAX(stream_ordering) FROM events
+                     WHERE room_id = ANY($1) AND event_type = ANY($2) AND NOT outlier AND NOT rejected
+                     GROUP BY room_id",
+                )
+                .bind(&ids)
+                .bind(types)
+                .fetch_all(&self.pool)
+                .await?
+            }
+            None => {
+                sqlx::query(
+                    "SELECT room_id, MAX(stream_ordering) FROM events
+                     WHERE room_id = ANY($1) AND NOT outlier AND NOT rejected
+                     GROUP BY room_id",
+                )
+                .bind(&ids)
+                .fetch_all(&self.pool)
+                .await?
+            }
+        };
+        let mut out = std::collections::HashMap::with_capacity(rows.len());
+        for r in rows {
+            let id: String = r.get(0);
+            if let Ok(id) = OwnedRoomId::try_from(id) {
+                out.insert(id, r.get::<i64, _>(1));
+            }
+        }
+        Ok(out)
+    }
+
     async fn appservice_position(&self, appservice_id: &str) -> Result<StreamOrdering> {
         let row = sqlx::query(
             "SELECT stream_ordering FROM appservice_positions WHERE appservice_id = $1",

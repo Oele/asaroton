@@ -21,6 +21,7 @@ pub mod profile;
 pub mod push;
 pub mod rooms;
 pub mod signing;
+pub mod sliding_sync;
 pub mod spaces;
 pub mod sync;
 pub mod thirdparty;
@@ -47,6 +48,8 @@ pub struct Services {
     pub typing: typing::TypingState,
     pub presence: presence::PresenceMap,
     pub appservices: appservice::AppserviceRegistry,
+    /// Sliding sync connections and what each has been sent.
+    pub sliding_sync: sliding_sync::SlidingSyncConnections,
     /// Nonces handed out by the shared-secret registration endpoint.
     admin_nonces: dashmap::DashMap<String, std::time::Instant>,
     federation_hooks: federation_hooks::HooksSlot,
@@ -89,6 +92,7 @@ impl Services {
             notifier: Notifier::new(),
             typing: typing::TypingState::default(),
             presence: presence::PresenceMap::default(),
+            sliding_sync: sliding_sync::SlidingSyncConnections::default(),
             admin_nonces: dashmap::DashMap::new(),
             federation_hooks: federation_hooks::HooksSlot::default(),
             signing_key: Arc::new(signing_key),

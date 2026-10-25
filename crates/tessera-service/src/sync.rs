@@ -258,7 +258,7 @@ impl Services {
         Ok(result)
     }
 
-    async fn current_token(&self) -> Result<SyncToken> {
+    pub(crate) async fn current_token(&self) -> Result<SyncToken> {
         Ok(SyncToken {
             events: self.store.max_stream_ordering().await?,
             account_data: self.store.max_account_data_stream_id().await?,
@@ -407,70 +407,9 @@ impl Services {
                 self.unused_fallback_key_algorithms(user, device_id).await?;
         }
         if let Some(s) = since {
-            let (mut changed, mut left) = self
-                .device_list_changes_for(user, s.device_lists, now.device_lists)
+            let (changed, left) = self
+                .device_list_updates(user, s, now, &memberships, &newly_joined)
                 .await?;
-            // Users who joined or left rooms we are in during the window.
-            let all_my_rooms = self.store.rooms_for_user(user, "join").await?;
-            for m in self
-                .store
-                .memberships_changed_in_rooms(&all_my_rooms, s.events)
-                .await?
-            {
-                if m.user_id == *user || m.stream_ordering > now.events {
-                    continue;
-                }
-                match m.membership {
-                    MembershipState::Join => {
-                        if !changed.contains(&m.user_id) {
-                            changed.push(m.user_id.clone());
-                        }
-                    }
-                    MembershipState::Leave | MembershipState::Ban => {
-                        let still_shared = self
-                            .store
-                            .rooms_for_user(&m.user_id, "join")
-                            .await?
-                            .iter()
-                            .any(|r| all_my_rooms.contains(r));
-                        if !still_shared && !left.contains(&m.user_id) {
-                            left.push(m.user_id.clone());
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            // Rooms we left in the window: their members, unless still shared elsewhere.
-            for m in &memberships {
-                if !matches!(m.membership, MembershipState::Leave | MembershipState::Ban)
-                    || m.stream_ordering <= s.events
-                    || m.stream_ordering > now.events
-                {
-                    continue;
-                }
-                for other in self.store.members(&m.room_id, Some("join")).await? {
-                    if other.user_id == *user || left.contains(&other.user_id) {
-                        continue;
-                    }
-                    let still_shared = self
-                        .store
-                        .rooms_for_user(&other.user_id, "join")
-                        .await?
-                        .iter()
-                        .any(|r| all_my_rooms.contains(r));
-                    if !still_shared {
-                        left.push(other.user_id);
-                    }
-                }
-            }
-            // Members of newly joined rooms need their device lists fetched.
-            for room in &newly_joined {
-                for m in self.store.members(room, Some("join")).await? {
-                    if !changed.contains(&m.user_id) {
-                        changed.push(m.user_id);
-                    }
-                }
-            }
             out.device_lists_changed = changed;
             out.device_lists_left = left;
         }
@@ -652,33 +591,7 @@ impl Services {
             let rc_since = since.map_or(0, |s| s.receipts);
             let receipts = self.store.receipts_for_room(room_id, rc_since).await?;
             if !receipts.is_empty() {
-                let mut content: serde_json::Map<String, Value> = serde_json::Map::new();
-                for r in receipts {
-                    if r.receipt_type == "m.read.private" && r.user_id != *user {
-                        continue;
-                    }
-                    let by_type = content
-                        .entry(r.event_id.to_string())
-                        .or_insert_with(|| json!({}));
-                    let users = by_type.as_object_mut().and_then(|o| {
-                        o.entry(r.receipt_type.clone())
-                            .or_insert_with(|| json!({}))
-                            .as_object_mut()
-                    });
-                    if let Some(users) = users {
-                        let mut data = r.data.clone();
-                        if let Some(t) = &r.thread_id {
-                            data["thread_id"] = json!(t);
-                        }
-                        // MSC4102: an unthreaded receipt takes precedence over a threaded one.
-                        let existing_unthreaded = users
-                            .get(r.user_id.as_str())
-                            .is_some_and(|d| d.get("thread_id").is_none());
-                        if !(existing_unthreaded && r.thread_id.is_some()) {
-                            users.insert(r.user_id.to_string(), data);
-                        }
-                    }
-                }
+                let content = receipts_content(receipts, user);
                 room.ephemeral
                     .push(json!({ "type": "m.receipt", "content": content }));
             }
@@ -994,4 +907,118 @@ pub fn is_stripped_state_type(ty: Option<&StateEventType>) -> bool {
                 | StateEventType::RoomEncryption
         )
     )
+}
+
+/// The content of an `m.receipt` ephemeral event for a room's receipts, as seen by `user`
+/// (other users' private receipts are left out).
+pub(crate) fn receipts_content(
+    receipts: Vec<tessera_store::Receipt>,
+    user: &UserId,
+) -> serde_json::Map<String, Value> {
+    let mut content: serde_json::Map<String, Value> = serde_json::Map::new();
+    for r in receipts {
+        if r.receipt_type == "m.read.private" && r.user_id != *user {
+            continue;
+        }
+        let by_type = content
+            .entry(r.event_id.to_string())
+            .or_insert_with(|| json!({}));
+        let users = by_type.as_object_mut().and_then(|o| {
+            o.entry(r.receipt_type.clone())
+                .or_insert_with(|| json!({}))
+                .as_object_mut()
+        });
+        if let Some(users) = users {
+            let mut data = r.data.clone();
+            if let Some(t) = &r.thread_id {
+                data["thread_id"] = json!(t);
+            }
+            // MSC4102: an unthreaded receipt takes precedence over a threaded one.
+            let existing_unthreaded = users
+                .get(r.user_id.as_str())
+                .is_some_and(|d| d.get("thread_id").is_none());
+            if !(existing_unthreaded && r.thread_id.is_some()) {
+                users.insert(r.user_id.to_string(), data);
+            }
+        }
+    }
+    content
+}
+
+impl Services {
+    /// Device-list `changed`/`left` for an incremental sync between `s` and `now`.
+    pub(crate) async fn device_list_updates(
+        &self,
+        user: &UserId,
+        s: SyncToken,
+        now: SyncToken,
+        memberships: &[Membership],
+        newly_joined: &[OwnedRoomId],
+    ) -> Result<(Vec<OwnedUserId>, Vec<OwnedUserId>)> {
+        let (mut changed, mut left) = self
+            .device_list_changes_for(user, s.device_lists, now.device_lists)
+            .await?;
+        // Users who joined or left rooms we are in during the window.
+        let all_my_rooms = self.store.rooms_for_user(user, "join").await?;
+        for m in self
+            .store
+            .memberships_changed_in_rooms(&all_my_rooms, s.events)
+            .await?
+        {
+            if m.user_id == *user || m.stream_ordering > now.events {
+                continue;
+            }
+            match m.membership {
+                MembershipState::Join => {
+                    if !changed.contains(&m.user_id) {
+                        changed.push(m.user_id.clone());
+                    }
+                }
+                MembershipState::Leave | MembershipState::Ban => {
+                    let still_shared = self
+                        .store
+                        .rooms_for_user(&m.user_id, "join")
+                        .await?
+                        .iter()
+                        .any(|r| all_my_rooms.contains(r));
+                    if !still_shared && !left.contains(&m.user_id) {
+                        left.push(m.user_id.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+        // Rooms we left in the window: their members, unless still shared elsewhere.
+        for m in memberships {
+            if !matches!(m.membership, MembershipState::Leave | MembershipState::Ban)
+                || m.stream_ordering <= s.events
+                || m.stream_ordering > now.events
+            {
+                continue;
+            }
+            for other in self.store.members(&m.room_id, Some("join")).await? {
+                if other.user_id == *user || left.contains(&other.user_id) {
+                    continue;
+                }
+                let still_shared = self
+                    .store
+                    .rooms_for_user(&other.user_id, "join")
+                    .await?
+                    .iter()
+                    .any(|r| all_my_rooms.contains(r));
+                if !still_shared {
+                    left.push(other.user_id);
+                }
+            }
+        }
+        // Members of newly joined rooms need their device lists fetched.
+        for room in newly_joined {
+            for m in self.store.members(room, Some("join")).await? {
+                if !changed.contains(&m.user_id) {
+                    changed.push(m.user_id);
+                }
+            }
+        }
+        Ok((changed, left))
+    }
 }

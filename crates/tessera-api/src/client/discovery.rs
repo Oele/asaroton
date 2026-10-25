@@ -21,8 +21,8 @@ pub async fn versions(
         SUPPORTED_VERSIONS.iter().map(|v| (*v).to_owned()).collect(),
     );
     resp.unstable_features = BTreeMap::from([
-        // Simplified Sliding Sync, advertised once implemented (Phase 5).
-        ("org.matrix.simplified_msc3575".to_owned(), false),
+        // Simplified Sliding Sync (MSC4186).
+        ("org.matrix.simplified_msc3575".to_owned(), true),
     ]);
     let _ = &services;
     Ok(resp)

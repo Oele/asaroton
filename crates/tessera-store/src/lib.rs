@@ -185,6 +185,12 @@ pub trait EventStore: Send + Sync {
     ) -> Result<Option<StoredEvent>>;
     /// Live (non-backfilled, non-outlier, non-rejected) events after a global stream position.
     async fn events_after(&self, after: StreamOrdering, limit: usize) -> Result<Vec<StoredEvent>>;
+    /// Newest live stream ordering per room, optionally counting only the given event types.
+    async fn latest_stream_orderings(
+        &self,
+        room_ids: &[OwnedRoomId],
+        event_types: Option<&[String]>,
+    ) -> Result<std::collections::HashMap<OwnedRoomId, StreamOrdering>>;
     /// The last stream position delivered to an appservice (0 if none).
     async fn appservice_position(&self, appservice_id: &str) -> Result<StreamOrdering>;
     async fn set_appservice_position(

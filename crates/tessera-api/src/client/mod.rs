@@ -9,6 +9,7 @@ pub mod misc;
 pub mod push;
 pub mod rooms;
 pub mod session;
+pub mod sliding_sync;
 pub mod synapse_admin;
 pub mod sync;
 
@@ -260,6 +261,10 @@ pub fn routes(router: Router<AppState>) -> Router<AppState> {
         .route(
             "/_matrix/client/r0/thirdparty/user",
             axum::routing::get(thirdparty_user_by_id_handler),
+        )
+        .route(
+            "/_matrix/client/unstable/org.matrix.simplified_msc3575/sync",
+            axum::routing::post(sliding_sync_handler),
         );
     let r = route::<c::voip::get_turn_server_info::v3::Request, _, _>(r, misc::turn_server);
     // media
@@ -542,4 +547,9 @@ raw_json_handler!(
     thirdparty_user_by_id_handler,
     ruma::api::client::thirdparty::get_user_for_user_id::v3::Request,
     misc::thirdparty_user_by_id
+);
+raw_json_handler!(
+    sliding_sync_handler,
+    ruma::api::client::sync::sync_events::v5::Request,
+    sliding_sync::sliding_sync
 );

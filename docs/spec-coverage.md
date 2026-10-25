@@ -11,7 +11,7 @@ most recent runs noted in the commit history.
 | Client-Server: rooms / membership / events | done: create, join (local and remote), knock, leave, invite, kick, ban, forget, send, state, redact, messages (filters, history visibility, backfill over federation), context, timestamp_to_event, aliases, directory, upgrades, reports, room summary |
 | Client-Server: relations / threads / search / spaces | done (`/relations` with recursion, `/threads`, bundled aggregations, Postgres full-text search, `/hierarchy` incl. remote children) |
 | Client-Server: /sync (classic) | done: rooms, state, account data, receipts (threaded), typing, presence, to-device, device lists, unread and per-thread notification counts, ignored users, lazy loading |
-| Client-Server: Simplified Sliding Sync (MSC4186) | not started |
+| Client-Server: Simplified Sliding Sync (MSC4186) | done: lists with ranges and filters, room subscriptions, per-connection deltas with position retry, `required_state` wildcards (`*`, `$ME`, `$LAZY`), to-device, e2ee, account data, receipts and typing extensions; thread subscriptions, profiles and sticky events extensions not implemented |
 | Client-Server: media | done: authenticated and legacy download/thumbnail, uploads (sync and async), URL previews, remote media over federation |
 | Client-Server: E2EE | done: device keys, one-time/fallback keys, cross-signing, signatures, to-device, key backups |
 | Client-Server: push | done: rules served and evaluated for unread counts, room-specific rules follow room upgrades, HTTP pushers receive notifications (full and `event_id_only`, rejected pushkeys removed) |
@@ -24,5 +24,6 @@ most recent runs noted in the commit history.
 | Admin API | Synapse-compatible registration and server notices only |
 | Auth: MSC3861 delegation | not started |
 
-Known gaps (Complement): `/members?at=` with a token before the room's first event, sliding
-sync, MSC3861, ephemeral events to appservices.
+Known gaps (Complement): `/members?at=` with a token before the room's first event, initial
+`/sync` timelines are stream- rather than topologically ordered (TestSyncOmitsStateChangeOnFilteredEvents),
+MSC3861, ephemeral events to appservices.
