@@ -112,6 +112,15 @@ impl Federation {
                             .and_then(|s| OwnedEventId::try_from(s).ok())
                     });
                 match self.handle_incoming_pdu(origin, &room_id, obj, false).await {
+                    // An event that fails the auth rules is kept as rejected, which is a
+                    // normal outcome rather than a failure to process it (as in the reference
+                    // implementation); only events we could not take at all are errors.
+                    Ok((event_id, Outcome::Rejected(reason)))
+                        if reason.starts_with("event failed authorization")
+                            || reason.starts_with("auth events unavailable") =>
+                    {
+                        results.insert(event_id, Ok(()));
+                    }
                     Ok((event_id, Outcome::Rejected(reason))) => {
                         results.insert(event_id, Err(reason));
                     }
