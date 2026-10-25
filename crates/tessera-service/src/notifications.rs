@@ -34,6 +34,19 @@ pub struct UnreadCounts {
 /// How many events after the user's read position are considered.
 const MAX_SCANNED: usize = 2000;
 
+/// Counts already computed for a (room, user), so a sync only evaluates the events that
+/// arrived since the previous one.
+#[derive(Clone, Debug)]
+pub struct UnreadCacheEntry {
+    floor: StreamOrdering,
+    unthreaded: Option<StreamOrdering>,
+    main: Option<StreamOrdering>,
+    threads: BTreeMap<String, StreamOrdering>,
+    rules_stream: i64,
+    counted_upto: StreamOrdering,
+    counts: UnreadCounts,
+}
+
 impl Services {
     /// Unread counts for `user` in `room_id`, considering events up to `upto` (inclusive).
     pub async fn unread_counts(
@@ -85,15 +98,54 @@ impl Services {
                 .map(|m| m.stream_ordering.saturating_sub(1));
         }
         let floor = floor.unwrap_or(0);
-        let mut out = UnreadCounts::default();
         if floor >= upto {
-            return Ok(out);
+            return Ok(UnreadCounts::default());
         }
-        let events = self
-            .store
-            .room_events_in_range(room_id, floor, Some(upto), Direction::Forwards, MAX_SCANNED)
-            .await?;
+        // Resume from the cached counts when nothing they depend on has changed.
+        let rules_stream = self.push_rules_stream_id(user).await?;
+        let key = (room_id.to_owned(), user.to_owned());
+        let cached = self
+            .unread_cache
+            .get(&key)
+            .filter(|c| {
+                c.floor == floor
+                    && c.unthreaded == unthreaded
+                    && c.main == main
+                    && c.threads == threads
+                    && c.rules_stream == rules_stream
+                    && c.counted_upto <= upto
+            })
+            .map(|c| c.clone());
+        let (start, mut out) = match cached {
+            Some(c) => (c.counted_upto, c.counts),
+            None => (floor, UnreadCounts::default()),
+        };
+        let events = if start >= upto {
+            Vec::new()
+        } else {
+            self.store
+                .room_events_in_range(room_id, start, Some(upto), Direction::Forwards, MAX_SCANNED)
+                .await?
+        };
+        let remember = |counts: &UnreadCounts| {
+            if self.unread_cache.len() > 200_000 {
+                self.unread_cache.clear();
+            }
+            self.unread_cache.insert(
+                key.clone(),
+                UnreadCacheEntry {
+                    floor,
+                    unthreaded,
+                    main,
+                    threads: threads.clone(),
+                    rules_stream,
+                    counted_upto: upto,
+                    counts: counts.clone(),
+                },
+            );
+        };
         if events.is_empty() {
+            remember(&out);
             return Ok(out);
         }
 
@@ -145,6 +197,7 @@ impl Services {
                 Some(root) => add(out.threads.entry(root).or_default()),
             }
         }
+        remember(&out);
         Ok(out)
     }
 }

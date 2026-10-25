@@ -54,6 +54,9 @@ pub struct Services {
     /// Users the authentication service allowed to replace their cross-signing keys without
     /// further interactive auth, and when.
     pub cross_signing_reset_allowed: dashmap::DashMap<ruma::OwnedUserId, std::time::Instant>,
+    /// Unread counts computed so far per (room, user).
+    pub unread_cache:
+        dashmap::DashMap<(ruma::OwnedRoomId, ruma::OwnedUserId), notifications::UnreadCacheEntry>,
     /// Sliding sync connections and what each has been sent.
     pub sliding_sync: sliding_sync::SlidingSyncConnections,
     /// Nonces handed out by the shared-secret registration endpoint.
@@ -104,6 +107,7 @@ impl Services {
             auth,
             mas,
             cross_signing_reset_allowed: dashmap::DashMap::new(),
+            unread_cache: dashmap::DashMap::new(),
             appservices,
             uia: UiaSessions::default(),
             notifier: Notifier::new(),
