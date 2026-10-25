@@ -1,8 +1,12 @@
 //! Push gateway delivery: events that notify a user are sent to the user's HTTP pushers.
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    collections::HashSet,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
-use ruma::{RoomId, events::StateEventType};
+use ruma::{OwnedUserId, RoomId, events::StateEventType};
 use serde_json::{Value, json};
 use tessera_service::{Notification, Result as ServiceResult, Services};
 use tessera_store::{Pusher, StoredEvent};
@@ -17,6 +21,10 @@ pub fn start(fed: &Arc<Federation>) {
 async fn worker(fed: &Arc<Federation>) {
     let services: &Services = &fed.services;
     let mut rx = services.notifier.subscribe();
+    // Most users have no pusher; the set of those who do is refreshed every few seconds
+    // rather than queried per member per event.
+    let mut with_pushers: HashSet<OwnedUserId> = HashSet::new();
+    let mut refreshed: Option<Instant> = None;
     loop {
         let n = match rx.recv().await {
             Ok(n) => n,
@@ -30,7 +38,17 @@ async fn worker(fed: &Arc<Federation>) {
         else {
             continue;
         };
-        if let Err(e) = handle_event(services, room_id, *stream_ordering).await {
+        if refreshed.is_none_or(|t| t.elapsed() > Duration::from_secs(10)) {
+            match services.store.users_with_pushers().await {
+                Ok(users) => with_pushers = users.into_iter().collect(),
+                Err(e) => tracing::warn!(error = %e, "could not list users with pushers"),
+            }
+            refreshed = Some(Instant::now());
+        }
+        if with_pushers.is_empty() {
+            continue;
+        }
+        if let Err(e) = handle_event(services, room_id, *stream_ordering, &with_pushers).await {
             tracing::warn!(%room_id, error = %e, "push delivery failed");
         }
     }
@@ -40,6 +58,7 @@ async fn handle_event(
     services: &Services,
     room_id: &RoomId,
     stream_ordering: i64,
+    with_pushers: &HashSet<OwnedUserId>,
 ) -> ServiceResult<()> {
     let Some(ev) = services
         .store
@@ -51,7 +70,10 @@ async fn handle_event(
         return Ok(());
     };
     for m in services.store.members(room_id, Some("join")).await? {
-        if !services.is_local(&m.user_id) || m.user_id == ev.pdu.sender() {
+        if !services.is_local(&m.user_id)
+            || m.user_id == ev.pdu.sender()
+            || !with_pushers.contains(&m.user_id)
+        {
             continue;
         }
         let pushers: Vec<Pusher> = services

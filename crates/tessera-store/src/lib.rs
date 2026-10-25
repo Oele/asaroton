@@ -181,6 +181,14 @@ pub trait RoomStore: Send + Sync {
     /// Receipts.
     async fn set_receipt(&self, receipt: Receipt) -> Result<i64>;
     async fn receipts_for_room(&self, room_id: &RoomId, since: i64) -> Result<Vec<Receipt>>;
+    /// Of the given rooms, those with receipts newer than `since`.
+    async fn rooms_with_receipts_since(
+        &self,
+        room_ids: &[OwnedRoomId],
+        since: i64,
+    ) -> Result<Vec<OwnedRoomId>>;
+    /// One user's receipts in a room (their read positions).
+    async fn user_receipts(&self, room_id: &RoomId, user_id: &UserId) -> Result<Vec<Receipt>>;
     async fn max_receipt_stream_id(&self) -> Result<i64>;
 }
 
@@ -271,6 +279,11 @@ pub trait EventStore: Send + Sync {
     ) -> Result<Vec<StoredEvent>>;
     /// Every relation pointing at `event_id`, oldest first.
     async fn relation_summary(&self, event_id: &EventId) -> Result<Vec<RelationRow>>;
+    /// `relation_summary` for many events in one query, keyed by the related-to event.
+    async fn relation_summaries(
+        &self,
+        event_ids: &[OwnedEventId],
+    ) -> Result<std::collections::HashMap<OwnedEventId, Vec<RelationRow>>>;
     /// Thread roots in a room ordered by latest activity (newest first), paged by the latest
     /// reply's stream ordering.
     async fn threads(
@@ -583,6 +596,8 @@ pub trait E2eeStore: Send + Sync {
         keep_token: Option<&str>,
     ) -> Result<()>;
     async fn pushers(&self, user_id: &UserId) -> Result<Vec<Pusher>>;
+    /// Every user with at least one HTTP pusher.
+    async fn users_with_pushers(&self) -> Result<Vec<OwnedUserId>>;
 }
 
 /// Federation queues and caches.

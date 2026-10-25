@@ -246,7 +246,7 @@ fn default_true() -> bool {
     true
 }
 fn default_db_connections() -> u32 {
-    16
+    32
 }
 fn default_data_dir() -> PathBuf {
     PathBuf::from("./data")

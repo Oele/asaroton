@@ -624,6 +624,55 @@ impl Services {
     ) -> Result<Vec<String>> {
         let mut cache: HashMap<tessera_store::StateGroupId, String> = HashMap::new();
         let mut out = Vec::with_capacity(events.len());
+        // A slice of one room's live timeline in ascending order: look the membership up once
+        // for the first event and carry it forward, applying the user's own membership events
+        // in between (fetched in one query). Anything else takes the per-event path.
+        let ascending = events.len() > 1
+            && events
+                .windows(2)
+                .all(|w| w[0].stream_ordering >= 0 && w[0].stream_ordering < w[1].stream_ordering)
+            && events
+                .windows(2)
+                .all(|w| w[0].pdu.room_id() == w[1].pdu.room_id());
+        if ascending {
+            let room_id = events[0].pdu.room_id();
+            let first = &events[0];
+            let mut current = self.membership_before(user, first, &mut cache).await?;
+            let own: Vec<StoredEvent> = self
+                .store
+                .room_events_in_range(
+                    room_id,
+                    first.stream_ordering - 1,
+                    Some(events[events.len() - 1].stream_ordering),
+                    tessera_store::Direction::Forwards,
+                    5000,
+                )
+                .await?
+                .into_iter()
+                .filter(|e| {
+                    e.pdu.event_type() == &TimelineEventType::RoomMember
+                        && e.pdu.state_key() == Some(user.as_str())
+                })
+                .collect();
+            let mut own_iter = own.iter().peekable();
+            for ev in events {
+                while let Some(o) = own_iter.peek() {
+                    if o.stream_ordering < ev.stream_ordering {
+                        current = membership_of(o);
+                        own_iter.next();
+                    } else {
+                        break;
+                    }
+                }
+                if ev.pdu.event_type() == &TimelineEventType::RoomMember
+                    && ev.pdu.state_key() == Some(user.as_str())
+                {
+                    current = membership_of(ev);
+                }
+                out.push(current.clone());
+            }
+            return Ok(out);
+        }
         for ev in events {
             if ev.pdu.event_type() == &TimelineEventType::RoomMember
                 && ev.pdu.state_key() == Some(user.as_str())
@@ -657,6 +706,27 @@ impl Services {
             out.push(m);
         }
         Ok(out)
+    }
+
+    /// The user's membership in the state before `ev` (`leave` when unknown).
+    async fn membership_before(
+        &self,
+        user: &UserId,
+        ev: &StoredEvent,
+        cache: &mut HashMap<tessera_store::StateGroupId, String>,
+    ) -> Result<String> {
+        let Some(group) = self.state_group_for_visibility(ev).await? else {
+            return Ok("leave".to_owned());
+        };
+        if let Some(m) = cache.get(&group) {
+            return Ok(m.clone());
+        }
+        let ctx = self.visibility_context_at(group, user).await?;
+        let m = ctx
+            .membership
+            .map_or_else(|| "leave".to_owned(), |m| m.to_string());
+        cache.insert(group, m.clone());
+        Ok(m)
     }
 
     /// Room state as of a stream token (`/members?at=`), with the same visibility rules as
@@ -695,4 +765,16 @@ impl Services {
             .collect();
         self.store.get_events(&ids).await.map_err(Into::into)
     }
+}
+
+/// The membership an `m.room.member` event sets (`leave` when malformed).
+fn membership_of(ev: &StoredEvent) -> String {
+    serde_json::from_str::<Value>(ev.pdu.content().get())
+        .ok()
+        .and_then(|c| {
+            c.get("membership")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| "leave".to_owned())
 }

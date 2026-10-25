@@ -101,6 +101,16 @@ impl Services {
         user: Option<&UserId>,
     ) -> Result<Option<Value>> {
         let rows = self.store.relation_summary(ev.event_id()).await?;
+        self.aggregations_from_rows(ev, rows, user).await
+    }
+
+    /// `bundled_aggregations` from relation rows already fetched.
+    pub async fn aggregations_from_rows(
+        &self,
+        ev: &StoredEvent,
+        rows: Vec<RelationRow>,
+        user: Option<&UserId>,
+    ) -> Result<Option<Value>> {
         if rows.is_empty() {
             return Ok(None);
         }
@@ -198,8 +208,21 @@ impl Services {
         user: Option<&UserId>,
     ) -> Result<Vec<Value>> {
         let mut out = Vec::with_capacity(events.len());
+        // One relations query for the whole batch.
+        let ids: Vec<ruma::OwnedEventId> = events.iter().map(|e| e.event_id().to_owned()).collect();
+        let mut summaries = self.store.relation_summaries(&ids).await?;
         for e in events {
-            out.push(self.client_event(e, user).await?);
+            let mut v = self.client_event_plain(e);
+            let rows = summaries.remove(e.event_id()).unwrap_or_default();
+            if let Some(agg) = self.aggregations_from_rows(e, rows, user).await?
+                && let Some(u) = v
+                    .as_object_mut()
+                    .and_then(|o| o.get_mut("unsigned"))
+                    .and_then(Value::as_object_mut)
+            {
+                u.insert("m.relations".into(), agg);
+            }
+            out.push(v);
         }
         for (v, e) in out.iter_mut().zip(events) {
             if let Some((ty, key)) = e.pdu.state_tuple()

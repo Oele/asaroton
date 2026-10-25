@@ -300,6 +300,29 @@ impl Services {
             .collect();
 
         let ignored = self.ignored_users(user).await?;
+        // Incremental syncs: rooms with nothing new (no events, receipts or typing) are not
+        // visited at all; two set queries decide that for every joined room at once.
+        let joined_ids: Vec<OwnedRoomId> = memberships
+            .iter()
+            .filter(|m| m.membership == MembershipState::Join)
+            .map(|m| m.room_id.clone())
+            .collect();
+        let (active_events, active_receipts): (HashSet<OwnedRoomId>, HashSet<OwnedRoomId>) =
+            match since {
+                Some(s) if !req.full_state => (
+                    self.store
+                        .rooms_with_events_in_range(&joined_ids, s.events, now.events)
+                        .await?
+                        .into_iter()
+                        .collect(),
+                    self.store
+                        .rooms_with_receipts_since(&joined_ids, s.receipts)
+                        .await?
+                        .into_iter()
+                        .collect(),
+                ),
+                _ => (HashSet::new(), HashSet::new()),
+            };
         let mut newly_joined: Vec<OwnedRoomId> = Vec::new();
         for m in &memberships {
             let changed_in_window = since.is_none_or(|s| m.stream_ordering > s.events);
@@ -308,6 +331,14 @@ impl Services {
                     let full = req.full_state || since.is_none() || changed_in_window;
                     if changed_in_window && since.is_some() {
                         newly_joined.push(m.room_id.clone());
+                    }
+                    if let Some(s) = since
+                        && !full
+                        && !active_events.contains(&m.room_id)
+                        && !active_receipts.contains(&m.room_id)
+                        && !self.typing.changed_since(&m.room_id, s.typing)
+                    {
+                        continue;
                     }
                     if let Some(room) = self
                         .sync_room(
@@ -318,6 +349,7 @@ impl Services {
                             full,
                             None,
                             changed_in_window && since.is_some(),
+                            &ignored,
                         )
                         .await?
                     {
@@ -349,6 +381,7 @@ impl Services {
                             since.is_none(),
                             Some(m.stream_ordering),
                             false,
+                            &ignored,
                         )
                         .await?
                     {
@@ -376,6 +409,9 @@ impl Services {
                 Some(room_id) => {
                     if let Some(room) = out.join.get_mut(&room_id) {
                         room.account_data.push(ev);
+                    } else if joined_ids.contains(&room_id) {
+                        // A joined room with nothing else new still reports its account data.
+                        out.join.entry(room_id).or_default().account_data.push(ev);
                     }
                 }
             }
@@ -428,11 +464,11 @@ impl Services {
         full_state: bool,
         leave_at: Option<i64>,
         newly_joined: bool,
+        ignored: &HashSet<OwnedUserId>,
     ) -> Result<Option<RoomSync>> {
         let user = &req.user_id;
         let filter = &req.filter;
         let limit = filter.timeline_limit.min(1000);
-        let ignored = self.ignored_users(user).await?;
         let mut room = RoomSync::default();
 
         // Timeline: newest `limit` matching events in (since, upper], oldest first.
@@ -512,8 +548,8 @@ impl Services {
         // A gap (events arrived whose history we do not have) cuts the timeline: only the
         // events from the gap onwards are shown, marked limited so the client paginates.
         let gap = match lower {
-            Some(l) => self.store.gap_position_since(room_id, l).await?,
-            None => None,
+            Some(l) if !events.is_empty() => self.store.gap_position_since(room_id, l).await?,
+            _ => None,
         };
         if let Some(g) = gap {
             events.retain(|e| e.stream_ordering >= g);
@@ -628,6 +664,16 @@ impl Services {
                 }
             }
 
+            // An idle room in an incremental sync: nothing to report, so skip the counting and
+            // summary queries (most rooms are idle most of the time).
+            if since.is_some()
+                && !full_state
+                && room.timeline.is_empty()
+                && room.state.is_empty()
+                && room.ephemeral.is_empty()
+            {
+                return Ok(None);
+            }
             // Unread notification counts.
             match self.unread_counts(room_id, user, upper).await {
                 Ok(counts) => {
@@ -739,7 +785,11 @@ impl Services {
                     emitted.insert(m.user_id.clone());
                 }
             }
-            // Changed presence of anyone we share a room with.
+            // Changed presence of anyone we share a room with (only when any presence changed
+            // at all since the token: the scan over every room's members is not free).
+            if self.presence.position() <= s.presence {
+                return Ok(events);
+            }
             let my_rooms = self.store.rooms_for_user(user, "join").await?;
             let mut shared: HashSet<OwnedUserId> = HashSet::new();
             for room in &my_rooms {

@@ -434,6 +434,42 @@ impl EventStore for PostgresStore {
         rows.into_iter().map(StoredEvent::try_from).collect()
     }
 
+    async fn relation_summaries(
+        &self,
+        event_ids: &[OwnedEventId],
+    ) -> Result<std::collections::HashMap<OwnedEventId, Vec<RelationRow>>> {
+        let mut out: std::collections::HashMap<OwnedEventId, Vec<RelationRow>> =
+            std::collections::HashMap::new();
+        if event_ids.is_empty() {
+            return Ok(out);
+        }
+        let ids: Vec<String> = event_ids.iter().map(ToString::to_string).collect();
+        let rows = sqlx::query(
+            "SELECT r.relates_to, r.event_id, r.rel_type, r.event_type, r.sender, r.origin_server_ts, r.stream_ordering
+               FROM event_relations r JOIN events e ON e.event_id = r.event_id
+              WHERE r.relates_to = ANY($1) AND NOT e.rejected
+              ORDER BY r.stream_ordering ASC",
+        )
+        .bind(&ids)
+        .fetch_all(&self.pool)
+        .await?;
+        for r in rows {
+            let parent = OwnedEventId::try_from(r.get::<String, _>(0))
+                .map_err(|e| Error::Corrupt(format!("event id: {e}")))?;
+            out.entry(parent).or_default().push(RelationRow {
+                event_id: OwnedEventId::try_from(r.get::<String, _>(1))
+                    .map_err(|e| Error::Corrupt(format!("event id: {e}")))?,
+                rel_type: r.get(2),
+                event_type: r.get(3),
+                sender: ruma::OwnedUserId::try_from(r.get::<String, _>(4))
+                    .map_err(|e| Error::Corrupt(format!("user id: {e}")))?,
+                origin_server_ts: r.get(5),
+                stream_ordering: r.get(6),
+            });
+        }
+        Ok(out)
+    }
+
     async fn relation_summary(&self, event_id: &EventId) -> Result<Vec<RelationRow>> {
         let rows = sqlx::query(
             "SELECT r.event_id, r.rel_type, r.event_type, r.sender, r.origin_server_ts, r.stream_ordering

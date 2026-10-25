@@ -464,6 +464,16 @@ impl E2eeStore for PostgresStore {
         Ok(())
     }
 
+    async fn users_with_pushers(&self) -> Result<Vec<OwnedUserId>> {
+        let rows = sqlx::query("SELECT DISTINCT user_id FROM pushers WHERE kind = 'http'")
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|r| OwnedUserId::try_from(r.get::<String, _>(0)).ok())
+            .collect())
+    }
+
     async fn pushers(&self, user_id: &UserId) -> Result<Vec<Pusher>> {
         let rows = sqlx::query(
             "SELECT user_id, app_id, pushkey, kind, app_display_name, device_display_name, profile_tag, lang, data, access_token FROM pushers WHERE user_id = $1",

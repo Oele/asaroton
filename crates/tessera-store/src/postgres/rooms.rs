@@ -495,6 +495,44 @@ impl RoomStore for PostgresStore {
         Ok(row.get::<i64, _>(0))
     }
 
+    async fn rooms_with_receipts_since(
+        &self,
+        room_ids: &[OwnedRoomId],
+        since: i64,
+    ) -> Result<Vec<OwnedRoomId>> {
+        if room_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let ids: Vec<String> = room_ids.iter().map(ToString::to_string).collect();
+        let rows = sqlx::query(
+            "SELECT DISTINCT room_id FROM receipts WHERE room_id = ANY($1) AND stream_id > $2",
+        )
+        .bind(&ids)
+        .bind(since)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|r| OwnedRoomId::try_from(r.get::<String, _>(0)).ok())
+            .collect())
+    }
+
+    async fn user_receipts(
+        &self,
+        room_id: &RoomId,
+        user_id: &UserId,
+    ) -> Result<Vec<crate::Receipt>> {
+        let rows = sqlx::query(
+            "SELECT room_id, user_id, receipt_type, thread_id, event_id, data, stream_id FROM receipts
+             WHERE room_id = $1 AND user_id = $2",
+        )
+        .bind(room_id.as_str())
+        .bind(user_id.as_str())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(receipt_from_row).collect()
+    }
+
     async fn receipts_for_room(&self, room_id: &RoomId, since: i64) -> Result<Vec<crate::Receipt>> {
         let rows = sqlx::query(
             "SELECT room_id, user_id, receipt_type, thread_id, event_id, data, stream_id FROM receipts
@@ -504,28 +542,7 @@ impl RoomStore for PostgresStore {
         .bind(since)
         .fetch_all(&self.pool)
         .await?;
-        rows.iter()
-            .map(|r| {
-                let corrupt = |e: ruma::IdParseError| Error::Corrupt(e.to_string());
-                let thread: String = r.get("thread_id");
-                Ok(crate::Receipt {
-                    room_id: OwnedRoomId::try_from(r.get::<String, _>("room_id"))
-                        .map_err(corrupt)?,
-                    user_id: OwnedUserId::try_from(r.get::<String, _>("user_id"))
-                        .map_err(corrupt)?,
-                    receipt_type: r.get("receipt_type"),
-                    thread_id: if thread.is_empty() {
-                        None
-                    } else {
-                        Some(thread)
-                    },
-                    event_id: OwnedEventId::try_from(r.get::<String, _>("event_id"))
-                        .map_err(corrupt)?,
-                    data: r.get("data"),
-                    stream_id: r.get("stream_id"),
-                })
-            })
-            .collect()
+        rows.iter().map(receipt_from_row).collect()
     }
 
     async fn max_receipt_stream_id(&self) -> Result<i64> {
@@ -556,5 +573,23 @@ fn alias_from_row(r: &sqlx::postgres::PgRow) -> Result<RoomAlias> {
             .map(OwnedUserId::try_from)
             .transpose()
             .map_err(corrupt)?,
+    })
+}
+
+fn receipt_from_row(r: &sqlx::postgres::PgRow) -> Result<crate::Receipt> {
+    let corrupt = |e: ruma::IdParseError| Error::Corrupt(e.to_string());
+    let thread: String = r.get("thread_id");
+    Ok(crate::Receipt {
+        room_id: OwnedRoomId::try_from(r.get::<String, _>("room_id")).map_err(corrupt)?,
+        user_id: OwnedUserId::try_from(r.get::<String, _>("user_id")).map_err(corrupt)?,
+        receipt_type: r.get("receipt_type"),
+        thread_id: if thread.is_empty() {
+            None
+        } else {
+            Some(thread)
+        },
+        event_id: OwnedEventId::try_from(r.get::<String, _>("event_id")).map_err(corrupt)?,
+        data: r.get("data"),
+        stream_id: r.get("stream_id"),
     })
 }

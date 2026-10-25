@@ -60,9 +60,8 @@ impl Services {
         let mut unthreaded: Option<StreamOrdering> = None;
         let mut main: Option<StreamOrdering> = None;
         let mut threads: BTreeMap<String, StreamOrdering> = BTreeMap::new();
-        for r in self.store.receipts_for_room(room_id, 0).await? {
-            if r.user_id != user || !matches!(r.receipt_type.as_str(), "m.read" | "m.read.private")
-            {
+        for r in self.store.user_receipts(room_id, user).await? {
+            if !matches!(r.receipt_type.as_str(), "m.read" | "m.read.private") {
                 continue;
             }
             let Some(ev) = self.store.get_event(&r.event_id).await? else {
