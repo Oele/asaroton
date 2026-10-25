@@ -250,6 +250,9 @@ impl Services {
                 }
             } else if let Some(server) = root.server_name() {
                 queue[0].via.push(server.to_owned());
+            } else {
+                // A room we know nothing about and whose ID names no server: nowhere to ask.
+                return Err(Error::not_found("Unknown room."));
             }
         }
 
