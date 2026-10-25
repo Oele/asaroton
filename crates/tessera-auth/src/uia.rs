@@ -46,14 +46,27 @@ pub enum UiaOutcome {
     },
     /// More stages are needed: respond 401 with this info.
     Incomplete(Box<UiaaInfo>),
+    /// The request must be refused outright.
+    Rejected { kind: ErrorKind, message: String },
 }
 
 /// The result of validating one stage: whether it passed, and for password stages, which
 /// user it authenticated.
 #[derive(Debug)]
 pub enum StageResult {
-    Passed { user_id: Option<OwnedUserId> },
-    Failed { kind: ErrorKind, message: String },
+    Passed {
+        user_id: Option<OwnedUserId>,
+    },
+    /// The stage failed; the client may retry within the same session (401).
+    Failed {
+        kind: ErrorKind,
+        message: String,
+    },
+    /// The request itself is not allowed (e.g. authenticating as a different user): 403.
+    Rejected {
+        kind: ErrorKind,
+        message: String,
+    },
 }
 
 impl UiaSessions {
@@ -142,6 +155,10 @@ impl UiaSessions {
                 return UiaOutcome::Incomplete(Box::new(
                     self.reinsert_with_error(session_id, session, kind, message),
                 ));
+            }
+            StageResult::Rejected { kind, message } => {
+                self.sessions.insert(session_id, session);
+                return UiaOutcome::Rejected { kind, message };
             }
         }
 

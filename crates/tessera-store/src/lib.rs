@@ -13,8 +13,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ruma::{
-    DeviceId, EventId, OwnedEventId, OwnedRoomId, RoomAliasId, RoomId, ServerName, UserId,
-    events::StateEventType,
+    DeviceId, EventId, OwnedDeviceId, OwnedEventId, OwnedRoomId, OwnedUserId, RoomAliasId, RoomId,
+    ServerName, UserId, events::StateEventType,
 };
 use tessera_core::Pdu;
 
@@ -140,6 +140,20 @@ pub trait RoomStore: Send + Sync {
         txn_id: &str,
         event_id: &EventId,
     ) -> Result<()>;
+    /// Remember the client transaction ID of an event, to echo it back in `unsigned`.
+    async fn set_event_txn_id(
+        &self,
+        event_id: &EventId,
+        user_id: &UserId,
+        device_id: Option<&DeviceId>,
+        txn_id: &str,
+    ) -> Result<()>;
+    async fn get_event_txn_id(
+        &self,
+        event_id: &EventId,
+        user_id: &UserId,
+        device_id: Option<&DeviceId>,
+    ) -> Result<Option<String>>;
 
     /// Receipts.
     async fn set_receipt(&self, receipt: Receipt) -> Result<i64>;
@@ -298,9 +312,126 @@ pub trait KeyStore: Send + Sync {
     async fn store_remote_verify_keys(&self, keys: Vec<RemoteVerifyKey>) -> Result<()>;
 }
 
+/// End-to-end encryption keys, to-device messages, device list stream, push.
+#[async_trait]
+pub trait E2eeStore: Send + Sync {
+    async fn set_device_keys(
+        &self,
+        user_id: &UserId,
+        device_id: &DeviceId,
+        keys: &serde_json::Value,
+    ) -> Result<()>;
+    async fn get_device_keys(
+        &self,
+        user_id: &UserId,
+        device_id: &DeviceId,
+    ) -> Result<Option<serde_json::Value>>;
+    async fn all_device_keys(
+        &self,
+        user_id: &UserId,
+    ) -> Result<Vec<(OwnedDeviceId, serde_json::Value)>>;
+    async fn delete_device_keys(&self, user_id: &UserId, device_id: &DeviceId) -> Result<()>;
+
+    async fn add_one_time_keys(
+        &self,
+        user_id: &UserId,
+        device_id: &DeviceId,
+        keys: &[OneTimeKeyRow],
+    ) -> Result<()>;
+    /// Count of unclaimed one-time keys per algorithm.
+    async fn count_one_time_keys(
+        &self,
+        user_id: &UserId,
+        device_id: &DeviceId,
+    ) -> Result<Vec<(String, i64)>>;
+    /// Atomically take one key of the algorithm; falls back to the fallback key (marking it used).
+    async fn claim_one_time_key(
+        &self,
+        user_id: &UserId,
+        device_id: &DeviceId,
+        algorithm: &str,
+    ) -> Result<Option<OneTimeKeyRow>>;
+    async fn set_fallback_keys(
+        &self,
+        user_id: &UserId,
+        device_id: &DeviceId,
+        keys: &[OneTimeKeyRow],
+    ) -> Result<()>;
+    /// Algorithms that have an unused fallback key.
+    async fn unused_fallback_algorithms(
+        &self,
+        user_id: &UserId,
+        device_id: &DeviceId,
+    ) -> Result<Vec<String>>;
+
+    async fn set_cross_signing_key(
+        &self,
+        user_id: &UserId,
+        key_type: &str,
+        key: &serde_json::Value,
+    ) -> Result<()>;
+    async fn get_cross_signing_key(
+        &self,
+        user_id: &UserId,
+        key_type: &str,
+    ) -> Result<Option<serde_json::Value>>;
+    async fn add_key_signature(
+        &self,
+        target_user: &UserId,
+        target_key: &str,
+        signing_user: &UserId,
+        signing_key: &str,
+        signature: &str,
+    ) -> Result<()>;
+    async fn key_signatures(
+        &self,
+        target_user: &UserId,
+        target_key: &str,
+    ) -> Result<Vec<(OwnedUserId, String, String)>>;
+
+    async fn add_device_list_change(
+        &self,
+        user_id: &UserId,
+        device_id: Option<&DeviceId>,
+    ) -> Result<i64>;
+    async fn device_list_changes_since(&self, since: i64, to: i64) -> Result<Vec<OwnedUserId>>;
+    async fn max_device_list_stream_id(&self) -> Result<i64>;
+
+    async fn add_to_device_message(
+        &self,
+        user_id: &UserId,
+        device_id: &DeviceId,
+        sender: &UserId,
+        event_type: &str,
+        content: &serde_json::Value,
+    ) -> Result<i64>;
+    async fn to_device_messages(
+        &self,
+        user_id: &UserId,
+        device_id: &DeviceId,
+        since: i64,
+        to: i64,
+        limit: usize,
+    ) -> Result<Vec<ToDeviceMessage>>;
+    async fn delete_to_device_messages_up_to(
+        &self,
+        user_id: &UserId,
+        device_id: &DeviceId,
+        up_to: i64,
+    ) -> Result<()>;
+    async fn max_to_device_stream_id(&self) -> Result<i64>;
+
+    async fn get_push_rules(&self, user_id: &UserId) -> Result<Option<(serde_json::Value, i64)>>;
+    /// Store the ruleset and return the account-data stream id it was published at.
+    async fn set_push_rules(&self, user_id: &UserId, ruleset: &serde_json::Value) -> Result<i64>;
+    async fn set_pusher(&self, pusher: Pusher) -> Result<()>;
+    async fn delete_pusher(&self, user_id: &UserId, app_id: &str, pushkey: &str) -> Result<()>;
+    async fn pushers(&self, user_id: &UserId) -> Result<Vec<Pusher>>;
+}
+
 /// The full store.
 pub trait Store:
-    UserStore + RoomStore + EventStore + StateStore + AccountDataStore + KeyStore
+    UserStore + RoomStore + EventStore + StateStore + AccountDataStore + KeyStore + E2eeStore
 {
     /// Run pending migrations.
     fn migrate(&self) -> futures::future::BoxFuture<'_, Result<()>>;

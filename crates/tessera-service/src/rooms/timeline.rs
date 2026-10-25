@@ -17,8 +17,11 @@ use crate::{
 pub struct StreamToken(pub i64);
 
 impl StreamToken {
+    /// Accepts both bare `s<N>` tokens and full sync tokens (`s<N>_<...>`), since clients
+    /// hand `prev_batch`/`next_batch` from `/sync` to `/messages`.
     pub fn parse(s: &str) -> Option<Self> {
         let n = s.strip_prefix('s')?;
+        let n = n.split('_').next()?;
         n.parse().ok().map(Self)
     }
 }
@@ -49,7 +52,13 @@ impl Services {
         event_type: &str,
         content: Value,
     ) -> Result<OwnedEventId> {
-        if let Some(existing) = self.store.get_txn_event(sender, device_id, txn_id).await? {
+        // Transaction IDs are scoped to the device *and* the endpoint path (room + type).
+        let txn_key = format!("send:{room_id}:{event_type}:{txn_id}");
+        if let Some(existing) = self
+            .store
+            .get_txn_event(sender, device_id, &txn_key)
+            .await?
+        {
             return Ok(existing);
         }
         self.require_joined(room_id, sender).await?;
@@ -57,7 +66,10 @@ impl Services {
             .content(&content)?;
         let stored = self.send_local_event(ev).await?;
         self.store
-            .set_txn_event(sender, device_id, txn_id, stored.pdu.event_id())
+            .set_txn_event(sender, device_id, &txn_key, stored.pdu.event_id())
+            .await?;
+        self.store
+            .set_event_txn_id(stored.pdu.event_id(), sender, device_id, txn_id)
             .await?;
         Ok(stored.pdu.event_id().to_owned())
     }
@@ -103,7 +115,22 @@ impl Services {
         let ev = LocalEvent::new(room_id.to_owned(), sender.to_owned(), event_type.to_owned())
             .state_key(state_key)
             .content(&content)?;
-        Ok(self.send_local_event(ev).await?.pdu.event_id().to_owned())
+        let sent = self.send_local_event(ev).await.map_err(|e| match e {
+            // Malformed power-level content fails the auth rules; clients expect 400 for that.
+            Error::Matrix {
+                kind: ruma::api::error::ErrorKind::Forbidden,
+                message,
+                ..
+            } if event_type == "m.room.power_levels" && is_content_error(&message) => {
+                Error::matrix(
+                    ruma::api::error::ErrorKind::BadJson,
+                    http::StatusCode::BAD_REQUEST,
+                    message,
+                )
+            }
+            other => other,
+        })?;
+        Ok(sent.pdu.event_id().to_owned())
     }
 
     /// Redact an event.
@@ -116,7 +143,12 @@ impl Services {
         target: &EventId,
         reason: Option<&str>,
     ) -> Result<OwnedEventId> {
-        if let Some(existing) = self.store.get_txn_event(sender, device_id, txn_id).await? {
+        let txn_key = format!("redact:{room_id}:{target}:{txn_id}");
+        if let Some(existing) = self
+            .store
+            .get_txn_event(sender, device_id, &txn_key)
+            .await?
+        {
             return Ok(existing);
         }
         self.require_joined(room_id, sender).await?;
@@ -141,7 +173,10 @@ impl Services {
         ev.redacts = Some(target.to_owned());
         let stored = self.send_local_event(ev).await?;
         self.store
-            .set_txn_event(sender, device_id, txn_id, stored.pdu.event_id())
+            .set_txn_event(sender, device_id, &txn_key, stored.pdu.event_id())
+            .await?;
+        self.store
+            .set_event_txn_id(stored.pdu.event_id(), sender, device_id, txn_id)
             .await?;
         Ok(stored.pdu.event_id().to_owned())
     }
@@ -162,6 +197,9 @@ impl Services {
     /// history visibility permitting (simplified: members and former members may read).
     pub async fn can_read_room(&self, room_id: &RoomId, user: &UserId) -> Result<bool> {
         if let Some(m) = self.store.get_membership(room_id, user).await? {
+            if m.forgotten {
+                return Ok(false);
+            }
             return Ok(matches!(
                 m.membership,
                 MembershipState::Join
@@ -295,4 +333,13 @@ impl Services {
         }
         Ok(self.store.current_state_pdus(room_id).await?)
     }
+}
+
+/// Whether an auth-rule failure message describes malformed content rather than missing power.
+fn is_content_error(message: &str) -> bool {
+    let m = message.to_lowercase();
+    m.contains("creator user ids")
+        || m.contains("integer")
+        || m.contains("invalid")
+        || m.contains("must be")
 }

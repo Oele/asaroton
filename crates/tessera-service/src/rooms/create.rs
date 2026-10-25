@@ -249,15 +249,13 @@ impl Services {
             .await?;
         }
         if let Some(topic) = &req.topic {
-            self.send_state_locked(
-                &mut ctx,
-                &room_id,
-                &creator,
-                "m.room.topic",
-                "",
-                json!({ "topic": topic }),
-            )
-            .await?;
+            // Plain `topic` plus the extensible `m.topic` representation (spec v1.15+).
+            let content = json!({
+                "topic": topic,
+                "m.topic": { "m.text": [{ "body": topic }] },
+            });
+            self.send_state_locked(&mut ctx, &room_id, &creator, "m.room.topic", "", content)
+                .await?;
         }
         if let Some(alias) = &alias {
             self.send_state_locked(

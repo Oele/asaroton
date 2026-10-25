@@ -20,6 +20,10 @@ pub enum Notification {
     User { user_id: OwnedUserId },
     /// Ephemeral room data changed (typing, receipts).
     RoomEphemeral { room_id: OwnedRoomId },
+    /// A user's device list changed; everyone sharing a room may care.
+    DeviceLists { user_id: OwnedUserId },
+    /// A user's presence changed.
+    Presence { user_id: OwnedUserId },
 }
 
 /// Broadcast hub.

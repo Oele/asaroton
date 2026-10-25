@@ -163,6 +163,13 @@ where
                     e.to_string(),
                 )
             })?;
+        // Clients routinely send POST/PUT with no body where the spec body is all-optional.
+        let bytes =
+            if bytes.is_empty() && matches!(parts.method, http::Method::POST | http::Method::PUT) {
+                Bytes::from_static(b"{}")
+            } else {
+                bytes
+            };
         let json = if bytes.is_empty() {
             None
         } else {

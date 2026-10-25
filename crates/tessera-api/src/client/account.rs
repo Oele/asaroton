@@ -46,11 +46,14 @@ async fn uia_for_sender(
     match outcome {
         UiaOutcome::Complete { .. } => Ok(()),
         UiaOutcome::Incomplete(info) => Err(Error::Uiaa(info)),
+        UiaOutcome::Rejected { kind, message } => {
+            Err(Error::matrix(kind, http::StatusCode::FORBIDDEN, message))
+        }
     }
 }
 
 /// Validate one UIA stage.
-async fn check_stage(
+pub(super) async fn check_stage(
     services: &Services,
     stage: AuthType,
     data: &AuthData,
@@ -74,7 +77,7 @@ async fn check_stage(
             if let Some(expected) = expected_user
                 && *expected != user_id
             {
-                return StageResult::Failed {
+                return StageResult::Rejected {
                     kind: ErrorKind::Forbidden,
                     message: "Password does not match the current user.".into(),
                 };
@@ -169,8 +172,12 @@ pub async fn register(
             async |stage, data, user| check_stage(&services, stage, data, user).await,
         )
         .await;
-    if let UiaOutcome::Incomplete(info) = outcome {
-        return Err(Error::Uiaa(info));
+    match outcome {
+        UiaOutcome::Complete { .. } => {}
+        UiaOutcome::Incomplete(info) => return Err(Error::Uiaa(info)),
+        UiaOutcome::Rejected { kind, message } => {
+            return Err(Error::matrix(kind, http::StatusCode::FORBIDDEN, message));
+        }
     }
 
     let Some(password) = body.password.clone() else {

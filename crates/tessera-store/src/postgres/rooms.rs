@@ -309,6 +309,42 @@ impl RoomStore for PostgresStore {
         Ok(())
     }
 
+    async fn set_event_txn_id(
+        &self,
+        event_id: &ruma::EventId,
+        user_id: &UserId,
+        device_id: Option<&ruma::DeviceId>,
+        txn_id: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO event_txn_ids (user_id, device_id, txn_id, event_id, created_ts) VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(user_id.as_str())
+        .bind(device_id.map_or("", ruma::DeviceId::as_str))
+        .bind(format!("event:{event_id}"))
+        .bind(txn_id)
+        .bind(now_ts())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn get_event_txn_id(
+        &self,
+        event_id: &ruma::EventId,
+        user_id: &UserId,
+        device_id: Option<&ruma::DeviceId>,
+    ) -> Result<Option<String>> {
+        let row = sqlx::query("SELECT event_id FROM event_txn_ids WHERE user_id = $1 AND device_id = $2 AND txn_id = $3")
+            .bind(user_id.as_str())
+            .bind(device_id.map_or("", ruma::DeviceId::as_str))
+            .bind(format!("event:{event_id}"))
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.map(|r| r.get::<String, _>(0)))
+    }
+
     async fn set_receipt(&self, receipt: crate::Receipt) -> Result<i64> {
         let row = sqlx::query(
             "INSERT INTO receipts (room_id, user_id, receipt_type, thread_id, event_id, data, stream_id)

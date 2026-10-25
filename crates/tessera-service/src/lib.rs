@@ -8,9 +8,12 @@
 
 pub mod account;
 pub mod config;
+pub mod e2ee;
 mod error;
 pub mod notifier;
+pub mod presence;
 pub mod profile;
+pub mod push;
 pub mod rooms;
 pub mod signing;
 pub mod sync;
@@ -35,6 +38,9 @@ pub struct Services {
     pub uia: UiaSessions,
     pub notifier: Notifier,
     pub typing: typing::TypingState,
+    pub presence: presence::PresenceMap,
+    /// Nonces handed out by the shared-secret registration endpoint.
+    admin_nonces: dashmap::DashMap<String, std::time::Instant>,
     /// Process start, for uptime and `age` calculations.
     pub started_at: std::time::Instant,
     /// Per-room locks for local sends (see `rooms::pipeline`).
@@ -59,6 +65,8 @@ impl Services {
             uia: UiaSessions::default(),
             notifier: Notifier::new(),
             typing: typing::TypingState::default(),
+            presence: presence::PresenceMap::default(),
+            admin_nonces: dashmap::DashMap::new(),
             signing_key: Arc::new(signing_key),
             config,
             store,
@@ -70,6 +78,23 @@ impl Services {
     /// This server's name.
     pub fn server_name(&self) -> &ruma::ServerName {
         &self.config.server_name
+    }
+
+    /// Issue a nonce for shared-secret registration (valid for one minute).
+    pub fn new_admin_nonce(&self) -> String {
+        let now = std::time::Instant::now();
+        self.admin_nonces
+            .retain(|_, t| now.duration_since(*t) < std::time::Duration::from_secs(60));
+        let nonce = tessera_auth::token::generate_session_id();
+        self.admin_nonces.insert(nonce.clone(), now);
+        nonce
+    }
+
+    /// Consume a nonce; false if unknown or expired.
+    pub fn take_admin_nonce(&self, nonce: &str) -> bool {
+        self.admin_nonces
+            .remove(nonce)
+            .is_some_and(|(_, t)| t.elapsed() < std::time::Duration::from_secs(60))
     }
 
     /// Whether a user ID belongs to this server.

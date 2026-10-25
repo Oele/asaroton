@@ -1,6 +1,7 @@
 //! PostgreSQL backend.
 
 mod account_data;
+mod e2ee;
 mod events;
 mod keys;
 mod rooms;

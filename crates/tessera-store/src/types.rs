@@ -253,6 +253,39 @@ pub struct RemoteVerifyKey {
     pub key_json: String,
 }
 
+// ------------------------------------------------------------------ e2ee & to-device
+
+/// A one-time or fallback key as uploaded.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OneTimeKeyRow {
+    pub algorithm: String,
+    pub key_id: String,
+    pub key: serde_json::Value,
+}
+
+/// A to-device message waiting for a device.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ToDeviceMessage {
+    pub stream_id: i64,
+    pub sender: OwnedUserId,
+    pub event_type: String,
+    pub content: serde_json::Value,
+}
+
+/// A pusher.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Pusher {
+    pub user_id: OwnedUserId,
+    pub app_id: String,
+    pub pushkey: String,
+    pub kind: String,
+    pub app_display_name: String,
+    pub device_display_name: String,
+    pub profile_tag: Option<String>,
+    pub lang: String,
+    pub data: serde_json::Value,
+}
+
 /// Convert a `UInt` depth/timestamp into the `i64` the database wants.
 pub fn uint_to_i64(v: UInt) -> i64 {
     i64::try_from(u64::from(v)).unwrap_or(i64::MAX)

@@ -112,8 +112,21 @@ impl Services {
         }
     }
 
-    /// Check a password for a user. Returns the user if it matches.
+    /// Check a password for a user. Returns the user if it matches. A user ID whose localpart
+    /// contains upper-case letters falls back to the lower-cased form, like Synapse.
     pub async fn check_password(&self, user_id: &UserId, password: &str) -> Result<Option<User>> {
+        let mut candidate = user_id.to_owned();
+        if self.store.get_password_hash(&candidate).await?.is_none()
+            && user_id.localpart().chars().any(char::is_uppercase)
+            && let Ok(folded) = OwnedUserId::try_from(format!(
+                "@{}:{}",
+                user_id.localpart().to_lowercase(),
+                user_id.server_name()
+            ))
+        {
+            candidate = folded;
+        }
+        let user_id = candidate.as_ref();
         let Some(hash) = self.store.get_password_hash(user_id).await? else {
             return Ok(None);
         };

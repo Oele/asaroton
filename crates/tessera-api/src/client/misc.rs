@@ -13,7 +13,10 @@ use ruma::{
         presence::{get_presence, set_presence},
         read_marker::set_read_marker,
         receipt::create_receipt,
+        thirdparty::get_protocols,
         typing::create_typing_event,
+        user_directory::search_users,
+        voip::get_turn_server_info,
     },
     events::receipt::ReceiptThread,
 };
@@ -285,24 +288,117 @@ pub async fn read_markers(
 }
 
 pub async fn set_presence(
-    _services: AppState,
+    services: AppState,
     req: Ruma<set_presence::v3::Request>,
 ) -> Result<set_presence::v3::Response> {
     let sender = req.sender()?;
     if sender.user_id != req.body.user_id {
         return Err(Error::forbidden("Cannot set presence for another user."));
     }
-    // Presence is accepted and ignored until the presence stream lands.
+    services.set_presence(
+        &sender.user_id,
+        req.body.presence.clone(),
+        Some(req.body.status_msg.clone()),
+    );
     Ok(set_presence::v3::Response::new())
 }
 
 pub async fn get_presence(
-    _services: AppState,
+    services: AppState,
     req: Ruma<get_presence::v3::Request>,
 ) -> Result<get_presence::v3::Response> {
-    let _ = req.sender()?;
-    let mut resp = get_presence::v3::Response::new(ruma::presence::PresenceState::Offline);
-    resp.currently_active = Some(false);
+    let sender = req.sender()?;
+    let target = &req.body.user_id;
+    if *target != sender.user_id {
+        // Only users sharing a room may see each other's presence.
+        let mine = services
+            .store
+            .rooms_for_user(&sender.user_id, "join")
+            .await?;
+        let theirs = services.store.rooms_for_user(target, "join").await?;
+        if !mine.iter().any(|r| theirs.contains(r)) {
+            return Err(Error::forbidden(
+                "You are not allowed to see their presence.",
+            ));
+        }
+    }
+    let Some(entry) = services.presence.get(target) else {
+        let mut resp = get_presence::v3::Response::new(ruma::presence::PresenceState::Offline);
+        resp.currently_active = Some(false);
+        return Ok(resp);
+    };
+    let mut resp = get_presence::v3::Response::new(entry.state.clone());
+    resp.status_msg = entry.status_msg;
+    resp.currently_active = Some(entry.state == ruma::presence::PresenceState::Online);
+    let ago = (tessera_store::now_ts() - entry.last_active_ts).max(0);
+    resp.last_active_ago = Some(Duration::from_millis(ago.unsigned_abs()));
     let _ = (MilliSecondsSinceUnixEpoch::now(), UInt::from(0u32));
     Ok(resp)
+}
+
+pub async fn search_users(
+    services: AppState,
+    req: Ruma<search_users::v3::Request>,
+) -> Result<search_users::v3::Response> {
+    let sender = req.sender()?;
+    let term = req.body.search_term.to_lowercase();
+    let limit = usize::try_from(u64::from(req.body.limit))
+        .unwrap_or(10)
+        .clamp(1, 100);
+    // Users who share a room with the searcher, plus everyone in public rooms.
+    let mut seen = std::collections::BTreeSet::new();
+    let mut results = Vec::new();
+    let mut rooms = services
+        .store
+        .rooms_for_user(&sender.user_id, "join")
+        .await?;
+    for r in services.store.list_public_rooms(200, 0).await? {
+        if !rooms.contains(&r.room_id) {
+            rooms.push(r.room_id);
+        }
+    }
+    'outer: for room in rooms {
+        for m in services.store.members(&room, Some("join")).await? {
+            if !seen.insert(m.user_id.clone()) {
+                continue;
+            }
+            let name = m.display_name.clone().unwrap_or_default().to_lowercase();
+            if m.user_id.as_str().to_lowercase().contains(&term) || name.contains(&term) {
+                let mut u = search_users::v3::User::new(m.user_id.clone());
+                u.display_name = m.display_name;
+                u.avatar_url = m.avatar_url.map(ruma::OwnedMxcUri::from);
+                results.push(u);
+                if results.len() > limit {
+                    break 'outer;
+                }
+            }
+        }
+    }
+    let limited = results.len() > limit;
+    results.truncate(limit);
+    Ok(search_users::v3::Response::new(results, limited))
+}
+
+pub async fn thirdparty_protocols(
+    _services: AppState,
+    req: Ruma<get_protocols::v3::Request>,
+) -> Result<get_protocols::v3::Response> {
+    let _ = req.sender()?;
+    Ok(get_protocols::v3::Response::new(
+        std::collections::BTreeMap::new(),
+    ))
+}
+
+pub async fn turn_server(
+    _services: AppState,
+    req: Ruma<get_turn_server_info::v3::Request>,
+) -> Result<get_turn_server_info::v3::Response> {
+    let _ = req.sender()?;
+    // No TURN server configured: the spec says to return an empty uris list.
+    Ok(get_turn_server_info::v3::Response::new(
+        String::new(),
+        String::new(),
+        Vec::new(),
+        Duration::from_hours(24),
+    ))
 }

@@ -1,25 +1,109 @@
-//! `GET /sync` (classic).
+//! `GET /sync` (classic). The response is assembled by hand so every field the spec
+//! requires is present (ruma's types omit several when empty or false).
 
-use std::{collections::BTreeMap, time::Duration};
+use std::time::Duration;
 
-use ruma::{
-    UInt,
-    api::client::{
-        filter::FilterDefinition,
-        sync::sync_events::v3::{self as sync_v3, Filter},
-    },
+use axum::{Json, response::IntoResponse};
+use ruma::api::client::{
+    filter::{FilterDefinition, LazyLoadOptions},
+    sync::sync_events::v3::{self as sync_v3, Filter},
 };
-use tessera_service::sync::{SyncRequest, SyncToken};
+use serde_json::{Map, Value, json};
+use tessera_service::sync::{RoomSync, SyncFilter, SyncRequest, SyncToken};
+use tessera_store::StoredEvent;
 
-use crate::{
-    AppState, Error, Result, Ruma,
-    client::rooms::{client_event, raw},
-};
+use crate::{AppState, Error, Result, Ruma, client::rooms::client_event};
 
-/// Default timeline limit when the filter does not say.
-const DEFAULT_TIMELINE_LIMIT: usize = 10;
+/// Turn a ruma filter into the subset we apply.
+pub fn sync_filter(f: &FilterDefinition) -> SyncFilter {
+    let mut out = SyncFilter::default();
+    let tl = &f.room.timeline;
+    if let Some(l) = tl.limit {
+        out.timeline_limit = usize::try_from(u64::from(l)).unwrap_or(10);
+    }
+    out.timeline_types.clone_from(&tl.types);
+    out.timeline_not_types.clone_from(&tl.not_types);
+    out.timeline_senders.clone_from(&tl.senders);
+    out.timeline_not_senders.clone_from(&tl.not_senders);
+    out.state_types.clone_from(&f.room.state.types);
+    out.state_not_types.clone_from(&f.room.state.not_types);
+    out.lazy_load_members = matches!(
+        f.room.state.lazy_load_options,
+        LazyLoadOptions::Enabled { .. }
+    ) || matches!(tl.lazy_load_options, LazyLoadOptions::Enabled { .. });
+    out.include_redundant_members = matches!(
+        f.room.state.lazy_load_options,
+        LazyLoadOptions::Enabled {
+            include_redundant_members: true
+        }
+    );
+    out.include_leave = f.room.include_leave;
+    out.rooms.clone_from(&f.room.rooms);
+    out.not_rooms.clone_from(&f.room.not_rooms);
+    out.presence_enabled = f.presence.types.as_ref().is_none_or(|t| !t.is_empty())
+        && !f
+            .presence
+            .not_types
+            .iter()
+            .any(|t| t == "m.presence" || t == "*");
+    out
+}
 
-pub async fn sync(services: AppState, req: Ruma<sync_v3::Request>) -> Result<sync_v3::Response> {
+fn events_json(events: &[StoredEvent], room: &RoomSync) -> Vec<Value> {
+    events
+        .iter()
+        .map(|e| {
+            let mut v = client_event(e);
+            if let Some(txn) = room.txn_ids.get(e.pdu.event_id())
+                && let Some(u) = v.get_mut("unsigned").and_then(|u| u.as_object_mut())
+            {
+                u.insert("transaction_id".into(), json!(txn));
+            }
+            v
+        })
+        .collect()
+}
+
+fn room_json(room: &RoomSync, joined: bool) -> Value {
+    let mut v = Map::new();
+    let mut timeline = json!({
+        "events": events_json(&room.timeline, room),
+        "limited": room.limited,
+    });
+    if let Some(pb) = &room.prev_batch {
+        timeline["prev_batch"] = json!(pb);
+    }
+    v.insert("timeline".into(), timeline);
+    v.insert(
+        "state".into(),
+        json!({ "events": events_json(&room.state, room) }),
+    );
+    v.insert(
+        "account_data".into(),
+        json!({ "events": room.account_data }),
+    );
+    if joined {
+        v.insert("ephemeral".into(), json!({ "events": room.ephemeral }));
+        let mut summary = json!({
+            "m.joined_member_count": room.joined_count,
+            "m.invited_member_count": room.invited_count,
+        });
+        if !room.heroes.is_empty() {
+            summary["m.heroes"] = json!(room.heroes);
+        }
+        v.insert("summary".into(), summary);
+        v.insert(
+            "unread_notifications".into(),
+            json!({ "notification_count": room.unread_notifications, "highlight_count": room.unread_highlights }),
+        );
+    }
+    Value::Object(v)
+}
+
+pub async fn sync(
+    services: AppState,
+    req: Ruma<sync_v3::Request>,
+) -> Result<axum::response::Response> {
     let sender = req.sender()?;
     let since = match req.body.since.as_deref() {
         None | Some("") => None,
@@ -28,8 +112,6 @@ pub async fn sync(services: AppState, req: Ruma<sync_v3::Request>) -> Result<syn
         }
     };
 
-    // Timeline limit from the filter (inline or stored).
-    let mut timeline_limit = DEFAULT_TIMELINE_LIMIT;
     let filter: Option<FilterDefinition> = match &req.body.filter {
         Some(Filter::FilterDefinition(f)) => Some(f.clone()),
         Some(Filter::FilterId(id)) => {
@@ -44,18 +126,14 @@ pub async fn sync(services: AppState, req: Ruma<sync_v3::Request>) -> Result<syn
                 .transpose()
                 .map_err(|e| Error::internal(e.to_string()))?
         }
-        None => None,
-        Some(_) => None,
+        _ => None,
     };
-    if let Some(f) = &filter
-        && let Some(l) = f.room.timeline.limit
-    {
-        timeline_limit = usize::try_from(u64::from(l)).unwrap_or(DEFAULT_TIMELINE_LIMIT);
-    }
+    let filter = filter.as_ref().map(sync_filter).unwrap_or_default();
 
     let result = services
         .sync(SyncRequest {
             user_id: sender.user_id.clone(),
+            device_id: sender.device_id.clone(),
             since,
             timeout: req
                 .body
@@ -63,65 +141,43 @@ pub async fn sync(services: AppState, req: Ruma<sync_v3::Request>) -> Result<syn
                 .unwrap_or(Duration::ZERO)
                 .min(Duration::from_secs(300)),
             full_state: req.body.full_state,
-            timeline_limit,
+            filter,
+            set_presence: req.body.set_presence.clone(),
         })
         .await?;
 
-    let mut resp = sync_v3::Response::new(result.next_batch.to_string());
-
-    for (room_id, r) in result.join {
-        let mut joined = sync_v3::JoinedRoom::new();
-        joined.timeline.limited = r.limited;
-        joined.timeline.prev_batch = r.prev_batch;
-        joined.timeline.events = r
-            .timeline
-            .iter()
-            .map(|e| raw(&client_event(e)))
-            .collect::<Result<Vec<_>>>()?;
-        let mut state = sync_v3::StateEvents::new();
-        state.events = r
-            .state
-            .iter()
-            .map(|e| raw(&client_event(e)))
-            .collect::<Result<Vec<_>>>()?;
-        joined.state = sync_v3::State::Before(state);
-        joined.account_data.events = r.account_data.iter().map(raw).collect::<Result<Vec<_>>>()?;
-        joined.ephemeral.events = r.ephemeral.iter().map(raw).collect::<Result<Vec<_>>>()?;
-        joined.summary.joined_member_count =
-            Some(UInt::try_from(r.joined_count).unwrap_or(UInt::MAX));
-        joined.summary.invited_member_count =
-            Some(UInt::try_from(r.invited_count).unwrap_or(UInt::MAX));
-        joined.summary.heroes = r.heroes;
-        resp.rooms.join.insert(room_id, joined);
+    let mut join = Map::new();
+    for (room_id, r) in &result.join {
+        join.insert(room_id.to_string(), room_json(r, true));
     }
-    for (room_id, r) in result.leave {
-        let mut left = sync_v3::LeftRoom::new();
-        left.timeline.limited = r.limited;
-        left.timeline.prev_batch = r.prev_batch;
-        left.timeline.events = r
-            .timeline
-            .iter()
-            .map(|e| raw(&client_event(e)))
-            .collect::<Result<Vec<_>>>()?;
-        let mut state = sync_v3::StateEvents::new();
-        state.events = r
-            .state
-            .iter()
-            .map(|e| raw(&client_event(e)))
-            .collect::<Result<Vec<_>>>()?;
-        left.state = sync_v3::State::Before(state);
-        resp.rooms.leave.insert(room_id, left);
+    let mut leave = Map::new();
+    for (room_id, r) in &result.leave {
+        leave.insert(room_id.to_string(), room_json(r, false));
     }
-    for (room_id, r) in result.invite {
-        let mut invited = sync_v3::InvitedRoom::new();
-        invited.invite_state.events = r.invite_state.iter().map(raw).collect::<Result<Vec<_>>>()?;
-        resp.rooms.invite.insert(room_id, invited);
+    let mut invite = Map::new();
+    for (room_id, state) in &result.invite {
+        invite.insert(
+            room_id.to_string(),
+            json!({ "invite_state": { "events": state } }),
+        );
     }
-    resp.account_data.events = result
-        .account_data
+    let otk: Map<String, Value> = result
+        .one_time_key_counts
         .iter()
-        .map(raw)
-        .collect::<Result<Vec<_>>>()?;
-    resp.device_one_time_keys_count = BTreeMap::new();
+        .map(|(k, v)| (k.clone(), json!(v)))
+        .collect();
+    let body = json!({
+        "next_batch": result.next_batch.to_string(),
+        "rooms": { "join": join, "leave": leave, "invite": invite, "knock": {} },
+        "presence": { "events": result.presence },
+        "account_data": { "events": result.account_data },
+        "to_device": { "events": result.to_device },
+        "device_lists": { "changed": result.device_lists_changed, "left": result.device_lists_left },
+        "device_one_time_keys_count": otk,
+        "device_unused_fallback_key_types": result.unused_fallback_key_types,
+        "org.matrix.msc2732.device_unused_fallback_key_types": result.unused_fallback_key_types,
+    });
+    let mut resp = Json(body).into_response();
+    crate::extract::add_cors(resp.headers_mut());
     Ok(resp)
 }

@@ -298,23 +298,28 @@ pub async fn members(
 pub async fn joined_members(
     services: AppState,
     req: Ruma<joined_members::v3::Request>,
-) -> Result<joined_members::v3::Response> {
+) -> Result<axum::response::Response> {
+    use axum::response::IntoResponse;
     let sender = req.sender()?;
     services
         .require_joined(&req.body.room_id, &sender.user_id)
         .await?;
-    let mut joined: BTreeMap<OwnedUserId, joined_members::v3::RoomMember> = BTreeMap::new();
+    // Hand-built so `display_name` and `avatar_url` are always present (null when unset),
+    // which is what clients and the conformance tests expect.
+    let mut joined = serde_json::Map::new();
     for m in services
         .store
         .members(&req.body.room_id, Some("join"))
         .await?
     {
-        let mut rm = joined_members::v3::RoomMember::new();
-        rm.display_name = m.display_name;
-        rm.avatar_url = m.avatar_url.map(ruma::OwnedMxcUri::from);
-        joined.insert(m.user_id, rm);
+        joined.insert(
+            m.user_id.to_string(),
+            serde_json::json!({ "display_name": m.display_name, "avatar_url": m.avatar_url }),
+        );
     }
-    Ok(joined_members::v3::Response::new(joined))
+    let mut resp = axum::Json(serde_json::json!({ "joined": joined })).into_response();
+    crate::extract::add_cors(resp.headers_mut());
+    Ok(resp)
 }
 
 pub async fn send_message(
@@ -451,6 +456,25 @@ pub async fn messages(
         .iter()
         .map(|e| raw(&client_event(e)))
         .collect::<Result<Vec<_>>>()?;
+    // Lazy-loaded membership: the member events of everyone who sent something in the chunk.
+    if matches!(
+        req.body.filter.lazy_load_options,
+        ruma::api::client::filter::LazyLoadOptions::Enabled { .. }
+    ) {
+        let senders: std::collections::HashSet<&ruma::UserId> =
+            page.events.iter().map(|e| e.pdu.sender()).collect();
+        let state = services.store.current_state_pdus(&req.body.room_id).await?;
+        resp.state = state
+            .iter()
+            .filter(|e| {
+                e.pdu.event_type() == &ruma::events::TimelineEventType::RoomMember
+                    && e.pdu
+                        .state_key()
+                        .is_some_and(|k| senders.iter().any(|s| s.as_str() == k))
+            })
+            .map(|e| raw(&client_event(e)))
+            .collect::<Result<Vec<_>>>()?;
+    }
     Ok(resp)
 }
 

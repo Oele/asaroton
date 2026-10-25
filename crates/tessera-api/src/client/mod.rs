@@ -2,9 +2,12 @@
 
 pub mod account;
 pub mod discovery;
+pub mod keys;
 pub mod misc;
+pub mod push;
 pub mod rooms;
 pub mod session;
+pub mod synapse_admin;
 pub mod sync;
 
 use axum::Router;
@@ -63,7 +66,15 @@ pub fn routes(router: Router<AppState>) -> Router<AppState> {
     let r = route::<c::membership::unban_user::v3::Request, _, _>(r, rooms::unban);
     let r = route::<c::membership::joined_rooms::v3::Request, _, _>(r, rooms::joined);
     let r = route::<c::membership::get_member_events::v3::Request, _, _>(r, rooms::members);
-    let r = route::<c::membership::joined_members::v3::Request, _, _>(r, rooms::joined_members);
+    let r = r
+        .route(
+            "/_matrix/client/r0/rooms/{room_id}/joined_members",
+            axum::routing::get(joined_members_handler),
+        )
+        .route(
+            "/_matrix/client/v3/rooms/{room_id}/joined_members",
+            axum::routing::get(joined_members_handler),
+        );
     // events
     let r = route::<c::message::send_message_event::v3::Request, _, _>(r, rooms::send_message);
     let r = route_with_extra_paths::<c::state::send_state_event::v3::Request, _, _>(
@@ -104,7 +115,13 @@ pub fn routes(router: Router<AppState>) -> Router<AppState> {
         rooms::public_rooms_filtered,
     );
     // sync & misc
-    let r = route::<c::sync::sync_events::v3::Request, _, _>(r, sync::sync);
+    let r = r
+        .route("/_matrix/client/r0/sync", axum::routing::get(sync_handler))
+        .route("/_matrix/client/v3/sync", axum::routing::get(sync_handler))
+        .route(
+            "/_synapse/admin/v1/register",
+            axum::routing::get(synapse_admin::get_nonce).post(synapse_admin::register),
+        );
     let r = route::<c::config::set_global_account_data::v3::Request, _, _>(
         r,
         misc::set_global_account_data,
@@ -127,5 +144,51 @@ pub fn routes(router: Router<AppState>) -> Router<AppState> {
     let r = route::<c::receipt::create_receipt::v3::Request, _, _>(r, misc::receipt);
     let r = route::<c::read_marker::set_read_marker::v3::Request, _, _>(r, misc::read_markers);
     let r = route::<c::presence::set_presence::v3::Request, _, _>(r, misc::set_presence);
-    route::<c::presence::get_presence::v3::Request, _, _>(r, misc::get_presence)
+    let r = route::<c::presence::get_presence::v3::Request, _, _>(r, misc::get_presence);
+    let r = route::<c::user_directory::search_users::v3::Request, _, _>(r, misc::search_users);
+    let r = route::<c::thirdparty::get_protocols::v3::Request, _, _>(r, misc::thirdparty_protocols);
+    let r = route::<c::voip::get_turn_server_info::v3::Request, _, _>(r, misc::turn_server);
+    // e2ee keys & to-device
+    let r = route::<c::keys::upload_keys::v3::Request, _, _>(r, keys::upload);
+    let r = route::<c::keys::get_keys::v3::Request, _, _>(r, keys::query);
+    let r = route::<c::keys::claim_keys::v3::Request, _, _>(r, keys::claim);
+    let r = route::<c::keys::get_key_changes::v3::Request, _, _>(r, keys::changes);
+    let r = route::<c::keys::upload_signing_keys::v3::Request, _, _>(r, keys::upload_signing);
+    let r = route::<c::keys::upload_signatures::v3::Request, _, _>(r, keys::upload_sigs);
+    let r = route::<c::to_device::send_event_to_device::v3::Request, _, _>(r, keys::send_to_device);
+    // push
+    let r = route::<c::push::get_pushrules_all::v3::Request, _, _>(r, push::rules_all);
+    let r = route::<c::push::get_pushrules_global_scope::v3::Request, _, _>(r, push::rules_global);
+    let r = route::<c::push::get_pushrule::v3::Request, _, _>(r, push::get_rule);
+    let r = route::<c::push::set_pushrule::v3::Request, _, _>(r, push::set_rule);
+    let r = route::<c::push::delete_pushrule::v3::Request, _, _>(r, push::delete_rule);
+    let r = route::<c::push::get_pushrule_enabled::v3::Request, _, _>(r, push::get_enabled);
+    let r = route::<c::push::set_pushrule_enabled::v3::Request, _, _>(r, push::set_enabled);
+    let r = route::<c::push::get_pushrule_actions::v3::Request, _, _>(r, push::get_actions);
+    let r = route::<c::push::set_pushrule_actions::v3::Request, _, _>(r, push::set_actions);
+    let r = route::<c::push::get_pushers::v3::Request, _, _>(r, push::get_pushers);
+    route::<c::push::set_pusher::v3::Request, _, _>(r, push::set_pusher)
+}
+
+/// `/sync` returns hand-built JSON, so it bypasses the typed `route` helper.
+async fn sync_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    req: crate::Ruma<ruma::api::client::sync::sync_events::v3::Request>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    match sync::sync(state, req).await {
+        Ok(resp) => resp,
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn joined_members_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    req: crate::Ruma<ruma::api::client::membership::joined_members::v3::Request>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    match rooms::joined_members(state, req).await {
+        Ok(resp) => resp,
+        Err(e) => e.into_response(),
+    }
 }

@@ -29,3 +29,6 @@ tracing.workspace = true
 tokio.workspace = true
 bytes.workspace = true
 futures.workspace = true
+hmac.workspace = true
+sha1.workspace = true
+hex.workspace = true
