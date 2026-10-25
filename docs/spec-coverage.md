@@ -1,8 +1,9 @@
 # Spec coverage
 
 Target: Matrix spec v1.19, default room version 12 (all versions 1–12 supported for joining).
-The conformance gate is Complement (`scripts/complement.sh`); the numbers below are from the
-most recent runs noted in the commit history.
+The conformance gate is Complement (`scripts/complement.sh`). Last full run (2026-10-25):
+federation suite 88 of 90 top-level tests passing, client-server suite 62 of 64 (one of the two
+fixed right after the run; see the deviations at the end for the rest).
 
 | Area | Status |
 |---|---|
