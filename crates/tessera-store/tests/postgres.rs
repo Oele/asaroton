@@ -412,7 +412,7 @@ async fn persists_rooms_and_state(pool: PgPool) {
         assert_eq!(newest_two[0].event_id(), last.event_id());
         assert_eq!(newest_two.len(), 2);
         let rooms = store
-            .rooms_with_events_in_range(&[room_id.clone()], 0, i64::MAX)
+            .rooms_with_events_in_range(std::slice::from_ref(&room_id), 0, i64::MAX)
             .await
             .unwrap();
         assert_eq!(rooms, vec![room_id.clone()]);
