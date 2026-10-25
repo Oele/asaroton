@@ -564,7 +564,15 @@ impl Services {
         let timeline_start = events.first().map(|e| e.stream_ordering);
         room.limited = limited || newly_joined;
         if let Some(oldest) = events.iter().map(|e| e.stream_ordering).min() {
-            room.prev_batch = Some(super::rooms::timeline::StreamToken(oldest - 1).to_string());
+            // A first view that holds the room's whole history gets the sync position as
+            // `prev_batch`, as the reference implementation does: `/members?at=` with it then
+            // reads as "the members at the time of this sync" rather than "before the room".
+            let token = if lower.is_none() && !room.limited {
+                upper
+            } else {
+                oldest - 1
+            };
+            room.prev_batch = Some(super::rooms::timeline::StreamToken(token).to_string());
         }
         if let Some(device_id) = &req.device_id {
             for ev in &events {

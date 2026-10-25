@@ -577,6 +577,9 @@ mod acl_tests {
         let ok = |s: &str| acl_permits(&acl, <&ServerName>::try_from(s).unwrap());
         assert!(ok("matrix.org"));
         assert!(!ok("evil.example"));
+        // Server names compare case-insensitively (spec v1.19).
+        assert!(!ok("Evil.Example"));
+        assert!(!ok("SUB.bad.EXAMPLE"));
         assert!(!ok("sub.bad.example"));
         assert!(!ok("1.2.3.4"));
         assert!(!ok("1.2.3.4:8448"));
