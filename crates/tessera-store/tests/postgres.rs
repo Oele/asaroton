@@ -129,6 +129,7 @@ impl RoomDriver {
                 state: event_state,
                 soft_failed: false,
                 backfilled: false,
+                stream_ordering: None,
                 current_state_delta: delta,
                 forward_extremities: Some(vec![pdu.event_id().to_owned()]),
             })
@@ -432,6 +433,7 @@ async fn persists_rooms_and_state(pool: PgPool) {
                 state: EventState::Outlier,
                 soft_failed: false,
                 backfilled: false,
+                stream_ordering: None,
                 current_state_delta: None,
                 forward_extremities: None,
             })
@@ -498,6 +500,7 @@ async fn tracks_missing_prev_events_and_outliers(pool: PgPool) {
             state: EventState::Outlier,
             soft_failed: false,
             backfilled: false,
+            stream_ordering: None,
             current_state_delta: None,
             forward_extremities: None,
         })
@@ -530,6 +533,7 @@ async fn tracks_missing_prev_events_and_outliers(pool: PgPool) {
             state: EventState::Existing(d.state_group.unwrap()),
             soft_failed: true,
             backfilled: false,
+            stream_ordering: None,
             current_state_delta: None,
             forward_extremities: None,
         })
@@ -557,6 +561,7 @@ async fn tracks_missing_prev_events_and_outliers(pool: PgPool) {
             state: EventState::Outlier,
             soft_failed: false,
             backfilled: true,
+            stream_ordering: None,
             current_state_delta: None,
             forward_extremities: None,
         })

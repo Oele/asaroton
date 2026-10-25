@@ -10,6 +10,7 @@
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod backfill;
 pub mod client;
 pub mod discovery;
 mod error;

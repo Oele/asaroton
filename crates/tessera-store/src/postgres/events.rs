@@ -25,15 +25,32 @@ async fn persist_one(conn: &mut PgConnection, ev: PersistEvent) -> Result<Persis
             stream_ordering: row.get("stream_ordering"),
             state_group: row.get("state_group"),
         };
-        // An outlier being persisted again with state is "de-outliered".
+        // An outlier being persisted again with state is "de-outliered"; it takes its place in
+        // the timeline at the given (or next backfill) position.
         if row.get::<bool, _>("outlier") && !matches!(ev.state, EventState::Outlier) {
             let group = resolve_state_group(&mut *conn, room_id, &ev.state).await?;
-            sqlx::query("UPDATE events SET outlier = FALSE, state_group = $2, soft_failed = $3 WHERE event_id = $1")
-                .bind(pdu.event_id().as_str())
-                .bind(group)
-                .bind(ev.soft_failed)
-                .execute(&mut *conn)
-                .await?;
+            let new_ordering: i64 = match ev.stream_ordering {
+                Some(so) => so,
+                None if ev.backfilled => sqlx::query("SELECT nextval('events_backfill_seq')")
+                    .fetch_one(&mut *conn)
+                    .await?
+                    .get(0),
+                None => existing.stream_ordering,
+            };
+            sqlx::query(
+                "UPDATE events SET outlier = FALSE, state_group = $2, soft_failed = $3, stream_ordering = $4
+                 WHERE event_id = $1",
+            )
+            .bind(pdu.event_id().as_str())
+            .bind(group)
+            .bind(ev.soft_failed)
+            .bind(new_ordering)
+            .execute(&mut *conn)
+            .await?;
+            let existing = PersistedEvent {
+                stream_ordering: new_ordering,
+                ..existing
+            };
             if let Some(delta) = &ev.current_state_delta {
                 super::state::apply_current_state_delta(&mut *conn, room_id, delta).await?;
             }
@@ -55,10 +72,13 @@ async fn persist_one(conn: &mut PgConnection, ev: PersistEvent) -> Result<Persis
     } else {
         "events_stream_seq"
     };
-    let stream_ordering: i64 = sqlx::query(sqlx::AssertSqlSafe(format!("SELECT nextval('{seq}')")))
-        .fetch_one(&mut *conn)
-        .await?
-        .get(0);
+    let stream_ordering: i64 = match ev.stream_ordering {
+        Some(so) => so,
+        None => sqlx::query(sqlx::AssertSqlSafe(format!("SELECT nextval('{seq}')")))
+            .fetch_one(&mut *conn)
+            .await?
+            .get(0),
+    };
 
     let mut json_obj = pdu.raw().clone();
     json_obj.remove("unsigned");
@@ -190,6 +210,14 @@ impl EventStore for PostgresStore {
         }
         tx.commit().await?;
         Ok(out)
+    }
+
+    async fn reserve_backfill_orderings(&self, n: usize) -> Result<Vec<StreamOrdering>> {
+        let rows = sqlx::query("SELECT nextval('events_backfill_seq') FROM generate_series(1, $1)")
+            .bind(i64::try_from(n).unwrap_or(0))
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows.into_iter().map(|r| r.get::<i64, _>(0)).collect())
     }
 
     async fn get_event(&self, event_id: &EventId) -> Result<Option<StoredEvent>> {

@@ -49,6 +49,8 @@ pub trait FederationHooks: Send + Sync {
     ) -> Result<(OwnedRoomId, Vec<OwnedServerName>)>;
     /// Fetch a remote user's profile (`displayname`, `avatar_url`).
     async fn remote_profile(&self, user_id: &UserId) -> Result<Value>;
+    /// Fetch older history for a room from other servers; returns how many events were stored.
+    async fn backfill(&self, room_id: &RoomId, limit: usize) -> Result<usize>;
     /// Fetch remote device keys (`/user/keys/query`): user -> device -> keys, plus cross-signing.
     async fn remote_query_keys(
         &self,
@@ -100,6 +102,9 @@ impl FederationHooks for NoFederation {
     }
     async fn remote_profile(&self, _: &UserId) -> Result<Value> {
         Err(disabled())
+    }
+    async fn backfill(&self, _: &RoomId, _: usize) -> Result<usize> {
+        Ok(0)
     }
     async fn remote_query_keys(
         &self,

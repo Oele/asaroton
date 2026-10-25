@@ -237,17 +237,18 @@ impl Federation {
         rules: &RoomVersionRules,
         backfilled: bool,
     ) -> Result<Outcome> {
-        self.process_pdu_inner(origin, pdu, rules, backfilled, !backfilled)
+        self.process_pdu_inner(origin, pdu, rules, backfilled, !backfilled, None)
             .await
     }
 
-    async fn process_pdu_inner(
+    pub(crate) async fn process_pdu_inner(
         &self,
         origin: &ServerName,
         pdu: Pdu,
         rules: &RoomVersionRules,
         backfilled: bool,
         chase_prevs: bool,
+        stream_ordering: Option<i64>,
     ) -> Result<Outcome> {
         let services = &self.services;
         let room_id = pdu.room_id().to_owned();
@@ -304,6 +305,7 @@ impl Federation {
                     state,
                     soft_failed: false,
                     backfilled,
+                    stream_ordering,
                     current_state_delta: None,
                     forward_extremities: None,
                 })
@@ -314,7 +316,8 @@ impl Federation {
 
         // Soft fail: passes its own history but not the current state.
         let current = self.current_state_pdus(&room_id).await?;
-        let soft_failed = auth::check_against_state(&pdu, rules, &current).is_err();
+        // Old history fetched by backfill is not judged against today's state.
+        let soft_failed = !backfilled && auth::check_against_state(&pdu, rules, &current).is_err();
 
         // 6. persist with state group
         let state = match pdu.state_tuple() {
@@ -356,6 +359,7 @@ impl Federation {
                 state,
                 soft_failed,
                 backfilled,
+                stream_ordering,
                 current_state_delta: delta,
                 forward_extremities: extremities,
             })
@@ -483,6 +487,7 @@ impl Federation {
                     state: EventState::Outlier,
                     soft_failed: false,
                     backfilled: false,
+                    stream_ordering: None,
                     current_state_delta: None,
                     forward_extremities: None,
                 })
@@ -552,6 +557,7 @@ impl Federation {
                     state: EventState::Outlier,
                     soft_failed: false,
                     backfilled: false,
+                    stream_ordering: None,
                     current_state_delta: None,
                     forward_extremities: None,
                 })
@@ -679,7 +685,7 @@ impl Federation {
                 continue;
             }
             if let Err(e) =
-                Box::pin(self.process_pdu_inner(origin, p.clone(), rules, false, false)).await
+                Box::pin(self.process_pdu_inner(origin, p.clone(), rules, false, false, None)).await
             {
                 tracing::warn!(event_id = %p.event_id(), error = %e, "processing fetched event failed");
             }
@@ -813,6 +819,7 @@ impl Federation {
                     state: EventState::Outlier,
                     soft_failed: false,
                     backfilled: false,
+                    stream_ordering: None,
                     current_state_delta: None,
                     forward_extremities: None,
                 })

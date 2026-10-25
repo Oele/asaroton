@@ -160,6 +160,9 @@ pub struct PersistEvent {
     pub soft_failed: bool,
     /// Backfilled events get a negative stream ordering so they never show up as "new".
     pub backfilled: bool,
+    /// A pre-reserved stream ordering (see `reserve_backfill_orderings`); otherwise the next
+    /// value of the live or backfill sequence is used.
+    pub stream_ordering: Option<StreamOrdering>,
     /// Changes to current state; `None` if the event does not affect it (rejected, soft-failed,
     /// outlier, or a non-state event).
     pub current_state_delta: Option<CurrentStateDelta>,

@@ -263,10 +263,33 @@ impl Services {
             }
             (None, Direction::Forwards) => StreamToken(i64::MIN + 1),
         };
-        let events = self
+        let mut events = self
             .store
             .room_events_in_range(room_id, from.0, to.map(|t| t.0), direction, limit)
             .await?;
+        // Paginating backwards past what we hold: pull older history over federation.
+        if direction == Direction::Backwards && events.len() < limit {
+            for _ in 0..3 {
+                let got = self
+                    .federation()
+                    .backfill(room_id, limit.max(100))
+                    .await
+                    .unwrap_or_else(|e| {
+                        tracing::debug!(%room_id, error = %e, "backfill failed");
+                        0
+                    });
+                if got == 0 {
+                    break;
+                }
+                events = self
+                    .store
+                    .room_events_in_range(room_id, from.0, to.map(|t| t.0), direction, limit)
+                    .await?;
+                if events.len() >= limit {
+                    break;
+                }
+            }
+        }
         let end = if events.len() < limit {
             None
         } else {

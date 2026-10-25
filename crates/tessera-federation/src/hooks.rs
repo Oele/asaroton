@@ -124,6 +124,17 @@ impl FederationHooks for Hooks {
         serde_json::to_value(resp.data).map_err(Into::into)
     }
 
+    async fn backfill(
+        &self,
+        room_id: &ruma::RoomId,
+        limit: usize,
+    ) -> tessera_service::Result<usize> {
+        self.0
+            .backfill_room(room_id, limit)
+            .await
+            .map_err(tessera_service::Error::from)
+    }
+
     async fn remote_query_keys(
         &self,
         by_server: Vec<(OwnedServerName, Vec<OwnedUserId>)>,

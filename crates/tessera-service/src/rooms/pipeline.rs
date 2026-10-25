@@ -314,6 +314,7 @@ impl Services {
                 state,
                 soft_failed: false,
                 backfilled: false,
+                stream_ordering: None,
                 current_state_delta: delta,
                 forward_extremities: Some(vec![pdu.event_id().to_owned()]),
             })

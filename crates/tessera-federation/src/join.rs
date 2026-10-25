@@ -240,6 +240,7 @@ impl Federation {
                 state: EventState::Outlier,
                 soft_failed: false,
                 backfilled: false,
+                stream_ordering: None,
                 current_state_delta: None,
                 forward_extremities: None,
             });
@@ -274,15 +275,8 @@ impl Federation {
         if let Some((ty, key)) = join.state_tuple() {
             after.push(((ty, key.to_owned()), join.event_id().to_owned()));
         }
-        // De-outlier the state events so they get a state group (the state before them is
-        // unknown; they share the "before join" group for timeline purposes).
-        for p in &state_pdus {
-            if let Some(ev) = services.store.get_event(p.event_id()).await?
-                && ev.outlier
-            {
-                let _ = services.store.de_outlier(p.event_id(), before_group).await;
-            }
-        }
+        // The state and auth events stay outliers: they are not part of our timeline until
+        // backfill fetches the real history around them.
         let mut delta = CurrentStateDelta {
             upsert: state_map.into_iter().collect(),
             remove: vec![],
@@ -298,6 +292,7 @@ impl Federation {
                 },
                 soft_failed: false,
                 backfilled: false,
+                stream_ordering: None,
                 current_state_delta: Some(delta),
                 forward_extremities: Some(vec![join.event_id().to_owned()]),
             })
@@ -370,6 +365,7 @@ impl Federation {
                                 state: EventState::Outlier,
                                 soft_failed: false,
                                 backfilled: false,
+                                stream_ordering: None,
                                 current_state_delta: delta,
                                 forward_extremities: None,
                             })
@@ -734,6 +730,7 @@ impl Federation {
                 state: EventState::Outlier,
                 soft_failed: false,
                 backfilled: false,
+                stream_ordering: None,
                 current_state_delta: if participating { None } else { delta },
                 forward_extremities: None,
             })

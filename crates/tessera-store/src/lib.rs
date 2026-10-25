@@ -175,6 +175,10 @@ pub trait EventStore: Send + Sync {
     /// Persist several events in one transaction, in order.
     async fn persist_events(&self, events: Vec<PersistEvent>) -> Result<Vec<PersistedEvent>>;
 
+    /// Reserve `n` stream orderings from the backfill sequence (descending), so a batch of
+    /// backfilled events can be stored oldest-first yet ordered correctly.
+    async fn reserve_backfill_orderings(&self, n: usize) -> Result<Vec<StreamOrdering>>;
+
     async fn get_event(&self, event_id: &EventId) -> Result<Option<StoredEvent>>;
     async fn get_events(&self, event_ids: &[OwnedEventId]) -> Result<Vec<StoredEvent>>;
     async fn have_events(&self, event_ids: &[OwnedEventId]) -> Result<Vec<OwnedEventId>>;
