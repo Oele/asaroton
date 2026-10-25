@@ -190,7 +190,7 @@ async fn store_receipt(
             room_id: room_id.to_owned(),
             user_id: user_id.to_owned(),
             receipt_type: receipt_type.to_owned(),
-            thread_id: thread,
+            thread_id: thread.clone(),
             event_id: event_id.to_owned(),
             data: json!({ "ts": tessera_store::now_ts() }),
             stream_id: 0,
@@ -199,6 +199,29 @@ async fn store_receipt(
     services.notifier.notify(Notification::RoomEphemeral {
         room_id: room_id.to_owned(),
     });
+    // Public receipts go to the other servers in the room.
+    if receipt_type != "m.read.private"
+        && let Ok(servers) = services.remote_servers_in_room(room_id).await
+        && !servers.is_empty()
+    {
+        let mut data = json!({ "ts": tessera_store::now_ts() });
+        if let Some(t) = &thread {
+            data["thread_id"] = json!(t);
+        }
+        services.send_edu_to(
+            servers,
+            json!({
+                "edu_type": "m.receipt",
+                "content": {
+                    room_id.as_str(): {
+                        receipt_type: {
+                            user_id.as_str(): { "data": data, "event_ids": [event_id] }
+                        }
+                    }
+                },
+            }),
+        );
+    }
     Ok(())
 }
 

@@ -12,4 +12,4 @@ cd "$COMPLEMENT_DIR"
 export COMPLEMENT_BASE_IMAGE="$IMAGE"
 export COMPLEMENT_SPAWN_HS_TIMEOUT_SECS=${COMPLEMENT_SPAWN_HS_TIMEOUT_SECS:-60}
 export COMPLEMENT_ENABLE_DIRTY_RUNS=${COMPLEMENT_ENABLE_DIRTY_RUNS:-1}
-exec go test -count=1 -v ./tests/... "$@"
+exec go test -count=1 -v -timeout "${COMPLEMENT_TIMEOUT:-90m}" ./tests/... "$@"

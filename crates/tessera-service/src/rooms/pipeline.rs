@@ -280,9 +280,12 @@ impl Services {
                 let prev = ctx.state_group;
                 let base_delta = if prev.is_none() {
                     // No reusable group: new full group from the current state plus this event.
-                    let mut full: Vec<_> = ctx.state_map().into_iter().collect();
-                    full.extend(d.clone());
-                    full
+                    let mut full: std::collections::BTreeMap<_, _> =
+                        ctx.state_map().into_iter().collect();
+                    for (k, v) in d.clone() {
+                        full.insert(k, v);
+                    }
+                    full.into_iter().collect()
                 } else {
                     d.clone()
                 };

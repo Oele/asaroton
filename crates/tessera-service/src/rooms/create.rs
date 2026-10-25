@@ -62,6 +62,11 @@ impl Services {
             None => None,
         };
 
+        let preset = req.preset.clone().unwrap_or(match req.visibility {
+            Some(Visibility::Public) => RoomPreset::PublicChat,
+            _ => RoomPreset::PrivateChat,
+        });
+
         // --- m.room.create --------------------------------------------------------------
         let mut create_content = match req.creation_content {
             Some(Value::Object(m)) => Value::Object(m),
@@ -92,9 +97,13 @@ impl Services {
                 }
                 Some(_) => return Err(Error::bad_json("additional_creators must be an array.")),
             };
-            for u in &req.invite {
-                if *u != creator && !extra.contains(u) {
-                    extra.push(u.clone());
+            // A trusted private chat treats the people invited at creation as peers of the
+            // creator, which in these room versions means being creators themselves.
+            if preset == RoomPreset::TrustedPrivateChat {
+                for u in &req.invite {
+                    if *u != creator && !extra.contains(u) {
+                        extra.push(u.clone());
+                    }
                 }
             }
             if extra.is_empty() {
@@ -158,10 +167,6 @@ impl Services {
         .await?;
 
         // --- power levels ---------------------------------------------------------------
-        let preset = req.preset.clone().unwrap_or(match req.visibility {
-            Some(Visibility::Public) => RoomPreset::PublicChat,
-            _ => RoomPreset::PrivateChat,
-        });
         let mut pl = default_power_levels(&creator, &rules);
         // Like Synapse: private rooms let every member invite.
         if matches!(
@@ -170,7 +175,10 @@ impl Services {
         ) {
             pl["invite"] = json!(0);
         }
-        if preset == RoomPreset::TrustedPrivateChat {
+        if preset == RoomPreset::TrustedPrivateChat
+            && !rules.authorization.explicitly_privilege_room_creators
+        {
+            // (With privileged creators the invitees are creators instead, see above.)
             for u in &req.invite {
                 pl["users"][u.as_str()] = json!(100);
             }

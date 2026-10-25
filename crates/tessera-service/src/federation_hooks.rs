@@ -67,6 +67,14 @@ pub trait FederationHooks: Send + Sync {
     ) -> Result<Value>;
     /// Fetch older history for a room from other servers; returns how many events were stored.
     async fn backfill(&self, room_id: &RoomId, limit: usize) -> Result<usize>;
+    /// Ask the other servers in a room for the event closest to `ts` in `dir`
+    /// (federation `/timestamp_to_event`), store it, and return its ID and timestamp.
+    async fn remote_timestamp_to_event(
+        &self,
+        room_id: &RoomId,
+        ts: u64,
+        dir: tessera_store::Direction,
+    ) -> Result<Option<(ruma::OwnedEventId, u64)>>;
     /// Open Graph preview data for a URL.
     async fn preview_url(&self, url: &str) -> Result<Value>;
     /// Ask an appservice whether it knows a user (`GET /users/{userId}`).
@@ -153,6 +161,14 @@ impl FederationHooks for NoFederation {
     }
     async fn backfill(&self, _: &RoomId, _: usize) -> Result<usize> {
         Ok(0)
+    }
+    async fn remote_timestamp_to_event(
+        &self,
+        _: &RoomId,
+        _: u64,
+        _: tessera_store::Direction,
+    ) -> Result<Option<(ruma::OwnedEventId, u64)>> {
+        Ok(None)
     }
     async fn preview_url(&self, _: &str) -> Result<Value> {
         Err(disabled())

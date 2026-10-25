@@ -94,7 +94,11 @@ fn service_status(e: &tessera_service::Error) -> StatusCode {
         ) => StatusCode::UNAUTHORIZED,
         S::Auth(tessera_auth::AuthError::Deactivated) => StatusCode::FORBIDDEN,
         S::Store(tessera_store::Error::NotFound(_)) => StatusCode::NOT_FOUND,
-        S::Core(tessera_core::Error::UnsupportedRoomVersion(_)) => StatusCode::BAD_REQUEST,
+        S::Core(
+            tessera_core::Error::UnsupportedRoomVersion(_)
+            | tessera_core::Error::CanonicalJson(_)
+            | tessera_core::Error::CanonicalJsonField(_),
+        ) => StatusCode::BAD_REQUEST,
         S::Json(_) => StatusCode::BAD_REQUEST,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     }
@@ -163,6 +167,10 @@ impl Error {
             Self::Service(S::Json(e)) => {
                 (ErrorKind::BadJson, e.to_string(), StatusCode::BAD_REQUEST)
             }
+            Self::Service(S::Core(
+                e @ (tessera_core::Error::CanonicalJson(_)
+                | tessera_core::Error::CanonicalJsonField(_)),
+            )) => (ErrorKind::BadJson, e.to_string(), StatusCode::BAD_REQUEST),
             Self::Service(e) => {
                 tracing::error!(error = %e, "internal error");
                 (

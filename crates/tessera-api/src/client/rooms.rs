@@ -503,6 +503,11 @@ pub async fn send_message(
     if !content.is_object() {
         return Err(Error::bad_json("Event content must be an object."));
     }
+    // Timestamp massaging is for appservices only; others' `ts` is ignored.
+    let ts = req
+        .body
+        .timestamp
+        .filter(|_| sender.appservice_id.is_some());
     let event_id = services
         .send_message(
             &req.body.room_id,
@@ -511,6 +516,7 @@ pub async fn send_message(
             req.body.txn_id.as_str(),
             &req.body.event_type.to_string(),
             content,
+            ts,
         )
         .await?;
     Ok(send_message_event::v3::Response::new(event_id))
@@ -573,6 +579,10 @@ pub async fn send_state(
             return Ok(send_state_event::v3::Response::new(event_id));
         }
     }
+    let ts = req
+        .body
+        .timestamp
+        .filter(|_| sender.appservice_id.is_some());
     let event_id = services
         .send_state(
             &req.body.room_id,
@@ -580,6 +590,7 @@ pub async fn send_state(
             &req.body.event_type.to_string(),
             &req.body.state_key,
             content,
+            ts,
         )
         .await?;
     Ok(send_state_event::v3::Response::new(event_id))
@@ -937,6 +948,7 @@ pub async fn delete_alias(
                     "m.room.canonical_alias",
                     "",
                     content,
+                    None,
                 )
                 .await;
         }
@@ -1577,15 +1589,47 @@ pub async fn timestamp_to_event(
         ruma::api::Direction::Backward => Direction::Backwards,
     };
     let ts = i64::try_from(u64::from(req.body.ts.0)).unwrap_or(i64::MAX);
-    let ev = services
+    let local = services
         .store
         .event_at_timestamp(&req.body.room_id, ts, dir)
         .await?
-        .ok_or_else(|| Error::not_found("No event found in that direction."))?;
+        .map(|ev| {
+            (
+                ev.pdu.event_id().to_owned(),
+                u64::from(ev.pdu.origin_server_ts().0),
+            )
+        });
+    // Other servers may know history we never fetched; take their answer when it is
+    // closer to the requested time than ours.
+    let wanted = u64::from(req.body.ts.0);
+    let exact = local.as_ref().is_some_and(|(_, t)| *t == wanted);
+    let best = if exact {
+        local
+    } else {
+        let remote = services
+            .federation()
+            .remote_timestamp_to_event(&req.body.room_id, wanted, dir)
+            .await
+            .unwrap_or(None);
+        match (local, remote) {
+            (Some(l), Some(r)) => {
+                let closer = match dir {
+                    Direction::Forwards => r.1 < l.1,
+                    Direction::Backwards => r.1 > l.1,
+                };
+                Some(if closer { r } else { l })
+            }
+            (l, r) => l.or(r),
+        }
+    };
+    let (event_id, origin_server_ts) =
+        best.ok_or_else(|| Error::not_found("No event found in that direction."))?;
     Ok(
         ruma::api::client::room::get_event_by_timestamp::v1::Response::new(
-            ev.pdu.event_id().to_owned(),
-            ev.pdu.origin_server_ts(),
+            event_id,
+            ruma::MilliSecondsSinceUnixEpoch(
+                ruma::UInt::try_from(origin_server_ts).unwrap_or(ruma::UInt::MAX),
+            ),
         ),
     )
 }

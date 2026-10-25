@@ -44,6 +44,7 @@ pub struct TimelinePage {
 
 impl Services {
     /// Send a message-like event, de-duplicated by transaction ID.
+    #[allow(clippy::too_many_arguments)]
     pub async fn send_message(
         &self,
         room_id: &RoomId,
@@ -52,6 +53,7 @@ impl Services {
         txn_id: &str,
         event_type: &str,
         content: Value,
+        origin_server_ts: Option<ruma::MilliSecondsSinceUnixEpoch>,
     ) -> Result<OwnedEventId> {
         // Transaction IDs are scoped to the device *and* the endpoint path (room + type).
         let txn_key = format!("send:{room_id}:{event_type}:{txn_id}");
@@ -63,8 +65,9 @@ impl Services {
             return Ok(existing);
         }
         self.require_joined(room_id, sender).await?;
-        let ev = LocalEvent::new(room_id.to_owned(), sender.to_owned(), event_type.to_owned())
+        let mut ev = LocalEvent::new(room_id.to_owned(), sender.to_owned(), event_type.to_owned())
             .content(&content)?;
+        ev.origin_server_ts = origin_server_ts;
         let stored = self.send_local_event(ev).await?;
         self.store
             .set_txn_event(sender, device_id, &txn_key, stored.pdu.event_id())
@@ -83,6 +86,7 @@ impl Services {
         event_type: &str,
         state_key: &str,
         content: Value,
+        origin_server_ts: Option<ruma::MilliSecondsSinceUnixEpoch>,
     ) -> Result<OwnedEventId> {
         self.require_joined(room_id, sender).await?;
         if event_type == "m.room.create" {
@@ -133,9 +137,10 @@ impl Services {
         if event_type == "m.room.canonical_alias" {
             self.validate_canonical_alias(room_id, &content).await?;
         }
-        let ev = LocalEvent::new(room_id.to_owned(), sender.to_owned(), event_type.to_owned())
+        let mut ev = LocalEvent::new(room_id.to_owned(), sender.to_owned(), event_type.to_owned())
             .state_key(state_key)
             .content(&content)?;
+        ev.origin_server_ts = origin_server_ts;
         let sent = self.send_local_event(ev).await.map_err(|e| match e {
             // Malformed power-level content fails the auth rules; clients expect 400 for that.
             Error::Matrix {
@@ -502,7 +507,12 @@ impl Services {
         ev: &StoredEvent,
     ) -> Result<Option<tessera_store::StateGroupId>> {
         if ev.pdu.is_state() {
-            Ok(self.store.state_group_before(ev.pdu.event_id()).await?)
+            // The create event has no state before it: judge it by its own state.
+            Ok(self
+                .store
+                .state_group_before(ev.pdu.event_id())
+                .await?
+                .or(ev.state_group))
         } else {
             Ok(ev.state_group)
         }

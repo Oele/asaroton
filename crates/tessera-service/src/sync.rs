@@ -854,6 +854,17 @@ impl Services {
         Ok(self.store.get_events(&changed).await?)
     }
 
+    /// The stripped-state subset of a room's current state as full events, for
+    /// `invite_room_state` / `knock_room_state` over federation.
+    pub async fn stripped_state_full(&self, room_id: &RoomId) -> Result<Vec<Value>> {
+        let state = self.store.current_state_pdus(room_id).await?;
+        Ok(state
+            .iter()
+            .filter(|se| is_stripped_state_type(se.pdu.state_tuple().map(|(t, _)| t).as_ref()))
+            .map(|se| se.pdu.to_client_json())
+            .collect())
+    }
+
     /// Stripped state for invites/knocks: a fixed subset of state in client format without
     /// event IDs, plus the inviter's membership.
     pub async fn stripped_state(
@@ -879,13 +890,15 @@ impl Services {
                     && e.get("state_key").and_then(Value::as_str) == Some(u.as_str())
             });
             if !has_own_membership && let Some(ev) = own_event {
-                let mut v = ev.pdu.to_client_json();
-                if let Value::Object(o) = &mut v {
+                stored.push(ev.pdu.to_client_json());
+            }
+            // Servers may send full events; clients get the stripped form.
+            for v in &mut stored {
+                if let Value::Object(o) = v {
                     o.retain(|k, _| {
                         matches!(k.as_str(), "type" | "state_key" | "content" | "sender")
                     });
                 }
-                stored.push(v);
             }
             return Ok(stored);
         }
@@ -952,4 +965,20 @@ impl Services {
             })
             .unwrap_or_default())
     }
+}
+
+/// Event types that belong in stripped state.
+pub fn is_stripped_state_type(ty: Option<&StateEventType>) -> bool {
+    matches!(
+        ty,
+        Some(
+            StateEventType::RoomCreate
+                | StateEventType::RoomJoinRules
+                | StateEventType::RoomName
+                | StateEventType::RoomAvatar
+                | StateEventType::RoomCanonicalAlias
+                | StateEventType::RoomTopic
+                | StateEventType::RoomEncryption
+        )
+    )
 }

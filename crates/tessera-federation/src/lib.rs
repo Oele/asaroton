@@ -53,6 +53,12 @@ pub struct Federation {
     /// Recently seen events, so auth checks and state resolution can look events up
     /// synchronously. Bounded by periodic clearing.
     event_cache: dashmap::DashMap<ruma::OwnedEventId, tessera_core::Pdu>,
+    /// `/state_ids` answers fetched while processing events, keyed by event: the state at a
+    /// gap is needed more than once while the events around it are processed.
+    state_at_cache: dashmap::DashMap<
+        ruma::OwnedEventId,
+        (tessera_core::state::StateMap, Vec<ruma::OwnedEventId>),
+    >,
     /// Weak handle to ourselves, for code paths that need an `Arc<Federation>`.
     weak_self: std::sync::OnceLock<std::sync::Weak<Federation>>,
 }
@@ -77,6 +83,7 @@ impl Federation {
             joins_in_progress: dashmap::DashMap::new(),
             sender: sender::SenderHandle::default(),
             event_cache: dashmap::DashMap::new(),
+            state_at_cache: dashmap::DashMap::new(),
             weak_self: std::sync::OnceLock::new(),
         });
         let _ = fed.weak_self.set(Arc::downgrade(&fed));
@@ -91,6 +98,7 @@ impl Federation {
                 if cache_owner.event_cache.len() > 50_000 {
                     cache_owner.event_cache.clear();
                 }
+                cache_owner.state_at_cache.clear();
             }
         });
         Ok(fed)

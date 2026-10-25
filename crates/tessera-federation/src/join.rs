@@ -625,7 +625,7 @@ impl Federation {
             return Err(Error::Rejected(reason));
         }
         services
-            .stripped_state(room_id, None)
+            .stripped_state_full(room_id)
             .await
             .map_err(Into::into)
     }
@@ -762,7 +762,26 @@ impl Federation {
             .await?
             .ok_or_else(|| Error::Rejected("unknown room".into()))?;
         let rules = room_version::rules(&room.room_version)?;
-        let pdu = self.parse_and_verify(origin, raw.clone(), &rules).await?;
+        // Restricted joins: a join we authorised must carry our signature too, so add it
+        // before the signature check that requires it.
+        let mut raw_signed = raw;
+        let authorised_by_us = raw_signed
+            .get("content")
+            .and_then(|c| c.as_object())
+            .and_then(|c| c.get("join_authorised_via_users_server"))
+            .and_then(|v| v.as_str())
+            .and_then(|u| OwnedUserId::try_from(u).ok())
+            .is_some_and(|u| u.server_name() == services.config.server_name);
+        if authorised_by_us {
+            services.signing_key.sign_event(
+                &services.config.server_name,
+                &mut raw_signed,
+                &rules,
+            )?;
+        }
+        let pdu = self
+            .parse_and_verify(origin, raw_signed.clone(), &rules)
+            .await?;
         if pdu.event_type() != &TimelineEventType::RoomMember
             || pdu.state_key() != Some(pdu.sender().as_str())
             || pdu.sender().server_name() != origin
@@ -770,17 +789,6 @@ impl Federation {
         {
             return Err(Error::Rejected("not a valid join event".into()));
         }
-        // Restricted joins: we add our signature when we authorised them.
-        let mut raw_signed = raw;
-        let content: Value = serde_json::from_str(pdu.content().get())?;
-        if content.get("join_authorised_via_users_server").is_some() {
-            services.signing_key.sign_event(
-                &services.config.server_name,
-                &mut raw_signed,
-                &rules,
-            )?;
-        }
-        let pdu = Pdu::from_canonical(raw_signed, &rules)?;
 
         if let (_, crate::receive::Outcome::Rejected(reason)) = self
             .handle_incoming_pdu(
@@ -932,6 +940,22 @@ impl Federation {
         let content: Value = serde_json::from_str(pdu.content().get())?;
         if content.get("membership").and_then(|m| m.as_str()) != Some("invite") {
             return Err(Error::Rejected("not an invite".into()));
+        }
+        // Rooms identified by their create event: the invite must prove which room it is.
+        if rules.room_id_format == ruma::room_version_rules::RoomIdFormatVersion::V2 {
+            let create_ok = stripped_state.iter().any(|e| {
+                e.get("type").and_then(Value::as_str) == Some("m.room.create")
+                    && e.get("event_id")
+                        .and_then(Value::as_str)
+                        .is_none_or(|id| id.strip_prefix('$') == room_id.as_str().strip_prefix('!'))
+            });
+            if !create_ok {
+                return Err(Error::RemoteError {
+                    server: origin.to_owned(),
+                    status: http::StatusCode::BAD_REQUEST,
+                    body: json!({ "errcode": "M_MISSING_PARAM", "error": "invite_room_state must include the room's m.room.create event" }).to_string(),
+                });
+            }
         }
         if services
             .store

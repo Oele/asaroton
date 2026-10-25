@@ -144,7 +144,15 @@ impl Services {
             || format!("notice-{}", tessera_store::now_ts()),
             |t| format!("notice-{target}-{t}"),
         );
-        self.send_message(&room_id, &notices_user, None, &txn, event_type, content)
-            .await
+        self.send_message(
+            &room_id,
+            &notices_user,
+            None,
+            &txn,
+            event_type,
+            content,
+            None,
+        )
+        .await
     }
 }

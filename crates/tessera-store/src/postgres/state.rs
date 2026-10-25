@@ -42,6 +42,13 @@ pub(crate) async fn create_state_group(
             .fetch_one(&mut *conn)
             .await?
             .get(0);
+    // One row per state key (a later entry wins), as the upsert cannot touch a row twice.
+    let delta: Vec<_> = delta
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeMap<_, _>>()
+        .into_iter()
+        .collect();
     if !delta.is_empty() {
         let types: Vec<String> = delta.iter().map(|((t, _), _)| t.to_string()).collect();
         let keys: Vec<String> = delta.iter().map(|((_, k), _)| k.clone()).collect();

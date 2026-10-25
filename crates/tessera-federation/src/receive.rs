@@ -95,11 +95,22 @@ impl Federation {
             tracing::warn!(%origin, unparseable, "transaction contained unparseable PDUs");
         }
         for (room_id, pdus) in by_room {
+            // Failures are reported per event; older room versions carry no `event_id`
+            // field, so the ID is computed from the event when the room is known.
+            let rules = match self.services.store.get_room(&room_id).await {
+                Ok(Some(r)) => room_version::rules(&r.room_version).ok(),
+                _ => None,
+            };
             for obj in pdus {
-                let event_id_hint = obj
-                    .get("event_id")
-                    .and_then(|e| e.as_str())
-                    .map(str::to_owned);
+                let event_id_hint = rules
+                    .as_ref()
+                    .and_then(|r| Pdu::from_canonical(obj.clone(), r).ok())
+                    .map(|p| p.event_id().to_owned())
+                    .or_else(|| {
+                        obj.get("event_id")
+                            .and_then(|e| e.as_str())
+                            .and_then(|s| OwnedEventId::try_from(s).ok())
+                    });
                 match self.handle_incoming_pdu(origin, &room_id, obj, false).await {
                     Ok((event_id, Outcome::Rejected(reason))) => {
                         results.insert(event_id, Err(reason));
@@ -109,8 +120,7 @@ impl Federation {
                     }
                     Err(e) => {
                         tracing::warn!(%origin, %room_id, error = %e, "failed to process PDU");
-                        if let Some(id) = event_id_hint.and_then(|s| OwnedEventId::try_from(s).ok())
-                        {
+                        if let Some(id) = event_id_hint {
                             results.insert(id, Err(e.to_string()));
                         }
                     }
@@ -392,17 +402,13 @@ impl Federation {
             return Ok(Outcome::Rejected(reason));
         }
 
-        // 3a. auth events
-        self.ensure_auth_events(origin, &room_id, &pdu, rules, 0)
-            .await?;
-
-        // 3b. prev events
+        // 3a. prev events. A pushed event: ask the sender for the history we lack (the
+        // events it returns are processed on the way). An event pushed to us must come with
+        // its history reachable; otherwise it would become a forward extremity whose state we
+        // cannot trust, so like the reference implementation we refuse it.
         if chase_prevs {
             self.fetch_missing_prev_events(origin, &room_id, &pdu, rules)
                 .await?;
-            // An event pushed to us must come with its history reachable; otherwise it would
-            // become a forward extremity whose state we cannot trust. Like the reference
-            // implementation, refuse it instead of fetching state for it.
             let have: HashSet<OwnedEventId> = services
                 .store
                 .have_events(pdu.prev_events())
@@ -414,6 +420,45 @@ impl Federation {
                     "Your server isn't divulging details about prev_events referenced in this event.".into(),
                 ));
             }
+        } else if !pdu.is_create() {
+            // A pulled or backfilled event whose prev events we do not have sits at a gap:
+            // the state there, with its auth chain, comes from the origin.
+            let have: HashSet<OwnedEventId> = services
+                .store
+                .have_events(pdu.prev_events())
+                .await?
+                .into_iter()
+                .collect();
+            for prev in pdu.prev_events().iter().filter(|p| !have.contains(*p)) {
+                if let Err(e) = self.fetch_state_at(origin, &room_id, prev, rules).await {
+                    tracing::warn!(%prev, error = %e, "could not fetch state at missing prev event");
+                }
+            }
+        }
+
+        // 3b. auth events. An event whose auth events cannot be obtained is rejected but
+        // kept, so that later events referring to it can still be processed.
+        if let Err(e) = self
+            .ensure_auth_events(origin, &room_id, &pdu, rules, 0)
+            .await
+        {
+            let reason = format!("auth events unavailable: {e}");
+            tracing::info!(event_id = %pdu.event_id(), %reason, "rejecting event");
+            let stored = pdu.with_rejected(true);
+            services
+                .store
+                .persist_event(PersistEvent {
+                    pdu: stored.clone(),
+                    state: EventState::Outlier,
+                    soft_failed: false,
+                    backfilled,
+                    stream_ordering: None,
+                    current_state_delta: None,
+                    forward_extremities: None,
+                })
+                .await?;
+            self.event_cache.insert(pdu.event_id().to_owned(), stored);
+            return Ok(Outcome::Rejected(reason));
         }
 
         // 4. state before the event
@@ -485,11 +530,9 @@ impl Federation {
                 delta: match before_group {
                     Some(_) => vec![((ty, key.to_owned()), pdu.event_id().to_owned())],
                     None => {
-                        let mut full: Vec<_> = state::state_map_from_pdus(state_before.values())
-                            .into_iter()
-                            .collect();
-                        full.push(((ty, key.to_owned()), pdu.event_id().to_owned()));
-                        full
+                        let mut full = state::state_map_from_pdus(state_before.values());
+                        full.insert((ty, key.to_owned()), pdu.event_id().to_owned());
+                        full.into_iter().collect()
                     }
                 },
             },
@@ -938,6 +981,9 @@ impl Federation {
         event_id: &ruma::EventId,
         rules: &RoomVersionRules,
     ) -> Result<(StateMap<OwnedEventId>, Vec<OwnedEventId>)> {
+        if let Some(cached) = self.state_at_cache.get(event_id) {
+            return Ok(cached.clone());
+        }
         let req = get_room_state_ids::v1::Request::new(event_id.to_owned(), room_id.to_owned());
         let resp = self.client.send_long(origin, req).await?;
         let mut all: Vec<OwnedEventId> = resp.auth_chain_ids.clone();
@@ -986,6 +1032,13 @@ impl Federation {
                 map.insert((ty, key.to_owned()), id.clone());
             }
         }
+        if self.state_at_cache.len() > 5_000 {
+            self.state_at_cache.clear();
+        }
+        self.state_at_cache.insert(
+            event_id.to_owned(),
+            (map.clone(), resp.auth_chain_ids.clone()),
+        );
         Ok((map, resp.auth_chain_ids))
     }
 

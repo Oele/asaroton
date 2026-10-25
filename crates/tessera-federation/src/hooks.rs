@@ -151,6 +151,79 @@ impl FederationHooks for Hooks {
         Err(last)
     }
 
+    async fn remote_timestamp_to_event(
+        &self,
+        room_id: &ruma::RoomId,
+        ts: u64,
+        dir: tessera_store::Direction,
+    ) -> tessera_service::Result<Option<(ruma::OwnedEventId, u64)>> {
+        use ruma::api::federation::event::get_event_by_timestamp;
+        let services = &self.0.services;
+        let servers = servers_except_self(
+            services.store.servers_in_room(room_id).await?,
+            &services.config.server_name,
+        );
+        let Some(room) = services.store.get_room(room_id).await? else {
+            return Ok(None);
+        };
+        let rules = tessera_core::room_version::rules(&room.room_version)?;
+        let ts_ms =
+            ruma::MilliSecondsSinceUnixEpoch(ruma::UInt::try_from(ts).unwrap_or(ruma::UInt::MAX));
+        let rdir = match dir {
+            tessera_store::Direction::Forwards => ruma::api::Direction::Forward,
+            tessera_store::Direction::Backwards => ruma::api::Direction::Backward,
+        };
+        let mut best: Option<(OwnedServerName, ruma::OwnedEventId, u64)> = None;
+        for server in servers.iter().take(5) {
+            let req = get_event_by_timestamp::v1::Request::new(room_id.to_owned(), ts_ms, rdir);
+            match self.0.client.send(server, req).await {
+                Ok(resp) => {
+                    let t = u64::from(resp.origin_server_ts.0);
+                    let better = match &best {
+                        None => true,
+                        Some((_, _, bt)) => match dir {
+                            tessera_store::Direction::Forwards => t < *bt,
+                            tessera_store::Direction::Backwards => t > *bt,
+                        },
+                    };
+                    if better {
+                        best = Some((server.clone(), resp.event_id, t));
+                    }
+                }
+                Err(e) => tracing::debug!(%server, error = %e, "remote timestamp lookup failed"),
+            }
+        }
+        let Some((server, event_id, t)) = best else {
+            return Ok(None);
+        };
+        if services
+            .store
+            .get_event(&event_id)
+            .await?
+            .is_some_and(|e| !e.outlier)
+        {
+            return Ok(Some((event_id, t)));
+        }
+        // Store the event as history so the client can fetch it afterwards.
+        let pdu = self
+            .0
+            .fetch_event(&server, &event_id, &rules)
+            .await
+            .map_err(tessera_service::Error::from)?;
+        let ordering = services.store.reserve_backfill_orderings(1).await?.pop();
+        match self
+            .0
+            .process_pdu_inner(&server, pdu, &rules, true, false, ordering)
+            .await
+        {
+            Ok(_) => Ok(Some((event_id, t))),
+            Err(e) => {
+                tracing::warn!(%event_id, error = %e, "could not store remotely found event");
+                Ok(None)
+            }
+        }
+    }
+
     async fn remote_profile(&self, user_id: &UserId) -> tessera_service::Result<Value> {
         let req = get_profile_information::v1::Request::new(user_id.to_owned());
         let resp = self

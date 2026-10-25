@@ -174,6 +174,45 @@ impl Services {
 
     /// Whether a remote server may see a room: public, knockable, world readable, or a member
     /// of that server is in it.
+    /// Whether `user` may see a room we only know from another server's hierarchy summary.
+    async fn summary_accessible_to_user(&self, summary: &Value, user: &UserId) -> Result<bool> {
+        if summary.get("world_readable").and_then(Value::as_bool) == Some(true) {
+            return Ok(true);
+        }
+        match summary.get("join_rule").and_then(Value::as_str) {
+            Some("public" | "knock" | "knock_restricted") => return Ok(true),
+            Some("restricted") => {
+                for r in summary
+                    .get("allowed_room_ids")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .filter_map(|r| OwnedRoomId::try_from(r).ok())
+                {
+                    if self.is_joined(&r, user).await? {
+                        return Ok(true);
+                    }
+                }
+            }
+            _ => {}
+        }
+        // Already a member (or invited) as far as we know.
+        if let Some(id) = summary
+            .get("room_id")
+            .and_then(Value::as_str)
+            .and_then(|r| OwnedRoomId::try_from(r).ok())
+            && let Some(m) = self.store.get_membership(&id, user).await?
+        {
+            use ruma::events::room::member::MembershipState;
+            return Ok(matches!(
+                m.membership,
+                MembershipState::Join | MembershipState::Invite
+            ));
+        }
+        Ok(false)
+    }
+
     pub async fn room_accessible_to_server(
         &self,
         room_id: &RoomId,
@@ -283,8 +322,8 @@ impl Services {
             if !seen.insert(item.room.clone()) {
                 continue;
             }
-            let (summary, children): (Value, Vec<Value>) = if self.room_is_local(&item.room).await?
-            {
+            let is_local = self.room_is_local(&item.room).await?;
+            let (summary, children): (Value, Vec<Value>) = if is_local {
                 if !self.room_accessible_to_user(&item.room, user).await? {
                     continue;
                 }
@@ -347,6 +386,9 @@ impl Services {
                     (summary, children)
                 }
             };
+            if !is_local && !self.summary_accessible_to_user(&summary, user).await? {
+                continue;
+            }
             // With `suggested_only`, only suggested links are reported and followed.
             let children: Vec<Value> = if suggested_only {
                 children

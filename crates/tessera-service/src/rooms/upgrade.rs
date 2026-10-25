@@ -184,7 +184,14 @@ impl Services {
                 )
                 .await;
             let _ = self
-                .send_state(&new_room, user, "m.room.canonical_alias", "", canonical)
+                .send_state(
+                    &new_room,
+                    user,
+                    "m.room.canonical_alias",
+                    "",
+                    canonical,
+                    None,
+                )
                 .await;
         }
         drop(guard);

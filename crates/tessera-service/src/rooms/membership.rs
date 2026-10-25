@@ -361,8 +361,12 @@ impl Services {
         .map_err(|e| match e {
             Error::Matrix {
                 kind: ruma::api::error::ErrorKind::Forbidden,
+                message,
                 ..
-            } => Error::forbidden("You do not have permission to do that."),
+            } => {
+                tracing::debug!(%sender, %target, membership, reason = %message, "membership change refused");
+                Error::forbidden("You do not have permission to do that.")
+            }
             other => other,
         })
     }
@@ -428,13 +432,8 @@ impl Services {
                 ))
             );
             if keep {
-                let mut v = pdu.to_client_json();
-                if let Value::Object(o) = &mut v {
-                    o.retain(|k, _| {
-                        matches!(k.as_str(), "type" | "state_key" | "content" | "sender")
-                    });
-                }
-                out.push(v);
+                // Full events: the invitee's server can then verify the create event.
+                out.push(pdu.to_client_json());
             }
         }
         out
