@@ -212,7 +212,55 @@ pub fn routes(router: Router<AppState>) -> Router<AppState> {
     let r = route::<c::presence::get_presence::v3::Request, _, _>(r, misc::get_presence);
     let r = route::<c::user_directory::search_users::v3::Request, _, _>(r, misc::search_users);
     let r = route::<c::appservice::request_ping::v1::Request, _, _>(r, misc::appservice_ping);
-    let r = route::<c::thirdparty::get_protocols::v3::Request, _, _>(r, misc::thirdparty_protocols);
+    let r = r
+        .route(
+            "/_matrix/client/v3/thirdparty/protocols",
+            axum::routing::get(thirdparty_protocols_handler),
+        )
+        .route(
+            "/_matrix/client/r0/thirdparty/protocols",
+            axum::routing::get(thirdparty_protocols_handler),
+        )
+        .route(
+            "/_matrix/client/v3/thirdparty/protocol/{protocol}",
+            axum::routing::get(thirdparty_protocol_handler),
+        )
+        .route(
+            "/_matrix/client/r0/thirdparty/protocol/{protocol}",
+            axum::routing::get(thirdparty_protocol_handler),
+        )
+        .route(
+            "/_matrix/client/v3/thirdparty/location/{protocol}",
+            axum::routing::get(thirdparty_location_handler),
+        )
+        .route(
+            "/_matrix/client/r0/thirdparty/location/{protocol}",
+            axum::routing::get(thirdparty_location_handler),
+        )
+        .route(
+            "/_matrix/client/v3/thirdparty/user/{protocol}",
+            axum::routing::get(thirdparty_user_handler),
+        )
+        .route(
+            "/_matrix/client/r0/thirdparty/user/{protocol}",
+            axum::routing::get(thirdparty_user_handler),
+        )
+        .route(
+            "/_matrix/client/v3/thirdparty/location",
+            axum::routing::get(thirdparty_location_by_alias_handler),
+        )
+        .route(
+            "/_matrix/client/r0/thirdparty/location",
+            axum::routing::get(thirdparty_location_by_alias_handler),
+        )
+        .route(
+            "/_matrix/client/v3/thirdparty/user",
+            axum::routing::get(thirdparty_user_by_id_handler),
+        )
+        .route(
+            "/_matrix/client/r0/thirdparty/user",
+            axum::routing::get(thirdparty_user_by_id_handler),
+        );
     let r = route::<c::voip::get_turn_server_info::v3::Request, _, _>(r, misc::turn_server);
     // media
     #[allow(deprecated)]
@@ -449,3 +497,49 @@ async fn public_rooms_filtered_handler(
         Err(e) => e.into_response(),
     }
 }
+
+macro_rules! raw_json_handler {
+    ($name:ident, $req:ty, $call:path) => {
+        async fn $name(
+            axum::extract::State(state): axum::extract::State<AppState>,
+            req: crate::Ruma<$req>,
+        ) -> axum::response::Response {
+            use axum::response::IntoResponse;
+            match $call(state, req).await {
+                Ok(resp) => resp,
+                Err(e) => e.into_response(),
+            }
+        }
+    };
+}
+
+raw_json_handler!(
+    thirdparty_protocols_handler,
+    ruma::api::client::thirdparty::get_protocols::v3::Request,
+    misc::thirdparty_protocols
+);
+raw_json_handler!(
+    thirdparty_protocol_handler,
+    ruma::api::client::thirdparty::get_protocol::v3::Request,
+    misc::thirdparty_protocol
+);
+raw_json_handler!(
+    thirdparty_location_handler,
+    ruma::api::client::thirdparty::get_location_for_protocol::v3::Request,
+    misc::thirdparty_location
+);
+raw_json_handler!(
+    thirdparty_user_handler,
+    ruma::api::client::thirdparty::get_user_for_protocol::v3::Request,
+    misc::thirdparty_user
+);
+raw_json_handler!(
+    thirdparty_location_by_alias_handler,
+    ruma::api::client::thirdparty::get_location_for_room_alias::v3::Request,
+    misc::thirdparty_location_by_alias
+);
+raw_json_handler!(
+    thirdparty_user_by_id_handler,
+    ruma::api::client::thirdparty::get_user_for_user_id::v3::Request,
+    misc::thirdparty_user_by_id
+);

@@ -87,6 +87,43 @@ impl Federation {
         Ok(false)
     }
 
+    /// `GET {url}/_matrix/app/v1/thirdparty/{path}?{query}`.
+    pub async fn appservice_thirdparty(
+        &self,
+        id: &str,
+        path: &str,
+        query: &[(String, String)],
+    ) -> ServiceResult<Option<Value>> {
+        let (a, base) = self.appservice_base(id)?;
+        let client = plain_http();
+        let qs: Vec<String> = query
+            .iter()
+            .map(|(k, v)| format!("{}={}", urlencode(k), urlencode(v)))
+            .collect();
+        let qs = if qs.is_empty() {
+            String::new()
+        } else {
+            format!("?{}", qs.join("&"))
+        };
+        for url in [
+            format!("{base}/_matrix/app/v1/thirdparty/{path}{qs}"),
+            format!("{base}/_matrix/app/unstable/thirdparty/{path}{qs}"),
+        ] {
+            let resp = client.get(&url).bearer_auth(&a.hs_token).send().await;
+            match resp {
+                Ok(r) if r.status().is_success() => {
+                    return Ok(r.json::<Value>().await.ok());
+                }
+                Ok(r) if r.status() == reqwest::StatusCode::NOT_FOUND => {}
+                Ok(r) => return Err(bad_status(r.status(), None)),
+                Err(e) => {
+                    tracing::debug!(appservice = id, error = %e, "third-party lookup failed");
+                }
+            }
+        }
+        Ok(None)
+    }
+
     /// `POST {url}/_matrix/app/v1/ping`.
     pub async fn appservice_ping(&self, id: &str, txn_id: &str) -> ServiceResult<u64> {
         let (a, base) = self.appservice_base(id)?;

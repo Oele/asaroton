@@ -14,15 +14,15 @@ most recent runs noted in the commit history.
 | Client-Server: Simplified Sliding Sync (MSC4186) | not started |
 | Client-Server: media | done: authenticated and legacy download/thumbnail, uploads (sync and async), URL previews, remote media over federation |
 | Client-Server: E2EE | done: device keys, one-time/fallback keys, cross-signing, signatures, to-device, key backups |
-| Client-Server: push | rules served and evaluated for unread counts; room-specific rules follow room upgrades; pusher HTTP delivery pending |
+| Client-Server: push | done: rules served and evaluated for unread counts, room-specific rules follow room upgrades, HTTP pushers receive notifications (full and `event_id_only`, rejected pushkeys removed) |
 | Server-Server: keys / signing | done (server keys, notary, key fetch/cache, X-Matrix) |
 | Server-Server: join / leave / invite / knock | done, including restricted joins, invite rejection and rescinding, make_knock/send_knock, server ACLs, hierarchy |
 | Server-Server: transactions (/send) | done: PDU pipeline with auth chains, missing events, state fetching, rejected events, EDUs (typing, receipts, presence, device lists, to-device, signing keys) |
 | Server-Server: backfill / missing events | done both directions, with history-visibility redaction |
 | Server-Server: media | done |
-| Appservice API | done: registrations (YAML), namespaces, `as_token` auth with `user_id`, transactions, user/alias queries, ping; third-party lookups not implemented |
+| Appservice API | done: registrations (YAML), namespaces, `as_token` auth with `user_id`, transactions, user/alias queries, ping, third-party protocol/location/user lookups |
 | Admin API | Synapse-compatible registration and server notices only |
 | Auth: MSC3861 delegation | not started |
 
-Known gaps (Complement): `/members?at=` with a token before the room's first event, push
-gateway delivery, third-party protocol lookups, sliding sync, MSC3861.
+Known gaps (Complement): `/members?at=` with a token before the room's first event, sliding
+sync, MSC3861, ephemeral events to appservices.

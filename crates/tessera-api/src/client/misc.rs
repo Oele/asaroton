@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use ruma::{
     MilliSecondsSinceUnixEpoch, UInt,
+    api::client as c,
     api::client::{
         config::{
             get_global_account_data, get_room_account_data, set_global_account_data,
@@ -13,7 +14,6 @@ use ruma::{
         presence::{get_presence, set_presence},
         read_marker::set_read_marker,
         receipt::create_receipt,
-        thirdparty::get_protocols,
         typing::create_typing_event,
         user_directory::search_users,
         voip::get_turn_server_info,
@@ -385,16 +385,6 @@ pub async fn search_users(
     Ok(search_users::v3::Response::new(results, limited))
 }
 
-pub async fn thirdparty_protocols(
-    _services: AppState,
-    req: Ruma<get_protocols::v3::Request>,
-) -> Result<get_protocols::v3::Response> {
-    let _ = req.sender()?;
-    Ok(get_protocols::v3::Response::new(
-        std::collections::BTreeMap::new(),
-    ))
-}
-
 pub async fn turn_server(
     _services: AppState,
     req: Ruma<get_turn_server_info::v3::Request>,
@@ -434,4 +424,86 @@ pub async fn appservice_ping(
             std::time::Duration::from_millis(ms),
         ),
     )
+}
+
+/// `GET /_matrix/client/v3/thirdparty/protocols`.
+pub async fn thirdparty_protocols(
+    services: AppState,
+    req: Ruma<c::thirdparty::get_protocols::v3::Request>,
+) -> Result<axum::response::Response> {
+    use axum::response::IntoResponse;
+    req.sender()?;
+    Ok(axum::Json(services.thirdparty_protocols().await?).into_response())
+}
+
+/// `GET /_matrix/client/v3/thirdparty/protocol/{protocol}`.
+pub async fn thirdparty_protocol(
+    services: AppState,
+    req: Ruma<c::thirdparty::get_protocol::v3::Request>,
+) -> Result<axum::response::Response> {
+    use axum::response::IntoResponse;
+    req.sender()?;
+    Ok(axum::Json(services.thirdparty_protocol(&req.body.protocol).await?).into_response())
+}
+
+fn fields_query(fields: &std::collections::BTreeMap<String, String>) -> Vec<(String, String)> {
+    fields.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+}
+
+/// `GET /_matrix/client/v3/thirdparty/location/{protocol}`.
+pub async fn thirdparty_location(
+    services: AppState,
+    req: Ruma<c::thirdparty::get_location_for_protocol::v3::Request>,
+) -> Result<axum::response::Response> {
+    use axum::response::IntoResponse;
+    req.sender()?;
+    let items = services
+        .thirdparty_lookup(
+            "location",
+            Some(&req.body.protocol),
+            &fields_query(&req.body.fields),
+        )
+        .await?;
+    Ok(axum::Json(Value::Array(items)).into_response())
+}
+
+/// `GET /_matrix/client/v3/thirdparty/user/{protocol}`.
+pub async fn thirdparty_user(
+    services: AppState,
+    req: Ruma<c::thirdparty::get_user_for_protocol::v3::Request>,
+) -> Result<axum::response::Response> {
+    use axum::response::IntoResponse;
+    req.sender()?;
+    let items = services
+        .thirdparty_lookup(
+            "user",
+            Some(&req.body.protocol),
+            &fields_query(&req.body.fields),
+        )
+        .await?;
+    Ok(axum::Json(Value::Array(items)).into_response())
+}
+
+/// `GET /_matrix/client/v3/thirdparty/location?alias=`.
+pub async fn thirdparty_location_by_alias(
+    services: AppState,
+    req: Ruma<c::thirdparty::get_location_for_room_alias::v3::Request>,
+) -> Result<axum::response::Response> {
+    use axum::response::IntoResponse;
+    req.sender()?;
+    let q = vec![("alias".to_owned(), req.body.alias.to_string())];
+    let items = services.thirdparty_lookup("location", None, &q).await?;
+    Ok(axum::Json(Value::Array(items)).into_response())
+}
+
+/// `GET /_matrix/client/v3/thirdparty/user?userid=`.
+pub async fn thirdparty_user_by_id(
+    services: AppState,
+    req: Ruma<c::thirdparty::get_user_for_user_id::v3::Request>,
+) -> Result<axum::response::Response> {
+    use axum::response::IntoResponse;
+    req.sender()?;
+    let q = vec![("userid".to_owned(), req.body.userid.to_string())];
+    let items = services.thirdparty_lookup("user", None, &q).await?;
+    Ok(axum::Json(Value::Array(items)).into_response())
 }

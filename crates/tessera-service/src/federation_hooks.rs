@@ -79,6 +79,14 @@ pub trait FederationHooks: Send + Sync {
     ) -> Result<bool>;
     /// Ping an appservice; returns the round trip in milliseconds.
     async fn appservice_ping(&self, appservice_id: &str, txn_id: &str) -> Result<u64>;
+    /// Third-party network lookup (`GET /thirdparty/{path}?query`); `None` when the appservice
+    /// has nothing for it or cannot be reached.
+    async fn appservice_thirdparty(
+        &self,
+        appservice_id: &str,
+        path: &str,
+        query: &[(String, String)],
+    ) -> Result<Option<Value>>;
     /// Fetch remote device keys (`/user/keys/query`): user -> device -> keys, plus cross-signing.
     async fn remote_query_keys(
         &self,
@@ -157,6 +165,14 @@ impl FederationHooks for NoFederation {
     }
     async fn appservice_ping(&self, _: &str, _: &str) -> Result<u64> {
         Err(disabled())
+    }
+    async fn appservice_thirdparty(
+        &self,
+        _: &str,
+        _: &str,
+        _: &[(String, String)],
+    ) -> Result<Option<Value>> {
+        Ok(None)
     }
     async fn remote_query_keys(
         &self,

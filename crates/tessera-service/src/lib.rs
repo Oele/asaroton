@@ -23,6 +23,7 @@ pub mod rooms;
 pub mod signing;
 pub mod spaces;
 pub mod sync;
+pub mod thirdparty;
 pub mod typing;
 
 use std::sync::Arc;

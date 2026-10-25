@@ -197,6 +197,17 @@ impl FederationHooks for Hooks {
         self.0.appservice_ping(appservice_id, txn_id).await
     }
 
+    async fn appservice_thirdparty(
+        &self,
+        appservice_id: &str,
+        path: &str,
+        query: &[(String, String)],
+    ) -> tessera_service::Result<Option<Value>> {
+        self.0
+            .appservice_thirdparty(appservice_id, path, query)
+            .await
+    }
+
     async fn preview_url(&self, url: &str) -> tessera_service::Result<Value> {
         self.0
             .preview_url(url)
