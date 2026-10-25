@@ -925,7 +925,7 @@ impl Federation {
         room_id: &RoomId,
         room_version: &RoomVersionId,
         raw: CanonicalJsonObject,
-        stripped_state: Vec<Value>,
+        stripped_state: Option<Vec<Value>>,
     ) -> Result<CanonicalJsonObject> {
         let services = &self.services;
         let rules = room_version::rules(room_version).map_err(|_| Error::RemoteError {
@@ -952,8 +952,10 @@ impl Federation {
             return Err(Error::Rejected("not an invite".into()));
         }
         // Rooms identified by their create event: the invite must prove which room it is.
-        if rules.room_id_format == ruma::room_version_rules::RoomIdFormatVersion::V2 {
-            let create_ok = stripped_state.iter().any(|e| {
+        if rules.room_id_format == ruma::room_version_rules::RoomIdFormatVersion::V2
+            && let Some(stripped) = &stripped_state
+        {
+            let create_ok = stripped.iter().any(|e| {
                 e.get("type").and_then(Value::as_str) == Some("m.room.create")
                     && e.get("event_id")
                         .and_then(Value::as_str)
@@ -1016,7 +1018,7 @@ impl Federation {
             .await?;
         services
             .store
-            .set_invite_state(room_id, &invitee, &stripped_state)
+            .set_invite_state(room_id, &invitee, &stripped_state.unwrap_or_default())
             .await?;
         services
             .notifier

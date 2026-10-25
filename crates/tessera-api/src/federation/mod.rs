@@ -470,12 +470,18 @@ pub async fn invite_v2(
     let origin = req.origin()?.clone();
     let fed = app.fed()?;
     let raw = tessera_core::canonical::from_str(req.body.event.get())?;
-    let stripped: Vec<Value> = req
-        .body
-        .invite_room_state
-        .iter()
-        .filter_map(|s| serde_json::to_value(s).ok())
-        .collect();
+    // Absent and empty stripped state differ: only a present list is validated.
+    let stripped: Option<Vec<Value>> = req
+        .json
+        .as_ref()
+        .and_then(|j| j.get("invite_room_state"))
+        .map(|_| {
+            req.body
+                .invite_room_state
+                .iter()
+                .filter_map(|s| serde_json::to_value(s).ok())
+                .collect()
+        });
     let signed = fed
         .receive_invite(
             &origin,
