@@ -21,6 +21,8 @@ pub fn sync_filter(f: &FilterDefinition) -> SyncFilter {
     if let Some(l) = tl.limit {
         out.timeline_limit = usize::try_from(u64::from(l)).unwrap_or(10);
     }
+    out.unread_thread_notifications = tl.unread_thread_notifications;
+    {}
     out.timeline_types.clone_from(&tl.types);
     out.timeline_not_types.clone_from(&tl.not_types);
     out.timeline_senders.clone_from(&tl.senders);
@@ -108,6 +110,19 @@ async fn room_json(
             "unread_notifications".into(),
             json!({ "notification_count": room.unread_notifications, "highlight_count": room.unread_highlights }),
         );
+        if !room.unread_threads.is_empty() {
+            let threads: Map<String, Value> = room
+                .unread_threads
+                .iter()
+                .map(|(k, (n, h))| {
+                    (
+                        k.to_string(),
+                        json!({ "notification_count": n, "highlight_count": h }),
+                    )
+                })
+                .collect();
+            v.insert("unread_thread_notifications".into(), Value::Object(threads));
+        }
     }
     Ok(Value::Object(v))
 }

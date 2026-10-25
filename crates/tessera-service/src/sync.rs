@@ -78,6 +78,7 @@ pub struct SyncFilter {
     pub lazy_load_members: bool,
     pub include_redundant_members: bool,
     pub include_leave: bool,
+    pub unread_thread_notifications: bool,
     pub rooms: Option<Vec<OwnedRoomId>>,
     pub not_rooms: Vec<OwnedRoomId>,
     pub presence_enabled: bool,
@@ -96,6 +97,7 @@ impl Default for SyncFilter {
             lazy_load_members: false,
             include_redundant_members: false,
             include_leave: false,
+            unread_thread_notifications: false,
             rooms: None,
             not_rooms: Vec::new(),
             presence_enabled: true,
@@ -185,6 +187,8 @@ pub struct RoomSync {
     pub txn_ids: HashMap<OwnedEventId, String>,
     pub unread_notifications: u64,
     pub unread_highlights: u64,
+    /// Per-thread counts, only when the filter asks for `unread_thread_notifications`.
+    pub unread_threads: std::collections::BTreeMap<OwnedEventId, (u64, u64)>,
 }
 
 /// The computed sync response, in domain terms; the API layer renders it.
@@ -648,6 +652,24 @@ impl Services {
                 }
             }
 
+            // Unread notification counts.
+            match self.unread_counts(room_id, user, upper).await {
+                Ok(counts) => {
+                    if filter.unread_thread_notifications {
+                        room.unread_notifications = counts.main.notification_count;
+                        room.unread_highlights = counts.main.highlight_count;
+                        room.unread_threads = counts
+                            .threads
+                            .into_iter()
+                            .map(|(k, c)| (k, (c.notification_count, c.highlight_count)))
+                            .collect();
+                    } else {
+                        room.unread_notifications = counts.total.notification_count;
+                        room.unread_highlights = counts.total.highlight_count;
+                    }
+                }
+                Err(e) => tracing::warn!(%room_id, error = %e, "unread counts failed"),
+            }
             // Summary.
             let members = self.store.members(room_id, None).await?;
             room.joined_count = members

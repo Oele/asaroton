@@ -12,6 +12,7 @@ pub mod e2ee;
 mod error;
 pub mod federation_hooks;
 pub mod media;
+pub mod notifications;
 pub mod notifier;
 pub mod presence;
 pub mod profile;
