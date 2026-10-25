@@ -13,8 +13,8 @@ use ruma::{
         event::{get_event, get_missing_events, get_room_state, get_room_state_ids},
         keys::{claim_keys, get_keys},
         membership::{
-            create_invite, create_join_event, create_leave_event, prepare_join_event,
-            prepare_leave_event,
+            create_invite, create_join_event, create_knock_event, create_leave_event,
+            prepare_join_event, prepare_knock_event, prepare_leave_event,
         },
         query::{get_profile_information, get_room_information},
         transactions::send_transaction_message,
@@ -45,6 +45,8 @@ pub fn routes(router: Router<AppState>) -> Router<AppState> {
     let r = route::<create_join_event::v2::Request, _, _>(r, send_join_v2);
     let r = route::<prepare_leave_event::v1::Request, _, _>(r, make_leave);
     let r = route::<create_leave_event::v2::Request, _, _>(r, send_leave_v2);
+    let r = route::<prepare_knock_event::v1::Request, _, _>(r, make_knock);
+    let r = route::<create_knock_event::v1::Request, _, _>(r, send_knock);
     let r = route::<create_invite::v2::Request, _, _>(r, invite_v2);
     let r = route::<get_event::v1::Request, _, _>(r, event);
     let r = route::<get_room_state::v1::Request, _, _>(r, state);
@@ -348,6 +350,40 @@ pub async fn send_leave_v2(
         .await
         .map_err(fed_err)?;
     Ok(create_leave_event::v2::Response::new())
+}
+
+pub async fn make_knock(
+    app: AppState,
+    req: Ruma<prepare_knock_event::v1::Request>,
+) -> Result<prepare_knock_event::v1::Response> {
+    let origin = req.origin()?.clone();
+    let fed = app.fed()?;
+    let (version, template) = fed
+        .make_knock(&origin, &req.body.room_id, &req.body.user_id, &req.body.ver)
+        .await
+        .map_err(fed_err)?;
+    Ok(prepare_knock_event::v1::Response::new(
+        version,
+        serde_json::value::to_raw_value(&template).map_err(|e| Error::internal(e.to_string()))?,
+    ))
+}
+
+pub async fn send_knock(
+    app: AppState,
+    req: Ruma<create_knock_event::v1::Request>,
+) -> Result<create_knock_event::v1::Response> {
+    let origin = req.origin()?.clone();
+    let fed = app.fed()?;
+    let raw = tessera_core::canonical::from_str(req.body.pdu.get())?;
+    let stripped = fed
+        .send_knock(&origin, &req.body.room_id, raw)
+        .await
+        .map_err(fed_err)?;
+    let state = stripped
+        .iter()
+        .filter_map(|v| serde_json::from_value(v.clone()).ok())
+        .collect();
+    Ok(create_knock_event::v1::Response::new(state))
 }
 
 pub async fn invite_v2(

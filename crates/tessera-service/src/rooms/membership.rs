@@ -129,6 +129,49 @@ impl Services {
         }
     }
 
+    /// Knock on a room this server is in (join rule `knock` or `knock_restricted`).
+    pub async fn knock_room(
+        &self,
+        room_id: &RoomId,
+        user: &UserId,
+        reason: Option<&str>,
+    ) -> Result<StoredEvent> {
+        let _guard = self.lock_room(room_id).await;
+        let mut ctx = self.room_context(room_id).await?;
+        if !ctx.rules.authorization.knocking {
+            return Err(Error::forbidden(
+                "This room version does not support knocking.",
+            ));
+        }
+        match ctx.membership(user) {
+            Some(MembershipState::Join) => {
+                return Err(Error::forbidden("You are already in this room."));
+            }
+            Some(MembershipState::Invite) => {
+                return Err(Error::forbidden("You are already invited to this room."));
+            }
+            Some(MembershipState::Ban) => {
+                return Err(Error::forbidden("You are banned from this room."));
+            }
+            _ => {}
+        }
+        if !matches!(join_rule(&ctx).as_str(), "knock" | "knock_restricted") {
+            return Err(Error::forbidden("This room does not allow knocking."));
+        }
+        let content = self.member_content_for(user, "knock", reason).await?;
+        self.send_local_event_locked(
+            &mut ctx,
+            LocalEvent::new(
+                room_id.to_owned(),
+                user.to_owned(),
+                TimelineEventType::RoomMember,
+            )
+            .state_key(user.as_str())
+            .content(&content)?,
+        )
+        .await
+    }
+
     /// Whether `user` is joined to one of the rooms named by the restricted join rule.
     pub async fn satisfies_restricted_allow(
         &self,

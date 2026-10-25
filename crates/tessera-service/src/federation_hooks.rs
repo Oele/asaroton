@@ -42,6 +42,14 @@ pub trait FederationHooks: Send + Sync {
         room_id: &RoomId,
         via: &[OwnedServerName],
     ) -> Result<()>;
+    /// Knock on a remote room through one of `via`.
+    async fn remote_knock(
+        &self,
+        user_id: &UserId,
+        room_id: &RoomId,
+        via: &[OwnedServerName],
+        reason: Option<&str>,
+    ) -> Result<()>;
     /// Resolve an alias on its server.
     async fn resolve_alias(
         &self,
@@ -97,6 +105,15 @@ impl FederationHooks for NoFederation {
         Err(disabled())
     }
     async fn remote_leave(&self, _: &UserId, _: &RoomId, _: &[OwnedServerName]) -> Result<()> {
+        Err(disabled())
+    }
+    async fn remote_knock(
+        &self,
+        _: &UserId,
+        _: &RoomId,
+        _: &[OwnedServerName],
+        _: Option<&str>,
+    ) -> Result<()> {
         Err(disabled())
     }
     async fn resolve_alias(&self, _: &RoomAliasId) -> Result<(OwnedRoomId, Vec<OwnedServerName>)> {

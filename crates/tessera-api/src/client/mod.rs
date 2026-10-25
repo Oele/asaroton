@@ -64,6 +64,7 @@ pub fn routes(router: Router<AppState>) -> Router<AppState> {
         rooms::join_by_id_or_alias,
     );
     let r = route::<c::membership::leave_room::v3::Request, _, _>(r, rooms::leave);
+    let r = route::<c::knock::knock_room::v3::Request, _, _>(r, rooms::knock);
     let r = route::<c::membership::forget_room::v3::Request, _, _>(r, rooms::forget);
     let r = route::<c::membership::invite_user::v3::Request, _, _>(r, rooms::invite);
     let r = route::<c::membership::kick_user::v3::Request, _, _>(r, rooms::kick);

@@ -204,6 +204,62 @@ pub async fn join_by_id_or_alias(
     Ok(join_room_by_id_or_alias::v3::Response::new(room_id))
 }
 
+pub async fn knock(
+    services: AppState,
+    req: Ruma<ruma::api::client::knock::knock_room::v3::Request>,
+) -> Result<ruma::api::client::knock::knock_room::v3::Response> {
+    let sender = req.sender()?;
+    let mut via = req.body.via.clone();
+    let room_id: OwnedRoomId = match <&ruma::RoomId>::try_from(req.body.room_id_or_alias.as_str()) {
+        Ok(id) => id.to_owned(),
+        Err(_) => {
+            let alias = <&ruma::RoomAliasId>::try_from(req.body.room_id_or_alias.as_str())
+                .map_err(|_| Error::invalid_param("Invalid room ID or alias."))?;
+            if alias.server_name() == services.server_name() {
+                services
+                    .store
+                    .get_alias(alias)
+                    .await?
+                    .ok_or_else(|| Error::not_found("Room alias not found."))?
+                    .room_id
+            } else {
+                let (room_id, servers) = services.federation().resolve_alias(alias).await?;
+                for s in servers {
+                    if !via.contains(&s) {
+                        via.push(s);
+                    }
+                }
+                room_id
+            }
+        }
+    };
+    let local = services.store.room_exists(&room_id).await?
+        && services
+            .store
+            .members(&room_id, Some("join"))
+            .await?
+            .iter()
+            .any(|m| services.is_local(&m.user_id));
+    if local {
+        services
+            .knock_room(&room_id, &sender.user_id, req.body.reason.as_deref())
+            .await?;
+    } else {
+        if via.is_empty()
+            && let Some(server) = room_id.server_name()
+        {
+            via.push(server.to_owned());
+        }
+        services
+            .federation()
+            .remote_knock(&sender.user_id, &room_id, &via, req.body.reason.as_deref())
+            .await?;
+    }
+    Ok(ruma::api::client::knock::knock_room::v3::Response::new(
+        room_id,
+    ))
+}
+
 pub async fn leave(
     services: AppState,
     req: Ruma<leave_room::v3::Request>,

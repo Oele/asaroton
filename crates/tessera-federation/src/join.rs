@@ -384,6 +384,222 @@ impl Federation {
         Err(last_err)
     }
 
+    // ------------------------------------------------------------------ knocking
+
+    /// Knock on a remote room through one of `via`: `make_knock`, sign, `send_knock`, then
+    /// record the knock and the stripped state locally.
+    pub async fn knock_remote_room(
+        &self,
+        user_id: &UserId,
+        room_id: &RoomId,
+        via: &[OwnedServerName],
+        reason: Option<&str>,
+    ) -> Result<()> {
+        use ruma::api::federation::membership::{create_knock_event, prepare_knock_event};
+        let services = &self.services;
+        let mut last_err = Error::Rejected("knock failed".into());
+        for server in via.iter().filter(|s| **s != services.config.server_name) {
+            let mut mk =
+                prepare_knock_event::v1::Request::new(room_id.to_owned(), user_id.to_owned());
+            mk.ver = tessera_core::SUPPORTED_ROOM_VERSIONS.to_vec();
+            let mk_resp = match self.client.send(server, mk).await {
+                Ok(r) => r,
+                Err(e) => {
+                    last_err = e;
+                    continue;
+                }
+            };
+            let version = mk_resp.room_version;
+            let rules = room_version::rules(&version)?;
+            let template: Value = serde_json::from_str(mk_resp.event.get())?;
+            let depth = template
+                .get("depth")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            let mut content = services
+                .member_content_for(user_id, "knock", reason)
+                .await?;
+            content["membership"] = json!("knock");
+            let knock = PduBuilder::new(user_id.to_owned(), TimelineEventType::RoomMember)
+                .room_id(room_id.to_owned())
+                .state_key(user_id.as_str())
+                .content(&content)?
+                .depth(UInt::try_from(depth).unwrap_or(UInt::MAX))
+                .prev_events(ids_from(template.get("prev_events")))
+                .auth_events(ids_from(template.get("auth_events")))
+                .build(&rules, &services.signing_key, &services.config.server_name)?;
+            let pdu_json = tessera_core::canonical::to_json_value(knock.to_federation_json());
+            let sk = create_knock_event::v1::Request::new(
+                room_id.to_owned(),
+                knock.event_id().to_owned(),
+                serde_json::value::to_raw_value(&pdu_json)?,
+            );
+            match self.client.send(server, sk).await {
+                Ok(resp) => {
+                    if services.store.get_room(room_id).await?.is_none() {
+                        services
+                            .store
+                            .create_room(RoomInfo {
+                                room_id: room_id.to_owned(),
+                                room_version: version.clone(),
+                                creator: None,
+                                is_public: false,
+                                created_ts: now_ts(),
+                            })
+                            .await?;
+                    }
+                    let delta = knock.state_tuple().map(|(t, k)| CurrentStateDelta {
+                        upsert: vec![((t, k.to_owned()), knock.event_id().to_owned())],
+                        remove: vec![],
+                    });
+                    let participating = self.we_are_in_room_pub(room_id).await?;
+                    services
+                        .store
+                        .persist_event(PersistEvent {
+                            pdu: knock.clone(),
+                            state: EventState::Outlier,
+                            soft_failed: false,
+                            backfilled: false,
+                            stream_ordering: None,
+                            current_state_delta: if participating { None } else { delta },
+                            forward_extremities: None,
+                        })
+                        .await?;
+                    let stripped: Vec<Value> = resp
+                        .knock_room_state
+                        .iter()
+                        .filter_map(|s| serde_json::to_value(s).ok())
+                        .collect();
+                    services
+                        .store
+                        .set_invite_state(room_id, user_id, &stripped)
+                        .await?;
+                    services
+                        .notifier
+                        .notify(tessera_service::Notification::User {
+                            user_id: user_id.to_owned(),
+                        });
+                    return Ok(());
+                }
+                Err(e) => last_err = e,
+            }
+        }
+        Err(last_err)
+    }
+
+    /// `make_knock`: a knock template for a remote user.
+    pub async fn make_knock(
+        &self,
+        origin: &ServerName,
+        room_id: &RoomId,
+        user_id: &UserId,
+        versions: &[RoomVersionId],
+    ) -> Result<(RoomVersionId, Value)> {
+        let services = &self.services;
+        if user_id.server_name() != origin {
+            return Err(Error::Rejected(
+                "user is not on the requesting server".into(),
+            ));
+        }
+        let room = services
+            .store
+            .get_room(room_id)
+            .await?
+            .ok_or_else(|| Error::Rejected("unknown room".into()))?;
+        if !versions.is_empty() && !versions.contains(&room.room_version) {
+            return Err(Error::RemoteError {
+                server: origin.to_owned(),
+                status: http::StatusCode::BAD_REQUEST,
+                body: json!({ "errcode": "M_INCOMPATIBLE_ROOM_VERSION", "error": "Your homeserver does not support this room version", "room_version": room.room_version }).to_string(),
+            });
+        }
+        if !self.we_are_in_room_pub(room_id).await? {
+            return Err(Error::Rejected("this server is not in the room".into()));
+        }
+        let ctx = services.room_context(room_id).await?;
+        if !ctx.rules.authorization.knocking {
+            return Err(Error::Rejected(
+                "this room version does not support knocking".into(),
+            ));
+        }
+        let join_rule = ctx
+            .get(StateEventType::RoomJoinRules, "")
+            .and_then(|p| serde_json::from_str::<Value>(p.content().get()).ok())
+            .and_then(|v| {
+                v.get("join_rule")
+                    .and_then(|j| j.as_str())
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| "invite".to_owned());
+        if !matches!(join_rule.as_str(), "knock" | "knock_restricted") {
+            return Err(Error::Rejected("this room does not allow knocking".into()));
+        }
+        match ctx.membership(user_id) {
+            Some(MembershipState::Ban) => return Err(Error::Rejected("user is banned".into())),
+            Some(MembershipState::Join) => {
+                return Err(Error::Rejected("user is already in the room".into()));
+            }
+            _ => {}
+        }
+        let template = self
+            .event_template(
+                &ctx,
+                user_id,
+                TimelineEventType::RoomMember,
+                Some(user_id.as_str()),
+                json!({ "membership": "knock" }),
+            )
+            .await?;
+        Ok((room.room_version, template))
+    }
+
+    /// `send_knock`: accept a signed knock and return the stripped room state.
+    pub async fn send_knock(
+        &self,
+        origin: &ServerName,
+        room_id: &RoomId,
+        raw: CanonicalJsonObject,
+    ) -> Result<Vec<Value>> {
+        let services = &self.services;
+        let room = services
+            .store
+            .get_room(room_id)
+            .await?
+            .ok_or_else(|| Error::Rejected("unknown room".into()))?;
+        let rules = room_version::rules(&room.room_version)?;
+        let pdu = self.parse_and_verify(origin, raw, &rules).await?;
+        let membership = serde_json::from_str::<Value>(pdu.content().get())
+            .ok()
+            .and_then(|c| {
+                c.get("membership")
+                    .and_then(|m| m.as_str())
+                    .map(str::to_owned)
+            });
+        if pdu.event_type() != &TimelineEventType::RoomMember
+            || membership.as_deref() != Some("knock")
+            || pdu.state_key() != Some(pdu.sender().as_str())
+            || pdu.sender().server_name() != origin
+        {
+            return Err(Error::Rejected("not a knock event".into()));
+        }
+        if let (_, crate::receive::Outcome::Rejected(reason)) = self
+            .handle_incoming_pdu(
+                origin,
+                room_id,
+                pdu.to_federation_json_with_id(&rules),
+                false,
+            )
+            .await?
+        {
+            return Err(Error::Rejected(reason));
+        }
+        self.fan_out_accepted(room_id, &pdu, origin).await;
+        services
+            .stripped_state(room_id, None)
+            .await
+            .map_err(Into::into)
+    }
+
     // ------------------------------------------------------------------ outbound invite
 
     /// Send an invite event to the invitee's server; returns the event with their signature.

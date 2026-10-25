@@ -99,6 +99,19 @@ impl FederationHooks for Hooks {
             .map_err(Into::into)
     }
 
+    async fn remote_knock(
+        &self,
+        user_id: &UserId,
+        room_id: &ruma::RoomId,
+        via: &[OwnedServerName],
+        reason: Option<&str>,
+    ) -> tessera_service::Result<()> {
+        self.0
+            .knock_remote_room(user_id, room_id, via, reason)
+            .await
+            .map_err(tessera_service::Error::from)
+    }
+
     async fn resolve_alias(
         &self,
         alias: &RoomAliasId,

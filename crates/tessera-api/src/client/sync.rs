@@ -194,6 +194,13 @@ pub async fn sync(
             json!({ "invite_state": { "events": state } }),
         );
     }
+    let mut knock = Map::new();
+    for (room_id, state) in &result.knock {
+        knock.insert(
+            room_id.to_string(),
+            json!({ "knock_state": { "events": state } }),
+        );
+    }
     let otk: Map<String, Value> = result
         .one_time_key_counts
         .iter()
@@ -201,7 +208,7 @@ pub async fn sync(
         .collect();
     let body = json!({
         "next_batch": result.next_batch.to_string(),
-        "rooms": { "join": join, "leave": leave, "invite": invite, "knock": {} },
+        "rooms": { "join": join, "leave": leave, "invite": invite, "knock": knock },
         "presence": { "events": result.presence },
         "account_data": { "events": result.account_data },
         "to_device": { "events": result.to_device },

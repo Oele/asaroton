@@ -199,6 +199,8 @@ pub struct SyncResult {
     pub leave: BTreeMap<OwnedRoomId, RoomSync>,
     /// Stripped state per invited room.
     pub invite: BTreeMap<OwnedRoomId, Vec<Value>>,
+    /// Stripped state per room the user has knocked on.
+    pub knock: BTreeMap<OwnedRoomId, Vec<Value>>,
     pub account_data: Vec<Value>,
     pub presence: Vec<Value>,
     pub to_device: Vec<Value>,
@@ -324,6 +326,12 @@ impl Services {
                 }
                 MembershipState::Invite if changed_in_window && !ignored.contains(&m.sender) => {
                     out.invite.insert(
+                        m.room_id.clone(),
+                        self.stripped_state(&m.room_id, Some(user)).await?,
+                    );
+                }
+                MembershipState::Knock if changed_in_window => {
+                    out.knock.insert(
                         m.room_id.clone(),
                         self.stripped_state(&m.room_id, Some(user)).await?,
                     );
