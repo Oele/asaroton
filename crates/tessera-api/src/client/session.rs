@@ -13,10 +13,22 @@ use ruma::api::client::{
 
 use crate::{AppState, Error, Result, Ruma};
 
+/// With delegated authentication the service handles these endpoints itself (the reverse
+/// proxy routes them there); reaching us means they are misrouted.
+fn reject_if_delegated(services: &AppState) -> Result<()> {
+    if services.mas.is_some() {
+        return Err(Error::unrecognized(
+            "Logins are handled by the authentication service.",
+        ));
+    }
+    Ok(())
+}
+
 pub async fn login_types(
-    _services: AppState,
+    services: AppState,
     _req: Ruma<get_login_types::v3::Request>,
 ) -> Result<get_login_types::v3::Response> {
+    reject_if_delegated(&services)?;
     Ok(get_login_types::v3::Response::new(vec![
         LoginType::Password(get_login_types::v3::PasswordLoginType::new()),
         LoginType::ApplicationService(get_login_types::v3::ApplicationServiceLoginType::new()),
@@ -27,6 +39,7 @@ pub async fn login(
     services: AppState,
     req: Ruma<login::v3::Request>,
 ) -> Result<login::v3::Response> {
+    reject_if_delegated(&services)?;
     let body = req.body;
     let user_id = match &body.login_info {
         LoginInfo::Password(p) => {

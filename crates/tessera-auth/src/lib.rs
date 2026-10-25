@@ -6,6 +6,7 @@
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod mas;
 pub mod password;
 pub mod token;
 pub mod uia;
@@ -43,6 +44,9 @@ pub enum AuthError {
     Deactivated,
     #[error("storage error: {0}")]
     Store(#[from] tessera_store::Error),
+    /// The authentication service could not be reached.
+    #[error("authentication service unavailable: {0}")]
+    Unavailable(String),
 }
 
 /// Resolves access tokens to senders.
@@ -50,6 +54,8 @@ pub enum AuthError {
 pub struct Authenticator {
     store: DynStore,
     appservices: Vec<AppserviceToken>,
+    /// Delegated authentication: when set, every non-appservice token is introspected.
+    mas: Option<Arc<mas::MasClient>>,
 }
 
 impl std::fmt::Debug for Authenticator {
@@ -63,7 +69,15 @@ impl Authenticator {
         Self {
             store,
             appservices: Vec::new(),
+            mas: None,
         }
+    }
+
+    /// Delegate token validation to Matrix Authentication Service.
+    #[must_use]
+    pub fn with_mas(mut self, mas: Option<Arc<mas::MasClient>>) -> Self {
+        self.mas = mas;
+        self
     }
 
     /// Register appservice tokens: a bearer token equal to an `as_token` authenticates as
@@ -82,6 +96,39 @@ impl Authenticator {
                 device_id: None,
                 is_guest: false,
                 appservice_id: Some(a.id.clone()),
+                token: token.to_owned(),
+            });
+        }
+        if let Some(mas) = &self.mas {
+            let id = mas.introspect(token).await?;
+            let Some(user) = self.store.get_user(&id.user_id).await? else {
+                return Err(AuthError::UnknownToken { soft_logout: false });
+            };
+            if user.is_deactivated {
+                return Err(AuthError::Deactivated);
+            }
+            if let Some(device_id) = &id.device_id {
+                if self
+                    .store
+                    .get_device(&id.user_id, device_id)
+                    .await?
+                    .is_none()
+                {
+                    // The device was removed on the service side: the token is dead.
+                    mas.forget(token);
+                    return Err(AuthError::UnknownToken { soft_logout: false });
+                }
+                let store = Arc::clone(&self.store);
+                let (u, d) = (id.user_id.clone(), device_id.clone());
+                tokio::spawn(async move {
+                    let _ = store.touch_device(&u, &d, None, None).await;
+                });
+            }
+            return Ok(Sender {
+                user_id: id.user_id,
+                device_id: id.device_id,
+                is_guest: false,
+                appservice_id: user.appservice_id,
                 token: token.to_owned(),
             });
         }

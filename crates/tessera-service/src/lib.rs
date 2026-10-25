@@ -48,6 +48,11 @@ pub struct Services {
     pub typing: typing::TypingState,
     pub presence: presence::PresenceMap,
     pub appservices: appservice::AppserviceRegistry,
+    /// The authentication service, when authentication is delegated to it.
+    pub mas: Option<Arc<tessera_auth::mas::MasClient>>,
+    /// Users the authentication service allowed to replace their cross-signing keys without
+    /// further interactive auth, and when.
+    pub cross_signing_reset_allowed: dashmap::DashMap<ruma::OwnedUserId, std::time::Instant>,
     /// Sliding sync connections and what each has been sent.
     pub sliding_sync: sliding_sync::SlidingSyncConnections,
     /// Nonces handed out by the shared-secret registration endpoint.
@@ -74,19 +79,30 @@ impl Services {
         let config = Arc::new(config);
         let appservices =
             appservice::AppserviceRegistry::new(&config.appservices, &config.server_name)?;
-        let auth = Authenticator::new(Arc::clone(&store)).with_appservices(
-            appservices
-                .all()
-                .iter()
-                .map(|a| tessera_auth::AppserviceToken {
-                    token: a.as_token.clone(),
-                    id: a.id.clone(),
-                    user_id: a.sender.clone(),
-                })
-                .collect(),
-        );
+        let mas = config.mas.as_ref().map(|m| {
+            Arc::new(tessera_auth::mas::MasClient::new(
+                &m.endpoint,
+                m.secret.clone(),
+                config.server_name.clone(),
+            ))
+        });
+        let auth = Authenticator::new(Arc::clone(&store))
+            .with_appservices(
+                appservices
+                    .all()
+                    .iter()
+                    .map(|a| tessera_auth::AppserviceToken {
+                        token: a.as_token.clone(),
+                        id: a.id.clone(),
+                        user_id: a.sender.clone(),
+                    })
+                    .collect(),
+            )
+            .with_mas(mas.clone());
         Ok(Arc::new(Self {
             auth,
+            mas,
+            cross_signing_reset_allowed: dashmap::DashMap::new(),
             appservices,
             uia: UiaSessions::default(),
             notifier: Notifier::new(),

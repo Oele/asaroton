@@ -109,6 +109,12 @@ pub async fn register(
 ) -> Result<register::v3::Response> {
     let body = req.body;
 
+    // With delegated authentication only appservices register users here.
+    if services.mas.is_some() && body.login_type != Some(register::LoginType::ApplicationService) {
+        return Err(Error::forbidden(
+            "Registration is handled by the authentication service.",
+        ));
+    }
     // Appservice registration: no UIA, any localpart in the namespace (namespaces come with
     // appservice support in a later phase).
     if body.login_type == Some(register::LoginType::ApplicationService) {
@@ -280,6 +286,11 @@ pub async fn change_password(
     req: Ruma<change_password::v3::Request>,
 ) -> Result<change_password::v3::Response> {
     let sender = req.sender()?;
+    if services.mas.is_some() {
+        return Err(Error::forbidden(
+            "Passwords are managed by the authentication service.",
+        ));
+    }
     uia_for_sender(&services, sender, req.body.auth.as_ref()).await?;
     services
         .change_password(

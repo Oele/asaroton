@@ -342,12 +342,15 @@ impl Federation {
             return Ok(None);
         }
         let current = self.services.store.get_membership(room_id, &target).await?;
+        // Without the room's state we cannot check who may kick; only the user themself or
+        // whoever invited them is trusted to end the invite (knocks: only the user).
         Ok(current
             .filter(|m| {
                 matches!(
                     m.membership,
                     MembershipState::Invite | MembershipState::Knock
-                )
+                ) && (pdu.sender() == target
+                    || (m.membership == MembershipState::Invite && *pdu.sender() == m.sender))
             })
             .map(|_| new_membership))
     }
@@ -1006,6 +1009,7 @@ impl Federation {
         // events are missing or themselves rejected is rejected too.
         fetched.sort_by_key(|p| u64::from(p.depth()));
         for p in fetched {
+            self.warm_cache(p.auth_events()).await?;
             let rejected = self.auth_events_rejected(&p)
                 || p.auth_events()
                     .iter()

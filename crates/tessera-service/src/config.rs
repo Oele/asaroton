@@ -24,6 +24,17 @@ pub struct Config {
     pub server_notices: Option<ServerNotices>,
     /// Application service registrations.
     pub appservices: Vec<crate::appservice::Registration>,
+    /// Delegated authentication (Matrix Authentication Service), when enabled.
+    pub mas: Option<MasSettings>,
+}
+
+/// Matrix Authentication Service connection.
+#[derive(Clone, Debug)]
+pub struct MasSettings {
+    /// Base URL where the service can be reached.
+    pub endpoint: String,
+    /// Shared secret: we present it for introspection, the service presents it to us.
+    pub secret: String,
 }
 
 /// Server notices settings.

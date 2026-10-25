@@ -3263,6 +3263,7 @@ dependencies = [
  "async-trait",
  "dashmap",
  "rand 0.9.5",
+ "reqwest",
  "ruma",
  "serde",
  "serde_json",

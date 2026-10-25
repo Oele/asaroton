@@ -93,6 +93,7 @@ fn service_status(e: &tessera_service::Error) -> StatusCode {
             tessera_auth::AuthError::UnknownToken { .. } | tessera_auth::AuthError::Expired,
         ) => StatusCode::UNAUTHORIZED,
         S::Auth(tessera_auth::AuthError::Deactivated) => StatusCode::FORBIDDEN,
+        S::Auth(tessera_auth::AuthError::Unavailable(_)) => StatusCode::SERVICE_UNAVAILABLE,
         S::Store(tessera_store::Error::NotFound(_)) => StatusCode::NOT_FOUND,
         S::Core(
             tessera_core::Error::UnsupportedRoomVersion(_)
@@ -153,6 +154,11 @@ impl Error {
                 ErrorKind::UserDeactivated,
                 "This account has been deactivated.".to_owned(),
                 StatusCode::FORBIDDEN,
+            ),
+            Self::Service(S::Auth(tessera_auth::AuthError::Unavailable(m))) => (
+                ErrorKind::Unknown,
+                format!("Unable to validate the access token: {m}"),
+                StatusCode::SERVICE_UNAVAILABLE,
             ),
             Self::Service(S::Store(tessera_store::Error::NotFound(what))) => (
                 ErrorKind::NotFound,

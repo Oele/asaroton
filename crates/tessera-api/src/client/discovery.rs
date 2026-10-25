@@ -23,8 +23,9 @@ pub async fn versions(
     resp.unstable_features = BTreeMap::from([
         // Simplified Sliding Sync (MSC4186).
         ("org.matrix.simplified_msc3575".to_owned(), true),
+        // OAuth 2.0 API (MSC2965 discovery), when authentication is delegated.
+        ("org.matrix.msc2965".to_owned(), services.mas.is_some()),
     ]);
-    let _ = &services;
     Ok(resp)
 }
 
@@ -44,7 +45,7 @@ pub fn capabilities(
                 "default": services.config.default_room_version,
                 "available": available,
             },
-            "m.change_password": { "enabled": true },
+            "m.change_password": { "enabled": services.mas.is_none() },
             "m.set_displayname": { "enabled": true },
             "m.set_avatar_url": { "enabled": true },
             "m.3pid_changes": { "enabled": false },
@@ -58,7 +59,19 @@ pub fn capabilities(
 }
 
 pub async fn well_known_client(State(services): State<AppState>) -> Json<serde_json::Value> {
-    Json(serde_json::json!({
+    let mut body = serde_json::json!({
         "m.homeserver": { "base_url": services.config.public_base_url }
-    }))
+    });
+    // Delegated authentication: point clients at the issuer (MSC2965).
+    if let Some(mas) = &services.mas
+        && let Ok(meta) = mas.metadata().await
+        && let Some(issuer) = meta.get("issuer")
+    {
+        let mut auth = serde_json::json!({ "issuer": issuer });
+        if let Some(account) = meta.get("account_management_uri") {
+            auth["account"] = account.clone();
+        }
+        body["org.matrix.msc2965.authentication"] = auth;
+    }
+    Json(body)
 }

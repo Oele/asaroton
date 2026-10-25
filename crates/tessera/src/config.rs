@@ -35,6 +35,9 @@ pub struct Config {
     pub appservices: AppservicesConfig,
     #[serde(default)]
     pub rooms: RoomsConfig,
+    /// Delegate authentication to Matrix Authentication Service (MSC3861).
+    #[serde(default)]
+    pub mas: MasConfig,
     #[serde(default)]
     pub logging: LoggingConfig,
     /// Admin API tokens etc. (reserved for later phases).
@@ -245,6 +248,26 @@ fn default_notices_localpart() -> String {
 
 fn default_notices_name() -> String {
     "Server Notices".to_owned()
+}
+
+/// Matrix Authentication Service integration. When enabled, logins, registration and
+/// password changes are handled by the service; this server validates its tokens.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MasConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Base URL of the service, as reachable from this server.
+    #[serde(default = "default_mas_endpoint")]
+    pub endpoint: String,
+    /// Shared secret (`matrix.secret` in the service's configuration).
+    pub secret: Option<String>,
+    /// File holding the shared secret, as an alternative to `secret`.
+    pub secret_file: Option<PathBuf>,
+}
+
+fn default_mas_endpoint() -> String {
+    "http://localhost:8080".to_owned()
 }
 
 /// Where application service registration files live.

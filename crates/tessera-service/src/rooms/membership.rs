@@ -195,7 +195,16 @@ impl Services {
             let Ok(other) = OwnedRoomId::try_from(other) else {
                 continue;
             };
-            if let Some(m) = self.store.get_membership(&other, user).await?
+            // Our view of a room we are no longer in may be stale: only rooms with a local
+            // member still count.
+            let we_are_in = self
+                .store
+                .members(&other, Some("join"))
+                .await?
+                .iter()
+                .any(|m| self.is_local(&m.user_id));
+            if we_are_in
+                && let Some(m) = self.store.get_membership(&other, user).await?
                 && m.membership == MembershipState::Join
             {
                 return Ok(true);

@@ -65,7 +65,30 @@ fn service_config(config: &Config) -> anyhow::Result<tessera_service::Config> {
                 display_name: config.server_notices.display_name.clone(),
             }
         }),
+        mas: mas_settings(config)?,
     })
+}
+
+fn mas_settings(config: &Config) -> anyhow::Result<Option<tessera_service::config::MasSettings>> {
+    if !config.mas.enabled {
+        return Ok(None);
+    }
+    let secret = match (&config.mas.secret, &config.mas.secret_file) {
+        (Some(s), None) => s.clone(),
+        (None, Some(path)) => std::fs::read_to_string(path)
+            .map_err(|e| anyhow::anyhow!("reading mas.secret_file {}: {e}", path.display()))?
+            .trim()
+            .to_owned(),
+        (Some(_), Some(_)) => anyhow::bail!("set either mas.secret or mas.secret_file, not both"),
+        (None, None) => anyhow::bail!("mas.enabled requires mas.secret or mas.secret_file"),
+    };
+    if secret.is_empty() {
+        anyhow::bail!("the MAS shared secret is empty");
+    }
+    Ok(Some(tessera_service::config::MasSettings {
+        endpoint: config.mas.endpoint.clone(),
+        secret,
+    }))
 }
 
 fn federation_config(config: &Config) -> FederationConfig {

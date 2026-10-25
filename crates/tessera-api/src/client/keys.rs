@@ -260,7 +260,19 @@ pub async fn upload_signing(
         .get_cross_signing_key(&sender.user_id, "master")
         .await?
         .is_some();
-    if has_existing {
+    if has_existing && services.mas.is_some() {
+        // The authentication service re-authenticates the user and tells us when a reset is
+        // allowed; the permission is good for a few minutes.
+        let allowed = services
+            .cross_signing_reset_allowed
+            .remove(&sender.user_id)
+            .is_some_and(|(_, at)| at.elapsed() < std::time::Duration::from_secs(600));
+        if !allowed {
+            return Err(Error::forbidden(
+                "Cross-signing key reset must be approved through the account management page.",
+            ));
+        }
+    } else if has_existing {
         let flows = vec![AuthFlow::new(vec![AuthType::Password])];
         let outcome = services
             .uia

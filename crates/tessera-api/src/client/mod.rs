@@ -4,6 +4,7 @@ pub mod account;
 pub mod backup;
 pub mod discovery;
 pub mod keys;
+pub mod mas;
 pub mod media;
 pub mod misc;
 pub mod push;
@@ -265,7 +266,53 @@ pub fn routes(router: Router<AppState>) -> Router<AppState> {
         .route(
             "/_matrix/client/unstable/org.matrix.simplified_msc3575/sync",
             axum::routing::post(sliding_sync_handler),
-        );
+        )
+        // Matrix Authentication Service: discovery for clients, management API for MAS.
+        .route(
+            "/_matrix/client/v1/auth_metadata",
+            axum::routing::get(mas::auth_metadata),
+        )
+        .route(
+            "/_matrix/client/unstable/org.matrix.msc2965/auth_metadata",
+            axum::routing::get(mas::auth_metadata),
+        )
+        .route(
+            "/_matrix/client/unstable/org.matrix.msc2965/auth_issuer",
+            axum::routing::get(mas::auth_issuer),
+        )
+        .route("/_synapse/mas/query_user", axum::routing::get(mas::query_user))
+        .route(
+            "/_synapse/mas/is_localpart_available",
+            axum::routing::get(mas::is_localpart_available),
+        )
+        .route(
+            "/_synapse/mas/provision_user",
+            axum::routing::post(mas::provision_user),
+        )
+        .route("/_synapse/mas/delete_user", axum::routing::post(mas::delete_user))
+        .route(
+            "/_synapse/mas/reactivate_user",
+            axum::routing::post(mas::reactivate_user),
+        )
+        .route(
+            "/_synapse/mas/set_displayname",
+            axum::routing::post(mas::set_displayname),
+        )
+        .route(
+            "/_synapse/mas/unset_displayname",
+            axum::routing::post(mas::unset_displayname),
+        )
+        .route(
+            "/_synapse/mas/allow_cross_signing_reset",
+            axum::routing::post(mas::allow_cross_signing_reset),
+        )
+        .route("/_synapse/mas/upsert_device", axum::routing::post(mas::upsert_device))
+        .route("/_synapse/mas/delete_device", axum::routing::post(mas::delete_device))
+        .route(
+            "/_synapse/mas/update_device_display_name",
+            axum::routing::post(mas::update_device_display_name),
+        )
+        .route("/_synapse/mas/sync_devices", axum::routing::post(mas::sync_devices));
     let r = route::<c::voip::get_turn_server_info::v3::Request, _, _>(r, misc::turn_server);
     // media
     #[allow(deprecated)]
