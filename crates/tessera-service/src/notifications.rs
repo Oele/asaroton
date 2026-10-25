@@ -97,40 +97,7 @@ impl Services {
             return Ok(out);
         }
 
-        // Push rule context.
-        let ctx = self.room_context(room_id).await?;
-        let joined = self.store.members(room_id, Some("join")).await?;
-        let display_name = ctx
-            .get(StateEventType::RoomMember, user.as_str())
-            .and_then(|p| serde_json::from_str::<Value>(p.content().get()).ok())
-            .and_then(|c| {
-                c.get("displayname")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-            })
-            .unwrap_or_else(|| user.localpart().to_owned());
-        let mut push_ctx = PushConditionRoomCtx::new(
-            room_id.to_owned(),
-            ruma::UInt::try_from(joined.len()).unwrap_or(ruma::UInt::MAX),
-            user.to_owned(),
-            display_name,
-        );
-        if let Some(pl) = ctx.get(StateEventType::RoomPowerLevels, "")
-            && let Ok(content) = serde_json::from_str::<
-                ruma::events::room::power_levels::RoomPowerLevelsEventContent,
-            >(pl.content().get())
-        {
-            push_ctx.power_levels = Some(PushConditionPowerLevelsCtx::new(
-                content.users,
-                content.users_default,
-                content.notifications,
-                RoomPowerLevelsRules::new(
-                    &ctx.rules.authorization,
-                    crate::rooms::power::creators(&ctx.state, &ctx.rules),
-                ),
-            ));
-        }
-        let ruleset = self.push_rules(user).await?;
+        let (ruleset, push_ctx) = self.push_rule_context(room_id, user).await?;
 
         for ev in events {
             if ev.pdu.sender() == user {
@@ -179,5 +146,71 @@ impl Services {
             }
         }
         Ok(out)
+    }
+}
+
+impl Services {
+    /// The user's push ruleset and the room context push conditions are evaluated against.
+    pub async fn push_rule_context(
+        &self,
+        room_id: &RoomId,
+        user: &UserId,
+    ) -> Result<(ruma::push::Ruleset, PushConditionRoomCtx)> {
+        let ctx = self.room_context(room_id).await?;
+        let joined = self.store.members(room_id, Some("join")).await?;
+        let display_name = ctx
+            .get(StateEventType::RoomMember, user.as_str())
+            .and_then(|p| serde_json::from_str::<Value>(p.content().get()).ok())
+            .and_then(|c| {
+                c.get("displayname")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| user.localpart().to_owned());
+        let mut push_ctx = PushConditionRoomCtx::new(
+            room_id.to_owned(),
+            ruma::UInt::try_from(joined.len()).unwrap_or(ruma::UInt::MAX),
+            user.to_owned(),
+            display_name,
+        );
+        if let Some(pl) = ctx.get(StateEventType::RoomPowerLevels, "")
+            && let Ok(content) = serde_json::from_str::<
+                ruma::events::room::power_levels::RoomPowerLevelsEventContent,
+            >(pl.content().get())
+        {
+            push_ctx.power_levels = Some(PushConditionPowerLevelsCtx::new(
+                content.users,
+                content.users_default,
+                content.notifications,
+                RoomPowerLevelsRules::new(
+                    &ctx.rules.authorization,
+                    crate::rooms::power::creators(&ctx.state, &ctx.rules),
+                ),
+            ));
+        }
+        let ruleset = self.push_rules(user).await?;
+        Ok((ruleset, push_ctx))
+    }
+
+    /// Evaluate the user's push rules for one event: `None` when it does not notify,
+    /// otherwise whether it is a highlight.
+    pub async fn push_actions_for(
+        &self,
+        ruleset: &ruma::push::Ruleset,
+        push_ctx: &PushConditionRoomCtx,
+        ev: &tessera_store::StoredEvent,
+    ) -> Option<bool> {
+        let raw = serde_json::value::to_raw_value(&ev.pdu.to_client_json()).ok()?;
+        let raw: Raw<Value> = Raw::from_json(raw);
+        let actions = ruleset.get_actions(&raw, push_ctx).await;
+        if !actions.iter().any(|a| matches!(a, Action::Notify)) {
+            return None;
+        }
+        Some(actions.iter().any(|a| {
+            matches!(
+                a,
+                Action::SetTweak(Tweak::Highlight(HighlightTweakValue::Yes))
+            )
+        }))
     }
 }

@@ -19,6 +19,7 @@ pub mod hooks;
 pub mod inbound;
 pub mod join;
 pub mod keys;
+pub mod push;
 pub mod receive;
 pub mod sender;
 pub mod url_preview;
@@ -81,6 +82,7 @@ impl Federation {
         let _ = fed.weak_self.set(Arc::downgrade(&fed));
         sender::start(Arc::clone(&fed));
         appservice::start(&fed);
+        push::start(&fed);
         // Keep the event cache bounded.
         let cache_owner = Arc::clone(&fed);
         tokio::spawn(async move {
