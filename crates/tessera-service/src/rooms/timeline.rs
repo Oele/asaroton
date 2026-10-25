@@ -260,21 +260,28 @@ impl Services {
             return Err(Error::forbidden("You are not allowed to read this room."));
         }
         let limit = limit.clamp(1, 1000);
+        // A token `s{N}` is the position just after event N: backwards pagination starts
+        // with N itself, forwards with N + 1 (the store's ranges are exclusive of `from`).
         let from = match (from, direction) {
             (Some(t), _) => t,
-            (None, Direction::Backwards) => {
-                StreamToken(self.store.max_stream_ordering().await? + 1)
-            }
+            (None, Direction::Backwards) => StreamToken(self.store.max_stream_ordering().await?),
             (None, Direction::Forwards) => StreamToken(i64::MIN + 1),
         };
+        let to = to.map(|t| match direction {
+            Direction::Backwards => t.0 + 1,
+            Direction::Forwards => t.0,
+        });
         let mut events: Vec<StoredEvent> = Vec::new();
-        let mut cursor = from;
+        let mut cursor = match direction {
+            Direction::Backwards => StreamToken(from.0 + 1),
+            Direction::Forwards => from,
+        };
         let mut exhausted = false;
         let mut backfills = 0;
         for _ in 0..20 {
             let batch = self
                 .store
-                .room_events_in_range(room_id, cursor.0, to.map(|t| t.0), direction, limit)
+                .room_events_in_range(room_id, cursor.0, to, direction, limit)
                 .await?;
             let batch_len = batch.len();
             if let Some(last) = batch.last() {
@@ -307,13 +314,18 @@ impl Services {
         }
         let truncated = events.len() > limit;
         events.truncate(limit);
-        let end = if truncated {
-            events.last().map(|e| StreamToken(e.stream_ordering))
-        } else if exhausted {
-            None
+        // `end` is always given (as the reference implementation does); at the edge of the
+        // room's history the next page simply comes back empty.
+        let _ = exhausted;
+        let last = if truncated {
+            events.last().map_or(cursor.0, |e| e.stream_ordering)
         } else {
-            Some(cursor)
+            cursor.0
         };
+        let end = Some(match direction {
+            Direction::Backwards => StreamToken(last - 1),
+            Direction::Forwards => StreamToken(last),
+        });
         Ok(TimelinePage {
             events,
             start: from,
@@ -362,7 +374,8 @@ impl Services {
         let start = StreamToken(
             before
                 .last()
-                .map_or(ev.stream_ordering, |e| e.stream_ordering),
+                .map_or(ev.stream_ordering, |e| e.stream_ordering)
+                - 1,
         );
         let end = StreamToken(
             after

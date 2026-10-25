@@ -34,24 +34,25 @@ impl Services {
         // The target must exist in this room and be visible.
         self.get_room_event(room_id, user, event_id).await?;
         let limit = limit.clamp(1, 1000);
+        // Tokens are positions after an event (see `Services::messages`).
+        let (from_pos, to_pos) = match direction {
+            Direction::Backwards => (from.map(|t| t.0 + 1), to.map(|t| t.0 + 1)),
+            Direction::Forwards => (from.map(|t| t.0), to.map(|t| t.0)),
+        };
         let events = self
             .store
             .relations(
-                room_id,
-                event_id,
-                rel_type,
-                event_type,
-                recurse,
-                from.map(|t| t.0),
-                to.map(|t| t.0),
-                direction,
+                room_id, event_id, rel_type, event_type, recurse, from_pos, to_pos, direction,
                 limit,
             )
             .await?;
         let next_batch = if events.len() < limit {
             None
         } else {
-            events.last().map(|e| StreamToken(e.stream_ordering))
+            events.last().map(|e| match direction {
+                Direction::Backwards => StreamToken(e.stream_ordering - 1),
+                Direction::Forwards => StreamToken(e.stream_ordering),
+            })
         };
         let prev_batch = from;
         Ok(RelationsPage {
@@ -200,6 +201,17 @@ impl Services {
         for e in events {
             out.push(self.client_event(e, user).await?);
         }
+        for (v, e) in out.iter_mut().zip(events) {
+            if let Some((ty, key)) = e.pdu.state_tuple()
+                && let Some(prev) = self.previous_state_content(e, &ty, key).await?
+                && let Some(u) = v
+                    .as_object_mut()
+                    .and_then(|o| o.get_mut("unsigned"))
+                    .and_then(Value::as_object_mut)
+            {
+                u.insert("prev_content".into(), prev);
+            }
+        }
         if let Some(user) = user {
             for (v, m) in out
                 .iter_mut()
@@ -215,5 +227,34 @@ impl Services {
             }
         }
         Ok(out)
+    }
+}
+
+impl Services {
+    /// Content of the state event `ev` replaced, if any (`unsigned.prev_content`).
+    async fn previous_state_content(
+        &self,
+        ev: &StoredEvent,
+        ty: &ruma::events::StateEventType,
+        key: &str,
+    ) -> Result<Option<Value>> {
+        let Some(group) = self.store.state_group_before(ev.event_id()).await? else {
+            return Ok(None);
+        };
+        let prev_id = self
+            .store
+            .state_at_group(group)
+            .await?
+            .into_iter()
+            .find(|e| e.event_type == *ty && e.state_key == key)
+            .map(|e| e.event_id);
+        let Some(prev_id) = prev_id else {
+            return Ok(None);
+        };
+        Ok(self
+            .store
+            .get_event(&prev_id)
+            .await?
+            .and_then(|p| serde_json::from_str(p.pdu.content().get()).ok()))
     }
 }

@@ -18,7 +18,7 @@ use ruma::{
     events::room::member::MembershipState,
     serde::Raw,
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 use tessera_service::rooms::{create::CreateRoomRequest, timeline::StreamToken};
 use tessera_store::{Direction, StoredEvent};
 
@@ -1244,18 +1244,13 @@ pub async fn report_user(
     Ok(ruma::api::client::reporting::report_user::v3::Response::new())
 }
 
-pub async fn search(
-    services: AppState,
-    req: Ruma<search::search_events::v3::Request>,
-) -> Result<search::search_events::v3::Response> {
-    use search::search_events::v3::{
-        EventContextResult, OrderBy, ResultCategories, ResultRoomEvents, SearchResult, UserProfile,
-    };
+pub fn search_request(
+    req: &Ruma<search::search_events::v3::Request>,
+) -> Result<Option<(tessera_service::rooms::search::SearchRequest, bool)>> {
+    use search::search_events::v3::OrderBy;
     use tessera_service::rooms::search::SearchRequest;
-    let sender = req.sender()?;
-    let mut categories = ResultCategories::new();
     let Some(c) = &req.body.search_categories.room_events else {
-        return Ok(search::search_events::v3::Response::new(categories));
+        return Ok(None);
     };
     let offset = match req.body.next_batch.as_deref() {
         Some(t) => t
@@ -1263,63 +1258,78 @@ pub async fn search(
             .map_err(|_| Error::invalid_param("Invalid next_batch token."))?,
         None => 0,
     };
-    let page = services
-        .search(
-            &sender.user_id,
-            SearchRequest {
-                term: c.search_term.clone(),
-                rooms: c.filter.rooms.clone(),
-                not_rooms: c.filter.not_rooms.clone(),
-                senders: c.filter.senders.clone(),
-                not_senders: c.filter.not_senders.clone(),
-                types: c.filter.types.clone(),
-                not_types: c.filter.not_types.clone(),
-                order_recent: matches!(c.order_by, Some(OrderBy::Recent)),
-                before_limit: usize::try_from(u64::from(c.event_context.before_limit)).unwrap_or(5),
-                after_limit: usize::try_from(u64::from(c.event_context.after_limit)).unwrap_or(5),
-                include_profile: c.event_context.include_profile,
-                offset,
-                limit: c
-                    .filter
-                    .limit
-                    .map_or(10, |l| usize::try_from(u64::from(l)).unwrap_or(10)),
-            },
-        )
-        .await?;
+    Ok(Some((
+        SearchRequest {
+            term: c.search_term.clone(),
+            rooms: c.filter.rooms.clone(),
+            not_rooms: c.filter.not_rooms.clone(),
+            senders: c.filter.senders.clone(),
+            not_senders: c.filter.not_senders.clone(),
+            types: c.filter.types.clone(),
+            not_types: c.filter.not_types.clone(),
+            order_recent: matches!(c.order_by, Some(OrderBy::Recent)),
+            before_limit: usize::try_from(u64::from(c.event_context.before_limit)).unwrap_or(5),
+            after_limit: usize::try_from(u64::from(c.event_context.after_limit)).unwrap_or(5),
+            include_profile: c.event_context.include_profile,
+            offset,
+            limit: c
+                .filter
+                .limit
+                .map_or(10, |l| usize::try_from(u64::from(l)).unwrap_or(10)),
+        },
+        c.include_state.unwrap_or(false),
+    )))
+}
+
+/// `/search`, rendered as explicit JSON so `results` and `count` are always present.
+pub async fn search(
+    services: AppState,
+    req: Ruma<search::search_events::v3::Request>,
+) -> Result<axum::response::Response> {
+    use axum::response::IntoResponse;
+    let sender = req.sender()?;
+    let Some((request, _include_state)) = search_request(&req)? else {
+        return Ok(axum::Json(json!({ "search_categories": {} })).into_response());
+    };
+    let page = services.search(&sender.user_id, request).await?;
     let user = Some(&*sender.user_id);
-    let mut room_events = ResultRoomEvents::new();
-    room_events.count = Some(ruma::UInt::try_from(page.count).unwrap_or(ruma::UInt::MAX));
-    room_events.next_batch = page.next_offset.map(|o| o.to_string());
+    let mut results = Vec::with_capacity(page.results.len());
     for r in &page.results {
-        let mut sr = SearchResult::new();
-        sr.rank = Some(r.rank);
-        sr.result = Some(raw(&services.client_event(&r.event, user).await?)?);
-        let mut ctx = EventContextResult::new();
-        ctx.events_before = services
-            .client_events(&r.before, user)
-            .await?
-            .iter()
-            .map(raw)
-            .collect::<Result<Vec<_>>>()?;
-        ctx.events_after = services
-            .client_events(&r.after, user)
-            .await?
-            .iter()
-            .map(raw)
-            .collect::<Result<Vec<_>>>()?;
-        ctx.start = Some(r.start.to_string());
-        ctx.end = Some(r.end.to_string());
+        let mut profile_info = serde_json::Map::new();
         for (u, name, avatar) in &r.profiles {
-            let mut p = UserProfile::new();
-            p.displayname.clone_from(name);
-            p.avatar_url = avatar.as_deref().map(ruma::OwnedMxcUri::from);
-            ctx.profile_info.insert(u.clone(), p);
+            let mut p = serde_json::Map::new();
+            if let Some(n) = name {
+                p.insert("displayname".into(), json!(n));
+            }
+            if let Some(a) = avatar {
+                p.insert("avatar_url".into(), json!(a));
+            }
+            profile_info.insert(u.to_string(), Value::Object(p));
         }
-        sr.context = ctx;
-        room_events.results.push(sr);
+        results.push(json!({
+            "rank": r.rank,
+            "result": services.client_event(&r.event, user).await?,
+            "context": {
+                "events_before": services.client_events(&r.before, user).await?,
+                "events_after": services.client_events(&r.after, user).await?,
+                "start": r.start.to_string(),
+                "end": r.end.to_string(),
+                "profile_info": profile_info,
+            },
+        }));
     }
-    categories.room_events = room_events;
-    Ok(search::search_events::v3::Response::new(categories))
+    let mut room_events = json!({
+        "count": page.count,
+        "results": results,
+        "highlights": [],
+    });
+    if let Some(o) = page.next_offset {
+        room_events["next_batch"] = json!(o.to_string());
+    }
+    let mut resp =
+        axum::Json(json!({ "search_categories": { "room_events": room_events } })).into_response();
+    crate::extract::add_cors(resp.headers_mut());
+    Ok(resp)
 }
 
 /// `unsigned.transaction_id` for events the requesting device sent itself.

@@ -130,7 +130,14 @@ pub fn routes(router: Router<AppState>) -> Router<AppState> {
     let r = route::<c::room::report_content::v3::Request, _, _>(r, rooms::report_event);
     let r = route::<c::room::report_room::v3::Request, _, _>(r, rooms::report_room);
     let r = route::<c::reporting::report_user::v3::Request, _, _>(r, rooms::report_user);
-    let r = route::<c::search::search_events::v3::Request, _, _>(r, rooms::search);
+    let r = r.route(
+        "/_matrix/client/v3/search",
+        axum::routing::post(search_handler),
+    );
+    let r = r.route(
+        "/_matrix/client/r0/search",
+        axum::routing::post(search_handler),
+    );
     // aliases & directory
     let r = route::<c::alias::create_alias::v3::Request, _, _>(r, rooms::create_alias);
     let r = route::<c::alias::get_alias::v3::Request, _, _>(r, rooms::get_alias);
@@ -304,6 +311,17 @@ async fn messages_handler(
     };
     match rooms::messages(state, ruma).await {
         Ok(resp) => crate::extract::RumaResponse(resp).into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn search_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    req: crate::Ruma<ruma::api::client::search::search_events::v3::Request>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    match rooms::search(state, req).await {
+        Ok(resp) => resp,
         Err(e) => e.into_response(),
     }
 }

@@ -60,9 +60,13 @@ impl AccountDataStore for PostgresStore {
     }
 
     async fn max_account_data_stream_id(&self) -> Result<i64> {
-        let row = sqlx::query("SELECT COALESCE(MAX(stream_id), 0) FROM account_data")
-            .fetch_one(&self.pool)
-            .await?;
+        // Push rules draw from the same sequence but live in their own table.
+        let row = sqlx::query(
+            "SELECT GREATEST((SELECT COALESCE(MAX(stream_id), 0) FROM account_data),
+                             (SELECT COALESCE(MAX(stream_id), 0) FROM push_rules))",
+        )
+        .fetch_one(&self.pool)
+        .await?;
         Ok(row.get::<i64, _>(0))
     }
 

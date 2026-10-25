@@ -169,6 +169,40 @@ impl Federation {
                 pdu.sender()
             )));
         }
+        // A kick, ban or rejection of a local user who was only invited (or knocked): we hold
+        // no room state to authorise it against, so, like the reference implementation, it is
+        // stored as an outlier that just updates that user's membership.
+        if !self.we_are_in_room(room_id).await?
+            && let Some(new_membership) = self.invited_local_user_leaving(room_id, &pdu).await?
+        {
+            let (ty, key) = pdu.state_tuple().map_or_else(
+                || (ruma::events::StateEventType::RoomMember, String::new()),
+                |(t, k)| (t, k.to_owned()),
+            );
+            services
+                .store
+                .persist_event(PersistEvent {
+                    pdu: pdu.clone(),
+                    state: EventState::Outlier,
+                    soft_failed: false,
+                    backfilled: false,
+                    stream_ordering: None,
+                    current_state_delta: Some(tessera_store::CurrentStateDelta {
+                        upsert: vec![((ty, key.clone()), pdu.event_id().to_owned())],
+                        remove: vec![],
+                    }),
+                    forward_extremities: None,
+                })
+                .await?;
+            if let Ok(user) = ruma::OwnedUserId::try_from(key.as_str()) {
+                let _ = services.store.delete_invite_state(room_id, &user).await;
+                services
+                    .notifier
+                    .notify(Notification::User { user_id: user });
+            }
+            tracing::debug!(event_id = %pdu.event_id(), %new_membership, "stored membership change for invited user");
+            return Ok((pdu.event_id().to_owned(), Outcome::Accepted));
+        }
         // A user we invited (or who knocked) may still leave after our last member left.
         let membership_change_of_known_user = pdu.event_type()
             == &ruma::events::TimelineEventType::RoomMember
@@ -246,6 +280,49 @@ impl Federation {
         }
     }
 
+    /// If `pdu` sets a local, currently invited or knocking user to leave/ban, the new
+    /// membership.
+    async fn invited_local_user_leaving(
+        &self,
+        room_id: &RoomId,
+        pdu: &Pdu,
+    ) -> Result<Option<String>> {
+        if pdu.event_type() != &ruma::events::TimelineEventType::RoomMember {
+            return Ok(None);
+        }
+        let Some(target) = pdu
+            .state_key()
+            .and_then(|k| ruma::OwnedUserId::try_from(k).ok())
+        else {
+            return Ok(None);
+        };
+        if !self.services.is_local(&target) {
+            return Ok(None);
+        }
+        let new_membership = serde_json::from_str::<Value>(pdu.content().get())
+            .ok()
+            .and_then(|c| {
+                c.get("membership")
+                    .and_then(|m| m.as_str())
+                    .map(str::to_owned)
+            });
+        let Some(new_membership) = new_membership else {
+            return Ok(None);
+        };
+        if new_membership != "leave" && new_membership != "ban" {
+            return Ok(None);
+        }
+        let current = self.services.store.get_membership(room_id, &target).await?;
+        Ok(current
+            .filter(|m| {
+                matches!(
+                    m.membership,
+                    MembershipState::Invite | MembershipState::Knock
+                )
+            })
+            .map(|_| new_membership))
+    }
+
     async fn we_are_in_room(&self, room_id: &RoomId) -> Result<bool> {
         let members = self.services.store.members(room_id, Some("join")).await?;
         Ok(members.iter().any(|m| self.services.is_local(&m.user_id)))
@@ -299,6 +376,12 @@ impl Federation {
             rejected_reason = Some(e.to_string());
         } else if self.auth_events_rejected(&pdu) {
             rejected_reason = Some("event references a rejected auth event".into());
+        } else if pdu
+            .auth_events()
+            .iter()
+            .any(|id| self.cached_event(id).is_none())
+        {
+            tracing::warn!(event_id = %pdu.event_id(), "auth event missing from cache after fetch");
         } else if let Err(e) =
             auth::check_against_auth_events(&pdu, rules, |id| self.cached_event(id))
         {
@@ -577,6 +660,7 @@ impl Federation {
             }
             let rejected = self.auth_events_rejected(&p)
                 || auth::check_against_auth_events(&p, rules, |i| self.cached_event(i)).is_err();
+            tracing::info!(event_id = %p.event_id(), rejected, auth = ?p.auth_events(), "auth chain event");
             let stored = p.with_rejected(rejected);
             if let Err(e) = self
                 .services

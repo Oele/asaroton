@@ -542,7 +542,7 @@ impl Services {
         room.limited = limited || newly_joined || gap;
         if let Some(first) = events.first() {
             room.prev_batch =
-                Some(super::rooms::timeline::StreamToken(first.stream_ordering).to_string());
+                Some(super::rooms::timeline::StreamToken(first.stream_ordering - 1).to_string());
         }
         if let Some(device_id) = &req.device_id {
             for ev in &events {

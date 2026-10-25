@@ -24,20 +24,24 @@ impl Services {
             return;
         };
         for room_id in rooms {
-            let Ok(content) = self.member_content_for(user_id, "join", None).await else {
-                continue;
-            };
-            if let Err(e) = self
-                .send_state(
-                    &room_id,
-                    user_id,
-                    "m.room.member",
-                    user_id.as_str(),
-                    content,
+            // Sent directly: the membership logic treats a join of an already joined user as
+            // idempotent and would return the existing event.
+            let result = async {
+                let content = self.member_content_for(user_id, "join", None).await?;
+                let _guard = self.lock_room(&room_id).await;
+                let mut ctx = self.room_context(&room_id).await?;
+                let ev = crate::rooms::LocalEvent::new(
+                    room_id.clone(),
+                    user_id.to_owned(),
+                    ruma::events::TimelineEventType::RoomMember,
                 )
-                .await
-            {
-                tracing::debug!(%room_id, error = %e, "profile propagation failed");
+                .state_key(user_id.as_str())
+                .content(&content)?;
+                self.send_local_event_locked(&mut ctx, ev).await
+            }
+            .await;
+            if let Err(e) = result {
+                tracing::warn!(%room_id, error = %e, "profile propagation failed");
             }
         }
     }
