@@ -6,10 +6,10 @@ saturated). The database had grown through many earlier runs, so the numbers are
 
 | Scenario (100 users, 10 shared rooms, 48 client threads) | 2026-10-25 | 2026-10-26 |
 |---|---|---|
-| Sends | 177 msg/s; p50 67 ms, p95 140 ms | 303 msg/s; p50 47 ms, p95 123 ms |
-| Incremental sync under that load | p50 544 ms, p95 724 ms | p50 287 ms, p95 456 ms |
-| Initial sync under that load | p50 914 ms | p50 648 ms |
-| Joins | 990 in 1.5 s | 990 in 1.4 s |
+| Sends | 177 msg/s; p50 67 ms, p95 140 ms | 338 msg/s; p50 26 ms, p95 62 ms |
+| Incremental sync under that load | p50 544 ms, p95 724 ms | p50 349 ms, p95 429 ms |
+| Initial sync under that load | p50 914 ms | p50 645 ms |
+| Joins | 990 in 1.5 s | 990 in 1.2 s |
 
 Quiet server, user in ten rooms: an incremental sync with one new event takes 8 ms, an idle one
 3.5 ms.
@@ -24,8 +24,8 @@ Statements per request, before and after the 2026-10-26 work:
 
 | Request | Before | After |
 |---|---|---|
-| Message send (authentication, de-duplication, room load, persist, fan-out bookkeeping) | 35 | 15, of which 3 inside the persist transaction |
-| Idle incremental sync | 20 | 14 |
+| Message send (authentication, de-duplication, room load, persist, fan-out bookkeeping) | 35 | 10, of which 3 inside the persist transaction |
+| Idle incremental sync | 20 | 12 |
 | Incremental sync with one new event in one room | 40 | 30 |
 | Initial sync of one fresh room with ten timeline events | 39 | 35 (was 88 with three rooms, 55 now) |
 
@@ -41,7 +41,13 @@ What changed:
 - A sync token is built from one query over all stream positions instead of six.
 - Push rule evaluation loads only the create event, the power levels and the user's own membership
   (not the whole room state and member list), and parsed rulesets are cached per user.
-- Presence collects the users sharing a room through one join query instead of one query per room.
+- Presence collects the users sharing a room through one join query instead of one query per room,
+  and a sync reads the user's joined rooms and the membership changes in them once for both the
+  device-list and the presence sections.
+- Hot rooms keep their context (current state, extremities with hashes, next depth) in memory
+  after a local write. A send validates it with one forward-extremities query, which every write,
+  local or over federation, moves; redactions and purges drop the entry; the cache is bounded by
+  the total number of state events it holds.
 - History-visibility filtering of a timeline slice settles in one lookup when the visibility is
   `shared` or `world_readable` throughout; `prev_content` for a contiguous slice comes from one
   state lookup at the slice's start instead of one state-group walk per state event.
@@ -51,8 +57,9 @@ What changed:
 
 ## Next steps
 
-1. Keep current room state in memory for hot rooms: the send path still loads the room's state,
-   extremities and prev events (about seven statements) before the persist transaction.
-2. Memoise per-sync lookups that recur (the user's memberships are read three times, the joined
-   room list twice).
+1. The incremental sync with new events still spends most of its statements per room (timeline,
+   receipts, unread counts, state lookups for the summary); a per-room batch for several rooms at
+   once is the next step.
+2. The federation receive path reloads room state per incoming event; the hot-room cache could
+   serve it as well once it is also updated by federation writes.
 3. Profile federation fan-out separately; the sender batches per destination already.

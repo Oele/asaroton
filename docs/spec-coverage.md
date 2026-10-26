@@ -1,9 +1,12 @@
 # Spec coverage
 
 Target: Matrix spec v1.19, default room version 12 (all versions 1–12 supported for joining).
-The conformance gate is Complement (`scripts/complement.sh`). Last full run (2026-10-25):
-federation suite 88 of 90 top-level tests passing, client-server suite 62 of 64 (one of the two
-fixed right after the run; see the deviations at the end for the rest).
+The conformance gate is Complement (`scripts/complement.sh`). Last full run (2026-10-26):
+federation suite 88 of 90 top-level tests passing, client-server suite 105 of 107 (one of the two,
+the `end` token of `/messages` at the start of history, fixed right after the run and verified
+in a targeted run; see the deviations at the end for the rest). Earlier runs reported 62 of 64
+for the client-server suite: `/messages` never dropped its `end` token, so a test paginated until
+the 90-minute limit killed the package before the remaining tests ran.
 
 | Area | Status |
 |---|---|
