@@ -81,6 +81,9 @@ pub struct Services {
     pub sliding_sync: sliding_sync::SlidingSyncConnections,
     /// Delayed event scheduling state (MSC4140).
     pub delayed: delayed_events::DelayedEvents,
+    /// Room contexts left behind by the last local write per room (see `room_context`).
+    pub(crate) room_ctx_cache:
+        std::sync::Mutex<lru::LruCache<ruma::OwnedRoomId, Arc<rooms::pipeline::RoomContext>>>,
     /// Parsed push rulesets with their stream id, dropped when the user changes them.
     pub push_rules_cache: dashmap::DashMap<ruma::OwnedUserId, Arc<(ruma::push::Ruleset, i64)>>,
     /// Nonces handed out by the shared-secret registration endpoint.
@@ -140,6 +143,9 @@ impl Services {
             sliding_sync: sliding_sync::SlidingSyncConnections::default(),
             delayed: delayed_events::DelayedEvents::default(),
             push_rules_cache: dashmap::DashMap::new(),
+            room_ctx_cache: std::sync::Mutex::new(lru::LruCache::new(
+                std::num::NonZeroUsize::new(256).unwrap_or(std::num::NonZeroUsize::MIN),
+            )),
             admin_nonces: dashmap::DashMap::new(),
             federation_hooks: federation_hooks::HooksSlot::default(),
             signing_key: Arc::new(signing_key),

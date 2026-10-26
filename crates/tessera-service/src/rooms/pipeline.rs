@@ -68,7 +68,7 @@ impl LocalEvent {
 }
 
 /// The room's current state loaded as PDUs, plus the room version rules.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct RoomContext {
     pub room_id: OwnedRoomId,
     pub version: ruma::RoomVersionId,
@@ -76,6 +76,10 @@ pub struct RoomContext {
     pub state: StatePdus,
     pub state_group: Option<i64>,
     pub extremities: Vec<OwnedEventId>,
+    /// The extremities as `prev_events` references (with their content hashes), and the depth
+    /// the next event gets: kept with the context so a send does not reload them.
+    pub prev_refs: Vec<tessera_core::builder::EventRef>,
+    pub next_depth: u64,
 }
 
 impl RoomContext {
@@ -112,7 +116,40 @@ impl Services {
     }
 
     /// Load the room's version, rules and current state as PDUs.
+    ///
+    /// Hot rooms: the context left behind by the last local write is reused as long as the
+    /// room's forward extremities have not moved since, which every write (local or over
+    /// federation) does.
     pub async fn room_context(&self, room_id: &RoomId) -> Result<RoomContext> {
+        let cached = self
+            .room_ctx_cache
+            .lock()
+            .ok()
+            .and_then(|mut c| c.get(room_id).cloned());
+        if let Some(c) = cached {
+            let ext = self.store.forward_extremities(room_id).await?;
+            if ext.len() == c.extremities.len() && ext.iter().all(|e| c.extremities.contains(e)) {
+                return Ok((*c).clone());
+            }
+        }
+        let ctx = self.load_room_context(room_id).await?;
+        self.cache_room_context(&ctx);
+        Ok(ctx)
+    }
+
+    pub(crate) fn cache_room_context(&self, ctx: &RoomContext) {
+        if let Ok(mut c) = self.room_ctx_cache.lock() {
+            c.put(ctx.room_id.clone(), Arc::new(ctx.clone()));
+        }
+    }
+
+    pub(crate) fn forget_room_context(&self, room_id: &RoomId) {
+        if let Ok(mut c) = self.room_ctx_cache.lock() {
+            c.pop(room_id);
+        }
+    }
+
+    async fn load_room_context(&self, room_id: &RoomId) -> Result<RoomContext> {
         let info = self
             .store
             .get_room(room_id)
@@ -137,6 +174,20 @@ impl Services {
         } else {
             None
         };
+        let prev_pdus = self.store.get_events(&extremities).await?;
+        let next_depth = prev_pdus
+            .iter()
+            .map(|e| u64::from(e.pdu.depth()))
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let prev_refs = prev_pdus
+            .iter()
+            .map(|e| tessera_core::builder::EventRef {
+                event_id: e.pdu.event_id().to_owned(),
+                sha256: content_hash(e.pdu.raw()),
+            })
+            .collect();
         Ok(RoomContext {
             room_id: room_id.to_owned(),
             version: info.room_version,
@@ -144,6 +195,8 @@ impl Services {
             state,
             state_group,
             extremities,
+            prev_refs,
+            next_depth,
         })
     }
 
@@ -161,12 +214,12 @@ impl Services {
         ctx: &mut RoomContext,
         ev: LocalEvent,
     ) -> Result<StoredEvent> {
-        let pdu = self.build_local_event_locked(ctx, ev).await?;
+        let pdu = self.build_local_event_locked(ctx, ev)?;
         self.persist_built_event_locked(ctx, pdu).await
     }
 
     /// Build and authorise an event against the context without persisting it.
-    pub async fn build_local_event_locked(&self, ctx: &RoomContext, ev: LocalEvent) -> Result<Pdu> {
+    pub fn build_local_event_locked(&self, ctx: &RoomContext, ev: LocalEvent) -> Result<Pdu> {
         let rules = ctx.rules.clone();
         // Spec: events are at most 65536 bytes; leave headroom for hashes, signatures, ids.
         if tessera_core::canonical::to_string(&ev.content).len() > 60_000 {
@@ -177,21 +230,9 @@ impl Services {
             ));
         }
 
-        // prev events and depth
-        let prev_pdus = self.store.get_events(&ctx.extremities).await?;
-        let depth = prev_pdus
-            .iter()
-            .map(|e| u64::from(e.pdu.depth()))
-            .max()
-            .unwrap_or(0)
-            + 1;
-        let prev_refs: Vec<tessera_core::builder::EventRef> = prev_pdus
-            .iter()
-            .map(|e| tessera_core::builder::EventRef {
-                event_id: e.pdu.event_id().to_owned(),
-                sha256: content_hash(e.pdu.raw()),
-            })
-            .collect();
+        // prev events and depth, as kept with the context
+        let depth = ctx.next_depth;
+        let prev_refs: Vec<tessera_core::builder::EventRef> = ctx.prev_refs.clone();
 
         // auth events from current state
         let content_raw = serde_json::value::RawValue::from_string(
@@ -331,10 +372,19 @@ impl Services {
         }
         ctx.state_group = persisted.state_group;
         ctx.extremities = vec![pdu.event_id().to_owned()];
+        ctx.prev_refs = vec![tessera_core::builder::EventRef {
+            event_id: pdu.event_id().to_owned(),
+            sha256: content_hash(pdu.raw()),
+        }];
+        ctx.next_depth = u64::from(pdu.depth()) + 1;
 
         // side effects
         if pdu.event_type() == &TimelineEventType::RoomRedaction {
             self.apply_redaction(ctx, &pdu).await?;
+            // The redaction may have changed a state event's content behind the context.
+            self.forget_room_context(&ctx.room_id);
+        } else {
+            self.cache_room_context(ctx);
         }
         self.notifier.notify(Notification::RoomEvent {
             room_id: ctx.room_id.clone(),

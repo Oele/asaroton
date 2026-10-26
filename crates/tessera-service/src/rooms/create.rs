@@ -136,6 +136,8 @@ impl Services {
             state: std::collections::HashMap::default(),
             state_group: None,
             extremities: Vec::new(),
+            prev_refs: Vec::new(),
+            next_depth: 1,
         };
 
         // The create event needs the room row to exist for the store's version lookup. For v12

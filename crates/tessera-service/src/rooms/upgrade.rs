@@ -38,21 +38,19 @@ impl Services {
 
         // Build (but do not yet persist) the tombstone so the successor can point at it; this
         // also checks the upgrader's power to send it.
-        let tombstone = self
-            .build_local_event_locked(
-                &ctx,
-                LocalEvent::new(
-                    old_room.to_owned(),
-                    user.to_owned(),
-                    ruma::events::TimelineEventType::RoomTombstone,
-                )
-                .state_key("")
-                .content(&json!({
-                    "body": "This room has been replaced",
-                    "replacement_room": "!pending",
-                }))?,
+        let tombstone = self.build_local_event_locked(
+            &ctx,
+            LocalEvent::new(
+                old_room.to_owned(),
+                user.to_owned(),
+                ruma::events::TimelineEventType::RoomTombstone,
             )
-            .await?;
+            .state_key("")
+            .content(&json!({
+                "body": "This room has been replaced",
+                "replacement_room": "!pending",
+            }))?,
+        )?;
         let tombstone_id = tombstone.event_id().to_owned();
 
         // --- the successor --------------------------------------------------------------
@@ -137,21 +135,19 @@ impl Services {
         }
 
         // --- tombstone and lock-down of the old room ------------------------------------
-        let tombstone = self
-            .build_local_event_locked(
-                &ctx,
-                LocalEvent::new(
-                    old_room.to_owned(),
-                    user.to_owned(),
-                    ruma::events::TimelineEventType::RoomTombstone,
-                )
-                .state_key("")
-                .content(&json!({
-                    "body": "This room has been replaced",
-                    "replacement_room": new_room,
-                }))?,
+        let tombstone = self.build_local_event_locked(
+            &ctx,
+            LocalEvent::new(
+                old_room.to_owned(),
+                user.to_owned(),
+                ruma::events::TimelineEventType::RoomTombstone,
             )
-            .await?;
+            .state_key("")
+            .content(&json!({
+                "body": "This room has been replaced",
+                "replacement_room": new_room,
+            }))?,
+        )?;
         self.persist_built_event_locked(&mut ctx, tombstone).await?;
         if let Some(mut pl) = old_pl {
             let bump = |pl: &mut Value, key: &str| {

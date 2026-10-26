@@ -227,14 +227,13 @@ impl Services {
 
     /// Error unless the user is joined.
     pub async fn require_joined(&self, room_id: &RoomId, user: &UserId) -> Result<()> {
+        if self.is_joined(room_id, user).await? {
+            return Ok(());
+        }
         if !self.store.room_exists(room_id).await? {
             return Err(Error::not_found("Room not found."));
         }
-        if self.is_joined(room_id, user).await? {
-            Ok(())
-        } else {
-            Err(Error::forbidden("You are not joined to this room."))
-        }
+        Err(Error::forbidden("You are not joined to this room."))
     }
 
     /// Whether the user may read the room's history right now: joined, or left/banned with

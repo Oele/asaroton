@@ -56,6 +56,7 @@ impl Services {
         }
         if purge {
             self.store.purge_room(room_id).await?;
+            self.forget_room_context(room_id);
         }
         Ok(out)
     }
