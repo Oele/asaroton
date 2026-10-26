@@ -300,11 +300,24 @@ impl Services {
         let user = &req.user_id;
         let filter = &req.filter;
 
+        let all_memberships = self.store.memberships_for_user(user).await?;
+        // Every joined room and the membership changes in them since the token: device lists
+        // and presence both need these, so they are read once.
+        let all_my_rooms: Vec<OwnedRoomId> = all_memberships
+            .iter()
+            .filter(|m| m.membership == MembershipState::Join)
+            .map(|m| m.room_id.clone())
+            .collect();
+        let changed_in_my_rooms: Vec<Membership> = match since {
+            Some(s) => {
+                self.store
+                    .memberships_changed_in_rooms(&all_my_rooms, s.events)
+                    .await?
+            }
+            None => Vec::new(),
+        };
         // Forgotten rooms are hidden, except that a leave inside the window is still reported.
-        let memberships: Vec<Membership> = self
-            .store
-            .memberships_for_user(user)
-            .await?
+        let memberships: Vec<Membership> = all_memberships
             .into_iter()
             .filter(|m| !m.forgotten || since.is_some_and(|s| m.stream_ordering > s.events))
             .filter(|m| filter.room_allowed(&m.room_id))
@@ -430,7 +443,9 @@ impl Services {
 
         // Presence of users we share rooms with.
         if filter.presence_enabled {
-            out.presence = self.sync_presence(user, since, &newly_joined).await?;
+            out.presence = self
+                .sync_presence(user, since, &newly_joined, &changed_in_my_rooms)
+                .await?;
         }
 
         // To-device messages and device lists (per device).
@@ -455,7 +470,15 @@ impl Services {
         }
         if let Some(s) = since {
             let (changed, left) = self
-                .device_list_updates(user, s, now, &memberships, &newly_joined)
+                .device_list_updates(
+                    user,
+                    s,
+                    now,
+                    &memberships,
+                    &newly_joined,
+                    &all_my_rooms,
+                    &changed_in_my_rooms,
+                )
                 .await?;
             out.device_lists_changed = changed;
             out.device_lists_left = left;
@@ -788,6 +811,7 @@ impl Services {
         user: &UserId,
         since: Option<SyncToken>,
         newly_joined: &[OwnedRoomId],
+        changed_in_my_rooms: &[Membership],
     ) -> Result<Vec<Value>> {
         let mut interesting: HashSet<OwnedUserId> = HashSet::new();
         if since.is_none() {
@@ -809,12 +833,7 @@ impl Services {
         }
         if let Some(s) = since {
             // Members who joined our rooms in the window.
-            let my_rooms = self.store.rooms_for_user(user, "join").await?;
-            for m in self
-                .store
-                .memberships_changed_in_rooms(&my_rooms, s.events)
-                .await?
-            {
+            for m in changed_in_my_rooms {
                 if m.membership == MembershipState::Join
                     && m.user_id != *user
                     && !emitted.contains(&m.user_id)
@@ -1053,6 +1072,7 @@ pub fn receipts_content(
 
 impl Services {
     /// Device-list `changed`/`left` for an incremental sync between `s` and `now`.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn device_list_updates(
         &self,
         user: &UserId,
@@ -1060,17 +1080,14 @@ impl Services {
         now: SyncToken,
         memberships: &[Membership],
         newly_joined: &[OwnedRoomId],
+        all_my_rooms: &[OwnedRoomId],
+        changed_in_my_rooms: &[Membership],
     ) -> Result<(Vec<OwnedUserId>, Vec<OwnedUserId>)> {
         let (mut changed, mut left) = self
             .device_list_changes_for(user, s.device_lists, now.device_lists)
             .await?;
         // Users who joined or left rooms we are in during the window.
-        let all_my_rooms = self.store.rooms_for_user(user, "join").await?;
-        for m in self
-            .store
-            .memberships_changed_in_rooms(&all_my_rooms, s.events)
-            .await?
-        {
+        for m in changed_in_my_rooms {
             if m.user_id == *user || m.stream_ordering > now.events {
                 continue;
             }

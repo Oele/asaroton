@@ -671,8 +671,21 @@ impl Services {
         {
             let (changed, left) = match since {
                 Some(s) => {
-                    self.device_list_updates(user, s, now, &memberships, &newly_joined)
-                        .await?
+                    let all_my_rooms = self.store.rooms_for_user(user, "join").await?;
+                    let changed_in_my_rooms = self
+                        .store
+                        .memberships_changed_in_rooms(&all_my_rooms, s.events)
+                        .await?;
+                    self.device_list_updates(
+                        user,
+                        s,
+                        now,
+                        &memberships,
+                        &newly_joined,
+                        &all_my_rooms,
+                        &changed_in_my_rooms,
+                    )
+                    .await?
                 }
                 None => (Vec::new(), Vec::new()),
             };
