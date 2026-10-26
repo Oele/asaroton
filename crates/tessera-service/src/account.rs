@@ -243,6 +243,7 @@ impl Services {
         self.store
             .delete_access_tokens_for_device(&rt.user_id, &rt.device_id)
             .await?;
+        self.auth.forget_user(&rt.user_id);
         self.store
             .create_access_token(AccessToken {
                 token: new_access.clone(),
@@ -266,6 +267,7 @@ impl Services {
     /// Invalidate one session (the token's device is deleted too, per spec).
     pub async fn logout(&self, sender: &Sender) -> Result<()> {
         self.store.delete_access_token(&sender.token).await?;
+        self.auth.forget_token(&sender.token);
         if let Some(device_id) = &sender.device_id {
             self.delete_device_fully(&sender.user_id, device_id).await?;
         }
@@ -280,6 +282,7 @@ impl Services {
         self.store
             .delete_access_tokens_for_user(user_id, None)
             .await?;
+        self.auth.forget_user(user_id);
         Ok(())
     }
 
@@ -310,6 +313,7 @@ impl Services {
             self.store
                 .delete_access_tokens_for_user(user_id, keep_device)
                 .await?;
+            self.auth.forget_user(user_id);
         }
         Ok(())
     }
@@ -318,6 +322,7 @@ impl Services {
     pub async fn deactivate(&self, user_id: &UserId) -> Result<()> {
         self.store.set_password_hash(user_id, None).await?;
         self.store.set_deactivated(user_id, true).await?;
+        self.auth.forget_user(user_id);
         self.logout_all(user_id).await
     }
 
@@ -338,6 +343,7 @@ impl Services {
     pub async fn delete_device_fully(&self, user_id: &UserId, device_id: &DeviceId) -> Result<()> {
         self.store.delete_device(user_id, device_id).await?;
         self.store.delete_device_keys(user_id, device_id).await?;
+        self.auth.forget_user(user_id);
         // The device's local notification settings go with it (MSC3890).
         for ty in [
             format!("m.local_notification_settings.{device_id}"),

@@ -221,6 +221,7 @@ pub async fn put_user(
                         return Err(Error::forbidden("You may not demote yourself."));
                     }
                     services.store.set_admin(&user_id, a).await?;
+                    services.auth.forget_user(&user_id);
                 }
                 if let Some(d) = body.get("deactivated").and_then(Value::as_bool) {
                     if d {
@@ -375,6 +376,7 @@ pub async fn set_admin(
                 return Err(Error::not_found("User not found"));
             }
             services.store.set_admin(&id, flag).await?;
+            services.auth.forget_user(&id);
             Ok((StatusCode::OK, json!({})))
         }
         .await,

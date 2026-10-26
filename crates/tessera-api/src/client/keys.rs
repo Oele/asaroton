@@ -404,6 +404,7 @@ pub async fn send_to_device(
             sender.device_id.as_deref(),
             &txn_key,
             &marker,
+            None,
         )
         .await?;
     Ok(send_event_to_device::v3::Response::new())

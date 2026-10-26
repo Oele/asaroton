@@ -82,10 +82,13 @@ impl Services {
         ev.origin_server_ts = origin_server_ts;
         let stored = self.send_local_event(ev).await?;
         self.store
-            .set_txn_event(sender, device_id, &txn_key, stored.pdu.event_id())
-            .await?;
-        self.store
-            .set_event_txn_id(stored.pdu.event_id(), sender, device_id, txn_id)
+            .set_txn_event(
+                sender,
+                device_id,
+                &txn_key,
+                stored.pdu.event_id(),
+                Some(txn_id),
+            )
             .await?;
         Ok(stored.pdu.event_id().to_owned())
     }
@@ -211,10 +214,13 @@ impl Services {
         ev.redacts = Some(target.to_owned());
         let stored = self.send_local_event(ev).await?;
         self.store
-            .set_txn_event(sender, device_id, &txn_key, stored.pdu.event_id())
-            .await?;
-        self.store
-            .set_event_txn_id(stored.pdu.event_id(), sender, device_id, txn_id)
+            .set_txn_event(
+                sender,
+                device_id,
+                &txn_key,
+                stored.pdu.event_id(),
+                Some(txn_id),
+            )
             .await?;
         Ok(stored.pdu.event_id().to_owned())
     }

@@ -423,38 +423,28 @@ impl RoomStore for PostgresStore {
         &self,
         user_id: &UserId,
         device_id: Option<&ruma::DeviceId>,
-        txn_id: &str,
+        txn_key: &str,
         event_id: &ruma::EventId,
+        client_txn_id: Option<&str>,
     ) -> Result<()> {
+        // The echo row keys the client's transaction ID by event: `event:<id> -> txn`.
         sqlx::query(
-            "INSERT INTO event_txn_ids (user_id, device_id, txn_id, event_id, created_ts) VALUES ($1, $2, $3, $4, $5)
+            "INSERT INTO event_txn_ids (user_id, device_id, txn_id, event_id, created_ts)
+             SELECT $1, $2, k, v, $5 FROM UNNEST($3::text[], $4::text[]) AS kv(k, v)
              ON CONFLICT DO NOTHING",
         )
         .bind(user_id.as_str())
         .bind(device_id.map_or("", ruma::DeviceId::as_str))
-        .bind(txn_id)
-        .bind(event_id.as_str())
-        .bind(now_ts())
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    async fn set_event_txn_id(
-        &self,
-        event_id: &ruma::EventId,
-        user_id: &UserId,
-        device_id: Option<&ruma::DeviceId>,
-        txn_id: &str,
-    ) -> Result<()> {
-        sqlx::query(
-            "INSERT INTO event_txn_ids (user_id, device_id, txn_id, event_id, created_ts) VALUES ($1, $2, $3, $4, $5)
-             ON CONFLICT DO NOTHING",
+        .bind(
+            std::iter::once(txn_key.to_owned())
+                .chain(client_txn_id.map(|_| format!("event:{event_id}")))
+                .collect::<Vec<_>>(),
         )
-        .bind(user_id.as_str())
-        .bind(device_id.map_or("", ruma::DeviceId::as_str))
-        .bind(format!("event:{event_id}"))
-        .bind(txn_id)
+        .bind(
+            std::iter::once(event_id.to_string())
+                .chain(client_txn_id.map(str::to_owned))
+                .collect::<Vec<_>>(),
+        )
         .bind(now_ts())
         .execute(&self.pool)
         .await?;

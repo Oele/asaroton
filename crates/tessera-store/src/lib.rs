@@ -163,20 +163,15 @@ pub trait RoomStore: Send + Sync {
         device_id: Option<&DeviceId>,
         txn_id: &str,
     ) -> Result<Option<OwnedEventId>>;
+    /// Records the de-duplication key and, when given, the client's transaction ID to echo
+    /// back in `unsigned` for the event.
     async fn set_txn_event(
         &self,
         user_id: &UserId,
         device_id: Option<&DeviceId>,
-        txn_id: &str,
+        txn_key: &str,
         event_id: &EventId,
-    ) -> Result<()>;
-    /// Remember the client transaction ID of an event, to echo it back in `unsigned`.
-    async fn set_event_txn_id(
-        &self,
-        event_id: &EventId,
-        user_id: &UserId,
-        device_id: Option<&DeviceId>,
-        txn_id: &str,
+        client_txn_id: Option<&str>,
     ) -> Result<()>;
     async fn get_event_txn_id(
         &self,
