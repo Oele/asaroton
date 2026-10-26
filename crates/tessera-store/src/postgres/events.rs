@@ -77,75 +77,72 @@ async fn persist_one(conn: &mut PgConnection, ev: PersistEvent) -> Result<Persis
     } else {
         "events_stream_seq"
     };
-    let stream_ordering: i64 = match ev.stream_ordering {
-        Some(so) => so,
-        None => sqlx::query(sqlx::AssertSqlSafe(format!("SELECT nextval('{seq}')")))
-            .fetch_one(&mut *conn)
-            .await?
-            .get(0),
-    };
 
     let mut json_obj = pdu.raw().clone();
     json_obj.remove("unsigned");
     let json = tessera_core::canonical::to_string(&json_obj);
+    let (relates_to, rel_type) = relation_of(pdu).unzip();
+    let search_text = search_text_of(pdu);
 
-    sqlx::query(
-        "INSERT INTO events (stream_ordering, event_id, room_id, event_type, state_key, sender,
-            origin_server_ts, depth, json, state_group, rejected, soft_failed, outlier, received_ts)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
-    )
-    .bind(stream_ordering)
-    .bind(pdu.event_id().as_str())
-    .bind(room_id.as_str())
-    .bind(pdu.event_type().to_string())
-    .bind(pdu.state_key())
-    .bind(pdu.sender().as_str())
-    .bind(uint_to_i64(pdu.origin_server_ts().0))
-    .bind(uint_to_i64(pdu.depth()))
-    .bind(&json)
-    .bind(state_group)
-    .bind(pdu.rejected())
-    .bind(ev.soft_failed)
-    .bind(outlier)
-    .bind(now_ts())
-    .execute(&mut *conn)
-    .await?;
-
-    let prev = strings(pdu.prev_events());
-    if !prev.is_empty() {
-        sqlx::query("INSERT INTO event_edges (event_id, prev_event_id) SELECT $1, * FROM UNNEST($2::text[]) ON CONFLICT DO NOTHING")
-            .bind(pdu.event_id().as_str())
-            .bind(&prev)
-            .execute(&mut *conn)
-            .await?;
-        // Track prev events we do not have.
-        sqlx::query(
-            "INSERT INTO missing_events (room_id, event_id, referenced_by)
-             SELECT $1, p, $2 FROM UNNEST($3::text[]) AS p WHERE NOT EXISTS (SELECT 1 FROM events WHERE event_id = p)
-             ON CONFLICT DO NOTHING",
-        )
+    // One round trip writes the event with its edges, auth links, missing-prev bookkeeping and
+    // the relation and search indexes.
+    let sql = format!(
+        "WITH ev AS (
+            INSERT INTO events (stream_ordering, event_id, room_id, event_type, state_key, sender,
+                origin_server_ts, depth, json, state_group, rejected, soft_failed, outlier, received_ts)
+            VALUES (COALESCE($1::bigint, nextval('{seq}')), $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+            RETURNING stream_ordering
+         ),
+         edges AS (
+            INSERT INTO event_edges (event_id, prev_event_id)
+            SELECT $2, p FROM UNNEST($15::text[]) AS p ON CONFLICT DO NOTHING
+         ),
+         missing AS (
+            INSERT INTO missing_events (room_id, event_id, referenced_by)
+            SELECT $3, p, $2 FROM UNNEST($15::text[]) AS p
+            WHERE NOT EXISTS (SELECT 1 FROM events WHERE event_id = p)
+            ON CONFLICT DO NOTHING
+         ),
+         auth AS (
+            INSERT INTO event_auth (event_id, auth_event_id)
+            SELECT $2, a FROM UNNEST($16::text[]) AS a ON CONFLICT DO NOTHING
+         ),
+         found AS (DELETE FROM missing_events WHERE event_id = $2),
+         rel AS (
+            INSERT INTO event_relations (event_id, room_id, relates_to, rel_type, event_type, sender, origin_server_ts, stream_ordering)
+            SELECT $2, $3, $17, $18, $4, $6, $7, ev.stream_ordering FROM ev
+            WHERE $17::text IS NOT NULL AND NOT $11 ON CONFLICT DO NOTHING
+         ),
+         search AS (
+            INSERT INTO event_search (event_id, room_id, stream_ordering, origin_server_ts, vector)
+            SELECT $2, $3, ev.stream_ordering, $7, to_tsvector('english', $19) FROM ev
+            WHERE $19::text IS NOT NULL AND NOT $11 ON CONFLICT DO NOTHING
+         )
+         SELECT stream_ordering FROM ev"
+    );
+    let stream_ordering: i64 = sqlx::query(sqlx::AssertSqlSafe(sql))
+        .bind(ev.stream_ordering)
+        .bind(pdu.event_id().as_str())
         .bind(room_id.as_str())
-        .bind(pdu.event_id().as_str())
-        .bind(&prev)
-        .execute(&mut *conn)
-        .await?;
-    }
-    if !pdu.rejected() {
-        index_relation_and_search(&mut *conn, pdu, stream_ordering).await?;
-    }
-    let auth = strings(pdu.auth_events());
-    if !auth.is_empty() {
-        sqlx::query("INSERT INTO event_auth (event_id, auth_event_id) SELECT $1, * FROM UNNEST($2::text[]) ON CONFLICT DO NOTHING")
-            .bind(pdu.event_id().as_str())
-            .bind(&auth)
-            .execute(&mut *conn)
-            .await?;
-    }
-    // This event is no longer missing.
-    sqlx::query("DELETE FROM missing_events WHERE event_id = $1")
-        .bind(pdu.event_id().as_str())
-        .execute(&mut *conn)
-        .await?;
+        .bind(pdu.event_type().to_string())
+        .bind(pdu.state_key())
+        .bind(pdu.sender().as_str())
+        .bind(uint_to_i64(pdu.origin_server_ts().0))
+        .bind(uint_to_i64(pdu.depth()))
+        .bind(&json)
+        .bind(state_group)
+        .bind(pdu.rejected())
+        .bind(ev.soft_failed)
+        .bind(outlier)
+        .bind(now_ts())
+        .bind(strings(pdu.prev_events()))
+        .bind(strings(pdu.auth_events()))
+        .bind(relates_to)
+        .bind(rel_type)
+        .bind(search_text)
+        .fetch_one(&mut *conn)
+        .await?
+        .get(0);
 
     if let Some(delta) = &ev.current_state_delta {
         super::state::apply_current_state_delta(&mut *conn, room_id, delta).await?;
@@ -159,6 +156,28 @@ async fn persist_one(conn: &mut PgConnection, ev: PersistEvent) -> Result<Persis
         stream_ordering,
         state_group,
     })
+}
+
+/// `(target, rel_type)` of the event's `m.relates_to`, when it points at a valid event ID.
+fn relation_of(pdu: &Pdu) -> Option<(String, String)> {
+    let content: serde_json::Value = serde_json::from_str(pdu.content().get()).ok()?;
+    let rel = content.get("m.relates_to")?;
+    let rel_type = rel.get("rel_type")?.as_str()?;
+    let target = rel.get("event_id")?.as_str()?;
+    ruma::EventId::parse(target).ok()?;
+    Some((target.to_owned(), rel_type.to_owned()))
+}
+
+/// The text the search index gets for this event, if any.
+fn search_text_of(pdu: &Pdu) -> Option<String> {
+    let content: serde_json::Value = serde_json::from_str(pdu.content().get()).ok()?;
+    let key = match pdu.event_type().to_string().as_str() {
+        "m.room.message" => "body",
+        "m.room.name" => "name",
+        "m.room.topic" => "topic",
+        _ => return None,
+    };
+    content.get(key)?.as_str().map(str::to_owned)
 }
 
 async fn resolve_state_group(
@@ -180,17 +199,18 @@ async fn set_forward_extremities(
     room_id: &RoomId,
     event_ids: &[OwnedEventId],
 ) -> Result<()> {
-    sqlx::query("DELETE FROM forward_extremities WHERE room_id = $1")
-        .bind(room_id.as_str())
-        .execute(&mut *conn)
-        .await?;
-    if !event_ids.is_empty() {
-        sqlx::query("INSERT INTO forward_extremities (room_id, event_id) SELECT $1, * FROM UNNEST($2::text[])")
-            .bind(room_id.as_str())
-            .bind(strings(event_ids))
-            .execute(&mut *conn)
-            .await?;
-    }
+    // Rows staying in the set are left alone, so one statement replaces the set.
+    sqlx::query(
+        "WITH gone AS (
+            DELETE FROM forward_extremities WHERE room_id = $1 AND event_id <> ALL($2::text[])
+         )
+         INSERT INTO forward_extremities (room_id, event_id)
+         SELECT $1, e FROM UNNEST($2::text[]) AS e ON CONFLICT DO NOTHING",
+    )
+    .bind(room_id.as_str())
+    .bind(strings(event_ids))
+    .execute(&mut *conn)
+    .await?;
     Ok(())
 }
 
@@ -821,55 +841,4 @@ impl From<ruma::IdParseError> for Error {
     fn from(e: ruma::IdParseError) -> Self {
         Error::Corrupt(e.to_string())
     }
-}
-
-/// Record `m.relates_to` and index searchable text for a freshly persisted event.
-async fn index_relation_and_search(
-    conn: &mut PgConnection,
-    pdu: &Pdu,
-    stream_ordering: i64,
-) -> Result<()> {
-    let content: serde_json::Value = serde_json::from_str(pdu.content().get()).unwrap_or_default();
-    if let Some(rel) = content.get("m.relates_to")
-        && let (Some(rel_type), Some(target)) = (
-            rel.get("rel_type").and_then(|v| v.as_str()),
-            rel.get("event_id").and_then(|v| v.as_str()),
-        )
-        && ruma::EventId::parse(target).is_ok()
-    {
-        sqlx::query(
-            "INSERT INTO event_relations (event_id, room_id, relates_to, rel_type, event_type, sender, origin_server_ts, stream_ordering)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT DO NOTHING",
-        )
-        .bind(pdu.event_id().as_str())
-        .bind(pdu.room_id().as_str())
-        .bind(target)
-        .bind(rel_type)
-        .bind(pdu.event_type().to_string())
-        .bind(pdu.sender().as_str())
-        .bind(uint_to_i64(pdu.origin_server_ts().0))
-        .bind(stream_ordering)
-        .execute(&mut *conn)
-        .await?;
-    }
-    let text = match pdu.event_type().to_string().as_str() {
-        "m.room.message" => content.get("body").and_then(|v| v.as_str()),
-        "m.room.name" => content.get("name").and_then(|v| v.as_str()),
-        "m.room.topic" => content.get("topic").and_then(|v| v.as_str()),
-        _ => None,
-    };
-    if let Some(text) = text {
-        sqlx::query(
-            "INSERT INTO event_search (event_id, room_id, stream_ordering, origin_server_ts, vector)
-             VALUES ($1, $2, $3, $4, to_tsvector('english', $5)) ON CONFLICT DO NOTHING",
-        )
-        .bind(pdu.event_id().as_str())
-        .bind(pdu.room_id().as_str())
-        .bind(stream_ordering)
-        .bind(uint_to_i64(pdu.origin_server_ts().0))
-        .bind(text)
-        .execute(&mut *conn)
-        .await?;
-    }
-    Ok(())
 }

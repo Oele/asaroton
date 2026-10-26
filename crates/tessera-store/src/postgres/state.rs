@@ -35,60 +35,33 @@ pub(crate) async fn create_state_group(
     prev: Option<StateGroupId>,
     delta: &StateDelta,
 ) -> Result<StateGroupId> {
-    let id: i64 =
-        sqlx::query("INSERT INTO state_groups (room_id, prev_group) VALUES ($1, $2) RETURNING id")
-            .bind(room_id.as_str())
-            .bind(prev)
-            .fetch_one(&mut *conn)
-            .await?
-            .get(0);
-    // One row per state key (a later entry wins), as the upsert cannot touch a row twice.
+    // One row per state key (a later entry wins).
     let delta: Vec<_> = delta
         .iter()
         .cloned()
         .collect::<std::collections::BTreeMap<_, _>>()
         .into_iter()
         .collect();
-    if !delta.is_empty() {
-        let types: Vec<String> = delta.iter().map(|((t, _), _)| t.to_string()).collect();
-        let keys: Vec<String> = delta.iter().map(|((_, k), _)| k.clone()).collect();
-        let ids: Vec<String> = delta.iter().map(|(_, id)| id.to_string()).collect();
-        sqlx::query(
-            "INSERT INTO state_groups_state (state_group, event_type, state_key, event_id)
-             SELECT $1, * FROM UNNEST($2::text[], $3::text[], $4::text[])
-             ON CONFLICT (state_group, event_type, state_key) DO UPDATE SET event_id = EXCLUDED.event_id",
-        )
-        .bind(id)
-        .bind(&types)
-        .bind(&keys)
-        .bind(&ids)
-        .execute(&mut *conn)
-        .await?;
-    }
+    let types: Vec<String> = delta.iter().map(|((t, _), _)| t.to_string()).collect();
+    let keys: Vec<String> = delta.iter().map(|((_, k), _)| k.clone()).collect();
+    let ids: Vec<String> = delta.iter().map(|(_, id)| id.to_string()).collect();
+    let id: i64 = sqlx::query(
+        "WITH g AS (INSERT INTO state_groups (room_id, prev_group) VALUES ($1, $2) RETURNING id),
+              s AS (
+                INSERT INTO state_groups_state (state_group, event_type, state_key, event_id)
+                SELECT g.id, t, k, e FROM g, UNNEST($3::text[], $4::text[], $5::text[]) AS u(t, k, e)
+              )
+         SELECT id FROM g",
+    )
+    .bind(room_id.as_str())
+    .bind(prev)
+    .bind(&types)
+    .bind(&keys)
+    .bind(&ids)
+    .fetch_one(&mut *conn)
+    .await?
+    .get(0);
     Ok(id)
-}
-
-/// Membership details pulled from an `m.room.member` event's JSON.
-struct MemberContent {
-    membership: String,
-    display_name: Option<String>,
-    avatar_url: Option<String>,
-}
-
-fn member_content(json: &str) -> Option<MemberContent> {
-    let v: serde_json::Value = serde_json::from_str(json).ok()?;
-    let c = v.get("content")?;
-    Some(MemberContent {
-        membership: c.get("membership")?.as_str()?.to_owned(),
-        display_name: c
-            .get("displayname")
-            .and_then(|d| d.as_str())
-            .map(str::to_owned),
-        avatar_url: c
-            .get("avatar_url")
-            .and_then(|d| d.as_str())
-            .map(str::to_owned),
-    })
 }
 
 pub(crate) async fn apply_current_state_delta(
@@ -96,66 +69,66 @@ pub(crate) async fn apply_current_state_delta(
     room_id: &RoomId,
     delta: &CurrentStateDelta,
 ) -> Result<()> {
-    for ((event_type, state_key), event_id) in &delta.upsert {
-        let mut membership: Option<String> = None;
-        if *event_type == StateEventType::RoomMember {
-            let row =
-                sqlx::query("SELECT json, sender, stream_ordering FROM events WHERE event_id = $1")
-                    .bind(event_id.as_str())
-                    .fetch_optional(&mut *conn)
-                    .await?;
-            if let Some(row) = row
-                && let Some(mc) = member_content(&row.get::<String, _>("json"))
-            {
-                membership = Some(mc.membership.clone());
-                sqlx::query(
-                        "INSERT INTO room_memberships (room_id, user_id, membership, event_id, sender, display_name, avatar_url, stream_ordering)
-                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                         ON CONFLICT (room_id, user_id) DO UPDATE SET membership = EXCLUDED.membership,
-                            event_id = EXCLUDED.event_id, sender = EXCLUDED.sender,
-                            display_name = EXCLUDED.display_name, avatar_url = EXCLUDED.avatar_url,
-                            stream_ordering = EXCLUDED.stream_ordering, forgotten = FALSE",
-                    )
-                    .bind(room_id.as_str())
-                    .bind(state_key)
-                    .bind(&mc.membership)
-                    .bind(event_id.as_str())
-                    .bind(row.get::<String, _>("sender"))
-                    .bind(&mc.display_name)
-                    .bind(&mc.avatar_url)
-                    .bind(row.get::<i64, _>("stream_ordering"))
-                    .execute(&mut *conn)
-                    .await?;
-            }
-        }
-        sqlx::query(
-            "INSERT INTO current_state_events (room_id, event_type, state_key, event_id, membership)
-             VALUES ($1, $2, $3, $4, $5)
-             ON CONFLICT (room_id, event_type, state_key) DO UPDATE SET event_id = EXCLUDED.event_id, membership = EXCLUDED.membership",
-        )
-        .bind(room_id.as_str())
-        .bind(event_type.to_string())
-        .bind(state_key)
-        .bind(event_id.as_str())
-        .bind(&membership)
-        .execute(&mut *conn)
-        .await?;
-    }
-    for (event_type, state_key) in &delta.remove {
-        sqlx::query("DELETE FROM current_state_events WHERE room_id = $1 AND event_type = $2 AND state_key = $3")
-            .bind(room_id.as_str())
-            .bind(event_type.to_string())
-            .bind(state_key)
-            .execute(&mut *conn)
-            .await?;
-        if *event_type == StateEventType::RoomMember {
-            sqlx::query("DELETE FROM room_memberships WHERE room_id = $1 AND user_id = $2")
-                .bind(room_id.as_str())
-                .bind(state_key)
-                .execute(&mut *conn)
-                .await?;
-        }
-    }
+    // One row per key, last entry wins; a key both set and removed ends up removed.
+    let upserts: std::collections::BTreeMap<_, _> = delta
+        .upsert
+        .iter()
+        .filter(|(key, _)| !delta.remove.contains(key))
+        .cloned()
+        .collect();
+    let up_types: Vec<String> = upserts.keys().map(|(t, _)| t.to_string()).collect();
+    let up_keys: Vec<String> = upserts.keys().map(|(_, k)| k.clone()).collect();
+    let up_ids: Vec<String> = upserts.values().map(ToString::to_string).collect();
+    let rm_types: Vec<String> = delta.remove.iter().map(|(t, _)| t.to_string()).collect();
+    let rm_keys: Vec<String> = delta.remove.iter().map(|(_, k)| k.clone()).collect();
+    // Membership rows are denormalised from the member events' JSON in the same statement.
+    sqlx::query(
+        "WITH up AS (
+            SELECT * FROM UNNEST($2::text[], $3::text[], $4::text[]) AS u(event_type, state_key, event_id)
+         ),
+         ev AS (
+            SELECT up.event_type, up.state_key, up.event_id, e.sender, e.stream_ordering,
+                   (e.json::jsonb)->'content' AS c
+            FROM up JOIN events e ON e.event_id = up.event_id
+         ),
+         mem AS (
+            INSERT INTO room_memberships (room_id, user_id, membership, event_id, sender, display_name, avatar_url, stream_ordering)
+            SELECT $1, state_key, c->>'membership', event_id, sender,
+                   CASE WHEN jsonb_typeof(c->'displayname') = 'string' THEN c->>'displayname' END,
+                   CASE WHEN jsonb_typeof(c->'avatar_url') = 'string' THEN c->>'avatar_url' END,
+                   stream_ordering
+            FROM ev WHERE event_type = 'm.room.member' AND jsonb_typeof(c->'membership') = 'string'
+            ON CONFLICT (room_id, user_id) DO UPDATE SET membership = EXCLUDED.membership,
+                event_id = EXCLUDED.event_id, sender = EXCLUDED.sender,
+                display_name = EXCLUDED.display_name, avatar_url = EXCLUDED.avatar_url,
+                stream_ordering = EXCLUDED.stream_ordering, forgotten = FALSE
+         ),
+         cur AS (
+            INSERT INTO current_state_events (room_id, event_type, state_key, event_id, membership)
+            SELECT $1, up.event_type, up.state_key, up.event_id,
+                   CASE WHEN up.event_type = 'm.room.member' THEN
+                        (SELECT CASE WHEN jsonb_typeof(c->'membership') = 'string' THEN c->>'membership' END
+                         FROM ev WHERE ev.event_id = up.event_id)
+                   END
+            FROM up
+            ON CONFLICT (room_id, event_type, state_key) DO UPDATE SET event_id = EXCLUDED.event_id,
+                membership = EXCLUDED.membership
+         ),
+         gone AS (
+            DELETE FROM current_state_events
+            WHERE room_id = $1 AND (event_type, state_key) IN (SELECT t, k FROM UNNEST($5::text[], $6::text[]) AS r(t, k))
+         )
+         DELETE FROM room_memberships
+         WHERE room_id = $1 AND user_id IN (SELECT k FROM UNNEST($5::text[], $6::text[]) AS r(t, k) WHERE t = 'm.room.member')",
+    )
+    .bind(room_id.as_str())
+    .bind(&up_types)
+    .bind(&up_keys)
+    .bind(&up_ids)
+    .bind(&rm_types)
+    .bind(&rm_keys)
+    .execute(&mut *conn)
+    .await?;
     Ok(())
 }
 
