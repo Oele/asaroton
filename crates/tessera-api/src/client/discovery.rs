@@ -31,6 +31,11 @@ pub async fn versions(
         ("org.matrix.msc3930".to_owned(), true),
         // Invite filtering.
         ("org.matrix.msc4155".to_owned(), true),
+        // Delayed events.
+        ("org.matrix.msc4140".to_owned(), true),
+        // Thread subscriptions and their sliding sync extension.
+        ("io.element.msc4306".to_owned(), true),
+        ("io.element.msc4308".to_owned(), true),
         // OAuth 2.0 API (MSC2965 discovery), when authentication is delegated.
         ("org.matrix.msc2965".to_owned(), services.mas.is_some()),
     ]);

@@ -90,6 +90,8 @@ pub struct ExtensionsRequest {
     pub account_data: Option<ExtensionScope>,
     pub receipts: Option<ExtensionScope>,
     pub typing: Option<ExtensionScope>,
+    /// Thread subscriptions (MSC4308), with the page limit.
+    pub thread_subscriptions: Option<usize>,
 }
 
 #[derive(Clone, Debug)]
@@ -158,6 +160,7 @@ pub struct ExtensionsResult {
     pub account_data: Option<AccountDataResult>,
     pub receipts: BTreeMap<OwnedRoomId, Value>,
     pub typing: BTreeMap<OwnedRoomId, Vec<OwnedUserId>>,
+    pub thread_subscriptions: Option<crate::thread_subscriptions::ThreadSubscriptionChanges>,
 }
 
 impl ExtensionsResult {
@@ -173,6 +176,10 @@ impl ExtensionsResult {
                 .is_none_or(|a| a.global.is_empty() && a.rooms.is_empty())
             && self.receipts.is_empty()
             && self.typing.is_empty()
+            && self
+                .thread_subscriptions
+                .as_ref()
+                .is_none_or(crate::thread_subscriptions::ThreadSubscriptionChanges::is_empty)
     }
 }
 
@@ -729,6 +736,18 @@ impl Services {
                 global,
                 rooms: per_room,
             });
+        }
+        if let Some(limit) = req.extensions.thread_subscriptions {
+            let changes = self
+                .thread_subscription_changes(
+                    user,
+                    since.map(|s| s.thread_subscriptions),
+                    Some(now.thread_subscriptions + 1),
+                    limit,
+                    since.is_none(),
+                )
+                .await?;
+            ext.thread_subscriptions = Some(changes);
         }
         if let Some(scope) = &req.extensions.receipts {
             for (room_id, sel) in &selections {

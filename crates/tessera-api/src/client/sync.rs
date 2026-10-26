@@ -217,9 +217,22 @@ pub async fn sync(
         .iter()
         .map(|(k, v)| (k.clone(), json!(v)))
         .collect();
+    // Empty membership sections are left out, as clients (and Complement) treat a present
+    // `invite` as "there are invites".
+    let mut rooms = Map::new();
+    for (key, map) in [
+        ("join", join),
+        ("leave", leave),
+        ("invite", invite),
+        ("knock", knock),
+    ] {
+        if !map.is_empty() {
+            rooms.insert(key.to_owned(), Value::Object(map));
+        }
+    }
     let body = json!({
         "next_batch": result.next_batch.to_string(),
-        "rooms": { "join": join, "leave": leave, "invite": invite, "knock": knock },
+        "rooms": rooms,
         "presence": { "events": result.presence },
         "account_data": { "events": result.account_data },
         "to_device": { "events": result.to_device },

@@ -3,6 +3,7 @@
 pub mod account;
 pub mod admin;
 pub mod backup;
+pub mod delayed_events;
 pub mod discovery;
 pub mod keys;
 pub mod mas;
@@ -14,6 +15,7 @@ pub mod session;
 pub mod sliding_sync;
 pub mod synapse_admin;
 pub mod sync;
+pub mod thread_subscriptions;
 
 use axum::Router;
 
@@ -118,8 +120,12 @@ pub fn routes(router: Router<AppState>) -> Router<AppState> {
             axum::routing::get(joined_members_handler),
         );
     // events
-    let r = route::<c::message::send_message_event::v3::Request, _, _>(r, rooms::send_message);
-    let r = route_with_extra_paths::<c::state::send_state_event::v3::Request, _, _>(
+    let r = crate::router::route_raw::<c::message::send_message_event::v3::Request, _, _>(
+        r,
+        &[],
+        delayed_events::send_message,
+    );
+    let r = crate::router::route_raw::<c::state::send_state_event::v3::Request, _, _>(
         r,
         &[
             "/_matrix/client/r0/rooms/{room_id}/state/{event_type}",
@@ -127,8 +133,45 @@ pub fn routes(router: Router<AppState>) -> Router<AppState> {
             "/_matrix/client/r0/rooms/{room_id}/state/{event_type}/",
             "/_matrix/client/v3/rooms/{room_id}/state/{event_type}/",
         ],
-        rooms::send_state,
+        delayed_events::send_state,
     );
+    // Thread subscriptions (MSC4306) and their change stream (MSC4308).
+    let r = route::<c::threads::subscribe_thread::unstable::Request, _, _>(
+        r,
+        thread_subscriptions::subscribe,
+    );
+    let r = route::<c::threads::unsubscribe_thread::unstable::Request, _, _>(
+        r,
+        thread_subscriptions::unsubscribe,
+    );
+    let r = route::<c::threads::get_thread_subscription::unstable::Request, _, _>(
+        r,
+        thread_subscriptions::get,
+    );
+    let r = crate::router::route_raw::<
+        c::threads::get_thread_subscriptions_changes::unstable::Request,
+        _,
+        _,
+    >(r, &[], thread_subscriptions::changes);
+    // Delayed events (MSC4140).
+    let r = r.route(
+        "/_matrix/client/unstable/org.matrix.msc4140/rooms/{room_id}/delayed_event/{event_type}/{txn_id}",
+        axum::routing::put(delayed_events::schedule),
+    );
+    let r = crate::router::route_raw::<
+        c::delayed_events::get_all_delayed_events::unstable::Request,
+        _,
+        _,
+    >(r, &[], delayed_events::list);
+    let r = r
+        .route(
+            "/_matrix/client/unstable/org.matrix.msc4140/delayed_events/{delay_id}",
+            axum::routing::post(delayed_events::update_with_body),
+        )
+        .route(
+            "/_matrix/client/unstable/org.matrix.msc4140/delayed_events/{delay_id}/{action}",
+            axum::routing::post(delayed_events::update_with_path),
+        );
     let r = route::<c::redact::redact_event::v3::Request, _, _>(r, rooms::redact);
     let r = route::<c::state::get_state_events::v3::Request, _, _>(r, rooms::state);
     let r = route_with_extra_paths::<c::state::get_state_event_for_key::v3::Request, _, _>(
@@ -563,7 +606,8 @@ async fn messages_handler(
         .query()
         .and_then(|q| q.split('&').find_map(|kv| kv.strip_prefix("filter=")))
         .map(|raw| {
-            percent_encoding::percent_decode_str(raw)
+            // Form encoding: `+` is a space.
+            percent_encoding::percent_decode_str(&raw.replace('+', " "))
                 .decode_utf8_lossy()
                 .into_owned()
         })

@@ -36,6 +36,8 @@ pub struct Ruma<T> {
     pub origin: Option<OwnedServerName>,
     /// The raw JSON body, kept for endpoints that need to re-serialise or sign it.
     pub json: Option<serde_json::Value>,
+    /// The raw query string, for parameters ruma's request type does not model.
+    pub query: Option<String>,
 }
 
 impl<T> Ruma<T> {
@@ -241,6 +243,7 @@ where
             serde_json::from_slice(&bytes).ok()
         };
 
+        let query = parts.uri.query().map(str::to_owned);
         let http_req = http::Request::from_parts(parts, bytes.as_ref());
         let origin = if auth == Auth::Server {
             let fed = services.fed()?;
@@ -261,6 +264,7 @@ where
             sender,
             origin,
             json,
+            query,
         })
     }
 }

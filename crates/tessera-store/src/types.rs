@@ -245,6 +245,39 @@ impl AccountData {
     }
 }
 
+// ------------------------------------------------------------------ thread subscriptions
+
+/// A user's subscription state for one thread (MSC4306).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ThreadSubscription {
+    pub room_id: OwnedRoomId,
+    pub thread_root: OwnedEventId,
+    pub subscribed: bool,
+    pub automatic: bool,
+    /// Bump stamp: when this state was last changed.
+    pub stream_id: i64,
+    /// The newest event position at the time of the last unsubscription.
+    pub unsubscribed_at: Option<i64>,
+}
+
+// ------------------------------------------------------------------ delayed events
+
+/// An event scheduled to be sent later (MSC4140).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DelayedEvent {
+    pub delay_id: String,
+    pub user_id: OwnedUserId,
+    pub device_id: Option<OwnedDeviceId>,
+    pub room_id: OwnedRoomId,
+    pub event_type: String,
+    pub state_key: Option<String>,
+    pub content: serde_json::Value,
+    pub delay_ms: i64,
+    /// When the current timeout started (ms); the event is due at `running_since + delay_ms`.
+    pub running_since: i64,
+    pub txn_id: Option<String>,
+}
+
 // ------------------------------------------------------------------ keys
 
 /// One of this server's own signing keys.

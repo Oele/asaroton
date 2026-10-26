@@ -29,6 +29,7 @@ pub struct SyncToken {
     pub to_device: i64,
     pub device_lists: i64,
     pub presence: i64,
+    pub thread_subscriptions: i64,
 }
 
 impl SyncToken {
@@ -45,6 +46,7 @@ impl SyncToken {
             to_device: next(),
             device_lists: next(),
             presence: next(),
+            thread_subscriptions: next(),
         })
     }
 }
@@ -53,14 +55,15 @@ impl std::fmt::Display for SyncToken {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "s{}_{}_{}_{}_{}_{}_{}",
+            "s{}_{}_{}_{}_{}_{}_{}_{}",
             self.events,
             self.account_data,
             self.receipts,
             self.typing,
             self.to_device,
             self.device_lists,
-            self.presence
+            self.presence,
+            self.thread_subscriptions
         )
     }
 }
@@ -273,6 +276,7 @@ impl Services {
             to_device: self.store.max_to_device_stream_id().await?,
             device_lists: self.store.max_device_list_stream_id().await?,
             presence: self.presence.position(),
+            thread_subscriptions: self.store.max_thread_subscription_stream_id().await?,
         })
     }
 

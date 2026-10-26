@@ -429,6 +429,75 @@ pub trait AccountDataStore: Send + Sync {
     ) -> Result<Option<serde_json::Value>>;
 }
 
+/// Thread subscriptions (MSC4306).
+#[async_trait]
+pub trait ThreadSubscriptionStore: Send + Sync {
+    async fn get_thread_subscription(
+        &self,
+        user_id: &UserId,
+        room_id: &RoomId,
+        thread_root: &EventId,
+    ) -> Result<Option<ThreadSubscription>>;
+    /// Subscribes (replacing any earlier state); returns the new bump stamp.
+    async fn subscribe_thread(
+        &self,
+        user_id: &UserId,
+        room_id: &RoomId,
+        thread_root: &EventId,
+        automatic: bool,
+    ) -> Result<i64>;
+    /// Unsubscribes, remembering the newest event position `at`; returns the new bump stamp.
+    async fn unsubscribe_thread(
+        &self,
+        user_id: &UserId,
+        room_id: &RoomId,
+        thread_root: &EventId,
+        at: i64,
+    ) -> Result<i64>;
+    /// Subscription changes with `above < stream_id < below` (either bound optional), newest
+    /// first, at most `limit`; `subscribed_only` drops unsubscriptions.
+    async fn thread_subscription_changes(
+        &self,
+        user_id: &UserId,
+        above: Option<i64>,
+        below: Option<i64>,
+        limit: usize,
+        subscribed_only: bool,
+    ) -> Result<Vec<ThreadSubscription>>;
+    async fn max_thread_subscription_stream_id(&self) -> Result<i64>;
+}
+
+/// Delayed events (MSC4140).
+#[async_trait]
+pub trait DelayedEventStore: Send + Sync {
+    async fn add_delayed_event(&self, event: &DelayedEvent) -> Result<()>;
+    async fn get_delayed_event(&self, delay_id: &str) -> Result<Option<DelayedEvent>>;
+    /// The delayed event a device already scheduled under this transaction ID, if any.
+    async fn delayed_event_by_txn(
+        &self,
+        user_id: &UserId,
+        device_id: Option<&DeviceId>,
+        txn_id: &str,
+    ) -> Result<Option<DelayedEvent>>;
+    async fn delayed_events_for_user(&self, user_id: &UserId) -> Result<Vec<DelayedEvent>>;
+    /// Removes the event; `false` if it was not there.
+    async fn remove_delayed_event(&self, delay_id: &str) -> Result<bool>;
+    /// Starts the timeout over from `now`; `false` if the event was not there.
+    async fn restart_delayed_event(&self, delay_id: &str, now: i64) -> Result<bool>;
+    /// Events whose timeout has passed at `now`, oldest first.
+    async fn due_delayed_events(&self, now: i64) -> Result<Vec<DelayedEvent>>;
+    /// When the next event is due (ms), if any is pending.
+    async fn next_delayed_event_due(&self) -> Result<Option<i64>>;
+    /// Drops delayed state events for a state tuple that was just overwritten; returns how many.
+    async fn remove_delayed_state_events(
+        &self,
+        room_id: &RoomId,
+        event_type: &str,
+        state_key: &str,
+    ) -> Result<u64>;
+    async fn count_delayed_state_events(&self) -> Result<u64>;
+}
+
 /// Signing keys: ours and cached remote ones.
 #[async_trait]
 pub trait KeyStore: Send + Sync {
@@ -700,6 +769,8 @@ pub trait Store:
     + EventStore
     + StateStore
     + AccountDataStore
+    + DelayedEventStore
+    + ThreadSubscriptionStore
     + KeyStore
     + E2eeStore
     + KeyBackupStore

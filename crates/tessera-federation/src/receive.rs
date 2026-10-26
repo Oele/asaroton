@@ -604,6 +604,11 @@ impl Federation {
                 room_id: room_id.clone(),
                 stream_ordering: persisted.stream_ordering,
             });
+            if let Some((ty, key)) = pdu.state_tuple() {
+                services
+                    .cancel_delayed_state_events(&room_id, &ty.to_string(), key)
+                    .await;
+            }
         }
         Ok(if soft_failed {
             Outcome::SoftFailed

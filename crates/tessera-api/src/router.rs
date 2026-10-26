@@ -55,6 +55,39 @@ where
     router
 }
 
+/// Like [`route_with_extra_paths`] for handlers that build their own response.
+pub(crate) fn route_raw<T, H, Fut>(
+    router: Router<AppState>,
+    extra: &[&'static str],
+    handler: H,
+) -> Router<AppState>
+where
+    T: IncomingRequest + Send + 'static,
+    T::Authentication: 'static,
+    H: Fn(AppState, Ruma<T>) -> Fut + Clone + Send + Sync + 'static,
+    Fut: Future<Output = Result<Response, Error>> + Send + 'static,
+{
+    let method = T::METHOD;
+    let filter = MethodFilter::try_from(method.clone()).unwrap_or(MethodFilter::GET);
+    let mut paths: BTreeSet<&'static str> = T::PATH_BUILDER.all_paths().collect();
+    paths.extend(extra.iter().copied());
+    let mut router = router;
+    for path in paths {
+        let handler = handler.clone();
+        let h = move |State(state): State<AppState>, req: Ruma<T>| {
+            let handler = handler.clone();
+            async move {
+                match handler(state, req).await {
+                    Ok(resp) => resp,
+                    Err(e) => e.into_response(),
+                }
+            }
+        };
+        router = router.route(path, on(filter, h));
+    }
+    router
+}
+
 /// Assemble the full router: client API, well-known, fallbacks and CORS preflight.
 pub fn build_router(state: AppState) -> Router {
     let router = Router::new();

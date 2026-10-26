@@ -340,6 +340,10 @@ impl Services {
             room_id: ctx.room_id.clone(),
             stream_ordering: persisted.stream_ordering,
         });
+        if let Some((ty, key)) = pdu.state_tuple() {
+            self.cancel_delayed_state_events(&ctx.room_id, &ty.to_string(), key)
+                .await;
+        }
         // Fan out to the other servers in the room.
         let hooks = self.federation();
         let fanout = pdu.clone();

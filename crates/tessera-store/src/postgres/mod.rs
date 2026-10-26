@@ -2,6 +2,7 @@
 
 mod account_data;
 mod backup;
+mod delayed_events;
 mod e2ee;
 mod events;
 mod federation;
@@ -9,6 +10,7 @@ mod keys;
 mod media;
 mod rooms;
 mod state;
+mod thread_subscriptions;
 mod users;
 
 use std::time::Duration;

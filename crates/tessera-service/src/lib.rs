@@ -10,6 +10,7 @@ pub mod account;
 pub mod admin;
 pub mod appservice;
 pub mod config;
+pub mod delayed_events;
 pub mod e2ee;
 mod error;
 pub mod federation_hooks;
@@ -27,6 +28,7 @@ pub mod sliding_sync;
 pub mod spaces;
 pub mod sync;
 pub mod thirdparty;
+pub mod thread_subscriptions;
 pub mod typing;
 
 use std::sync::Arc;
@@ -77,6 +79,8 @@ pub struct Services {
         dashmap::DashMap<(ruma::OwnedRoomId, ruma::OwnedUserId), notifications::UnreadCacheEntry>,
     /// Sliding sync connections and what each has been sent.
     pub sliding_sync: sliding_sync::SlidingSyncConnections,
+    /// Delayed event scheduling state (MSC4140).
+    pub delayed: delayed_events::DelayedEvents,
     /// Nonces handed out by the shared-secret registration endpoint.
     admin_nonces: dashmap::DashMap<String, std::time::Instant>,
     federation_hooks: federation_hooks::HooksSlot,
@@ -132,6 +136,7 @@ impl Services {
             typing: typing::TypingState::default(),
             presence: presence::PresenceMap::default(),
             sliding_sync: sliding_sync::SlidingSyncConnections::default(),
+            delayed: delayed_events::DelayedEvents::default(),
             admin_nonces: dashmap::DashMap::new(),
             federation_hooks: federation_hooks::HooksSlot::default(),
             signing_key: Arc::new(signing_key),

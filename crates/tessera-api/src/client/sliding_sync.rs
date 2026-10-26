@@ -169,6 +169,8 @@ pub async fn sliding_sync(
             .then(|| scope(x.receipts.lists.as_ref(), x.receipts.rooms.as_ref())),
         typing: (x.typing.enabled == Some(true))
             .then(|| scope(x.typing.lists.as_ref(), x.typing.rooms.as_ref())),
+        thread_subscriptions: (x.thread_subscriptions.enabled == Some(true))
+            .then(|| x.thread_subscriptions.limit.map_or(100, limit)),
     };
     let result = services
         .sliding_sync(SlidingSyncRequest {
@@ -238,6 +240,12 @@ pub async fn sliding_sync(
             })
             .collect();
         extensions.insert("typing".into(), json!({ "rooms": typing }));
+    }
+    if let Some(t) = &ext.thread_subscriptions {
+        extensions.insert(
+            "io.element.msc4308.thread_subscriptions".into(),
+            super::thread_subscriptions::changes_json(t),
+        );
     }
     let mut body = json!({
         "pos": result.pos,

@@ -219,12 +219,30 @@ impl Services {
                     .map(str::to_owned)
             })
             .unwrap_or_else(|| user.localpart().to_owned());
+        let (store, subscriber, subscriber_room) =
+            (self.store.clone(), user.to_owned(), room_id.to_owned());
         let mut push_ctx = PushConditionRoomCtx::new(
             room_id.to_owned(),
             ruma::UInt::try_from(joined.len()).unwrap_or(ruma::UInt::MAX),
             user.to_owned(),
             display_name,
-        );
+        )
+        .with_has_thread_subscription_fn(move |root: &ruma::EventId| {
+            let (store, user, room, root) = (
+                store.clone(),
+                subscriber.clone(),
+                subscriber_room.clone(),
+                root.to_owned(),
+            );
+            Box::pin(async move {
+                store
+                    .get_thread_subscription(&user, &room, &root)
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some_and(|s| s.subscribed)
+            })
+        });
         if let Some(pl) = ctx.get(StateEventType::RoomPowerLevels, "")
             && let Ok(content) = serde_json::from_str::<
                 ruma::events::room::power_levels::RoomPowerLevelsEventContent,

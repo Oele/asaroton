@@ -45,6 +45,9 @@ ruma = { version = "0.17.2", features = [
   "compat-get-3pids",
   "unstable-msc4186",
   "unstable-msc3930",
+  "unstable-msc4140",
+  "unstable-msc4306",
+  "unstable-msc4308",
 ] }
 
 # async runtime / web
