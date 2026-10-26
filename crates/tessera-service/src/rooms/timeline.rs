@@ -339,18 +339,19 @@ impl Services {
         }
         let truncated = events.len() > limit;
         events.truncate(limit);
-        // `end` is always given (as the reference implementation does); at the edge of the
-        // room's history the next page simply comes back empty.
-        let _ = exhausted;
         let last = if truncated {
             events.last().map_or(cursor.0, |e| e.stream_ordering)
         } else {
             cursor.0
         };
-        let end = Some(match direction {
-            Direction::Backwards => StreamToken(last - 1),
-            Direction::Forwards => StreamToken(last),
-        });
+        // Backwards, `end` is omitted once the start of the room's history (or the `to`
+        // bound) is reached, as the spec says; forwards it always points at the live edge so
+        // clients can keep polling.
+        let end = match direction {
+            Direction::Backwards if exhausted && !truncated => None,
+            Direction::Backwards => Some(StreamToken(last - 1)),
+            Direction::Forwards => Some(StreamToken(last)),
+        };
         Ok(TimelinePage {
             events,
             start: from,
