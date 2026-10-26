@@ -238,6 +238,23 @@ impl Services {
             (ruma::events::StateEventType, String),
             (Value, ruma::OwnedUserId),
         > = std::collections::HashMap::new();
+        // A contiguous ascending slice gets the first occurrences' previous contents from the
+        // state before its first event, in one lookup.
+        let mut before_slice = None;
+        if ascending {
+            let mut first_keys: Vec<(ruma::events::StateEventType, String)> = Vec::new();
+            for e in events {
+                if let Some((ty, key)) = e.pdu.state_tuple() {
+                    let slot = (ty, key.to_owned());
+                    if !first_keys.contains(&slot) {
+                        first_keys.push(slot);
+                    }
+                }
+            }
+            if !first_keys.is_empty() {
+                before_slice = self.state_contents_before(events, &first_keys).await?;
+            }
+        }
         for (v, e) in out.iter_mut().zip(events) {
             let Some((ty, key)) = e.pdu.state_tuple() else {
                 continue;
@@ -245,7 +262,10 @@ impl Services {
             let slot = (ty.clone(), key.to_owned());
             let prev = match last_seen.get(&slot).filter(|_| ascending) {
                 Some(p) => Some(p.clone()),
-                None => self.previous_state_content(e, &ty, key).await?,
+                None => match &before_slice {
+                    Some(map) if ascending => map.get(&slot).cloned(),
+                    _ => self.previous_state_content(e, &ty, key).await?,
+                },
             };
             if let Some((prev, sender)) = prev
                 && let Some(u) = v
@@ -279,6 +299,53 @@ impl Services {
 }
 
 impl Services {
+    /// The contents of the given state keys as of the state before a contiguous ascending
+    /// slice; `None` (so callers fall back to per-event lookups) when the slice has gaps.
+    async fn state_contents_before(
+        &self,
+        events: &[StoredEvent],
+        keys: &[(ruma::events::StateEventType, String)],
+    ) -> Result<
+        Option<
+            std::collections::HashMap<
+                (ruma::events::StateEventType, String),
+                (Value, ruma::OwnedUserId),
+            >,
+        >,
+    > {
+        let mut out = std::collections::HashMap::new();
+        let (first, last) = (&events[0], &events[events.len() - 1]);
+        let room_id = first.pdu.room_id();
+        let count = self
+            .store
+            .room_event_count_in_range(room_id, first.stream_ordering, last.stream_ordering)
+            .await?;
+        if usize::try_from(count).ok() != Some(events.len()) {
+            return Ok(None);
+        }
+        let Some(group) = self.store.state_group_before(first.event_id()).await? else {
+            // Nothing before the create event: no key has previous content.
+            return Ok(Some(out));
+        };
+        let entries = self.store.state_at_group_filtered(group, keys).await?;
+        let ids: Vec<ruma::OwnedEventId> = entries.iter().map(|e| e.event_id.clone()).collect();
+        let prev: std::collections::HashMap<ruma::OwnedEventId, StoredEvent> = self
+            .store
+            .get_events(&ids)
+            .await?
+            .into_iter()
+            .map(|e| (e.event_id().to_owned(), e))
+            .collect();
+        for e in entries {
+            if let Some(p) = prev.get(&e.event_id)
+                && let Ok(c) = serde_json::from_str::<Value>(p.pdu.content().get())
+            {
+                out.insert((e.event_type, e.state_key), (c, p.pdu.sender().to_owned()));
+            }
+        }
+        Ok(Some(out))
+    }
+
     /// Content of the state event `ev` replaced, if any (`unsigned.prev_content`).
     async fn previous_state_content(
         &self,

@@ -375,6 +375,19 @@ impl EventStore for PostgresStore {
         Ok(rows.into_iter().map(|r| r.get::<i64, _>(0)).collect())
     }
 
+    async fn room_event_count_in_range(&self, room_id: &RoomId, from: i64, to: i64) -> Result<i64> {
+        let row = sqlx::query(
+            "SELECT count(*) FROM events WHERE room_id = $1 AND stream_ordering BETWEEN $2 AND $3
+             AND NOT rejected AND NOT outlier",
+        )
+        .bind(room_id.as_str())
+        .bind(from)
+        .bind(to)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.get::<i64, _>(0))
+    }
+
     async fn get_event(&self, event_id: &EventId) -> Result<Option<StoredEvent>> {
         let row: Option<EventRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "SELECT {EVENT_COLUMNS} FROM events e JOIN rooms r ON r.room_id = e.room_id WHERE e.event_id = $1"

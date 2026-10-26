@@ -235,6 +235,8 @@ pub trait EventStore: Send + Sync {
 
     /// The newest position of every stream, for building a sync token.
     async fn stream_positions(&self) -> Result<StreamPositions>;
+    /// How many live, accepted events of the room have `from <= stream_ordering <= to`.
+    async fn room_event_count_in_range(&self, room_id: &RoomId, from: i64, to: i64) -> Result<i64>;
     async fn get_event(&self, event_id: &EventId) -> Result<Option<StoredEvent>>;
     async fn get_events(&self, event_ids: &[OwnedEventId]) -> Result<Vec<StoredEvent>>;
     async fn have_events(&self, event_ids: &[OwnedEventId]) -> Result<Vec<OwnedEventId>>;

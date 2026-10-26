@@ -633,18 +633,24 @@ impl Services {
         events: Vec<StoredEvent>,
     ) -> Result<Vec<StoredEvent>> {
         let currently_joined = self.is_joined(room_id, user).await?;
-        // A joined user sees everything under `shared` or `world_readable`; when the slice
-        // does not change the visibility, one lookup at its first event settles it.
+        // A joined user sees everything under `shared` or `world_readable`. When every
+        // visibility change inside the slice keeps it that open, one lookup at the first
+        // event settles the whole slice.
+        let open = |hv: &str| matches!(hv, "shared" | "world_readable");
         if currently_joined
             && !events.is_empty()
-            && !events
+            && events
                 .iter()
-                .any(|e| e.pdu.event_type() == &TimelineEventType::RoomHistoryVisibility)
+                .filter(|e| e.pdu.event_type() == &TimelineEventType::RoomHistoryVisibility)
+                .all(|e| {
+                    serde_json::from_str::<Value>(e.pdu.content().get()).is_ok_and(|c| {
+                        c.get("history_visibility")
+                            .and_then(Value::as_str)
+                            .is_some_and(open)
+                    })
+                })
             && let Some(group) = self.state_group_for_visibility(&events[0]).await?
-            && matches!(
-                self.history_visibility_at(group).await?.as_str(),
-                "shared" | "world_readable"
-            )
+            && open(&self.history_visibility_at(group).await?)
         {
             return Ok(events);
         }
