@@ -344,11 +344,11 @@ impl Services {
         } else {
             cursor.0
         };
-        // Backwards, `end` is omitted once the start of the room's history (or the `to`
-        // bound) is reached, as the spec says; forwards it always points at the live edge so
-        // clients can keep polling.
+        // Backwards, an empty page past the start of the room's history (or the `to` bound)
+        // carries no `end`, as the spec says and as Synapse does; a page with events always
+        // has one, and forwards `end` points at the live edge so clients can keep polling.
         let end = match direction {
-            Direction::Backwards if exhausted && !truncated => None,
+            Direction::Backwards if exhausted && events.is_empty() => None,
             Direction::Backwards => Some(StreamToken(last - 1)),
             Direction::Forwards => Some(StreamToken(last)),
         };
