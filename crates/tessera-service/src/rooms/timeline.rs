@@ -536,6 +536,20 @@ impl Services {
         }
     }
 
+    /// The room's history visibility in a state group (`shared` when unset).
+    async fn history_visibility_at(&self, group: tessera_store::StateGroupId) -> Result<String> {
+        let key = [(StateEventType::RoomHistoryVisibility, String::new())];
+        for e in self.store.state_at_group_filtered(group, &key).await? {
+            if let Some(ev) = self.store.get_event(&e.event_id).await?
+                && let Ok(c) = serde_json::from_str::<Value>(ev.pdu.content().get())
+                && let Some(v) = c.get("history_visibility").and_then(Value::as_str)
+            {
+                return Ok(v.to_owned());
+            }
+        }
+        Ok("shared".to_owned())
+    }
+
     async fn visibility_context_at(
         &self,
         group: tessera_store::StateGroupId,
@@ -619,6 +633,21 @@ impl Services {
         events: Vec<StoredEvent>,
     ) -> Result<Vec<StoredEvent>> {
         let currently_joined = self.is_joined(room_id, user).await?;
+        // A joined user sees everything under `shared` or `world_readable`; when the slice
+        // does not change the visibility, one lookup at its first event settles it.
+        if currently_joined
+            && !events.is_empty()
+            && !events
+                .iter()
+                .any(|e| e.pdu.event_type() == &TimelineEventType::RoomHistoryVisibility)
+            && let Some(group) = self.state_group_for_visibility(&events[0]).await?
+            && matches!(
+                self.history_visibility_at(group).await?.as_str(),
+                "shared" | "world_readable"
+            )
+        {
+            return Ok(events);
+        }
         let mut cache = HashMap::new();
         let mut out = Vec::with_capacity(events.len());
         for ev in events {

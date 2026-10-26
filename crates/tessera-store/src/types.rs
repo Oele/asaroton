@@ -245,6 +245,19 @@ impl AccountData {
     }
 }
 
+// ------------------------------------------------------------------ stream positions
+
+/// The newest position of every stream a sync token tracks, read in one query.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StreamPositions {
+    pub events: i64,
+    pub account_data: i64,
+    pub receipts: i64,
+    pub to_device: i64,
+    pub device_lists: i64,
+    pub thread_subscriptions: i64,
+}
+
 // ------------------------------------------------------------------ thread subscriptions
 
 /// A user's subscription state for one thread (MSC4306).

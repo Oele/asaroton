@@ -220,6 +220,28 @@ fn ids_from_rows(rows: Vec<sqlx::postgres::PgRow>) -> Vec<OwnedEventId> {
 
 #[async_trait]
 impl EventStore for PostgresStore {
+    async fn stream_positions(&self) -> Result<crate::StreamPositions> {
+        let row = sqlx::query(
+            "SELECT (SELECT COALESCE(MAX(stream_ordering), 0) FROM events) AS events,
+                    GREATEST((SELECT COALESCE(MAX(stream_id), 0) FROM account_data),
+                             (SELECT COALESCE(MAX(stream_id), 0) FROM push_rules)) AS account_data,
+                    (SELECT COALESCE(MAX(stream_id), 0) FROM receipts) AS receipts,
+                    (SELECT COALESCE(MAX(stream_id), 0) FROM to_device_messages) AS to_device,
+                    (SELECT COALESCE(MAX(stream_id), 0) FROM device_list_changes) AS device_lists,
+                    (SELECT COALESCE(MAX(stream_id), 0) FROM thread_subscriptions) AS thread_subscriptions",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(crate::StreamPositions {
+            events: row.get("events"),
+            account_data: row.get("account_data"),
+            receipts: row.get("receipts"),
+            to_device: row.get("to_device"),
+            device_lists: row.get("device_lists"),
+            thread_subscriptions: row.get("thread_subscriptions"),
+        })
+    }
+
     async fn persist_event(&self, event: PersistEvent) -> Result<PersistedEvent> {
         let mut tx = self.pool.begin().await?;
         let out = persist_one(&mut tx, event).await?;

@@ -554,6 +554,23 @@ impl RoomStore for PostgresStore {
         Ok(row.get::<i64, _>(0))
     }
 
+    async fn users_sharing_rooms_with(&self, user_id: &UserId) -> Result<Vec<OwnedUserId>> {
+        let rows = sqlx::query(
+            "SELECT DISTINCT m2.user_id FROM room_memberships m1
+             JOIN room_memberships m2 ON m2.room_id = m1.room_id AND m2.membership = 'join'
+             WHERE m1.user_id = $1 AND m1.membership = 'join'",
+        )
+        .bind(user_id.as_str())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|r| {
+                OwnedUserId::try_from(r.get::<String, _>(0))
+                    .map_err(|e| Error::Corrupt(e.to_string()))
+            })
+            .collect()
+    }
+
     async fn joined_member_count(&self, room_id: &RoomId) -> Result<i64> {
         let row = sqlx::query(
             "SELECT count(*) FROM room_memberships WHERE room_id = $1 AND membership = 'join'",

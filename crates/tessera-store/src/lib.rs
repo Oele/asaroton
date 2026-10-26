@@ -135,6 +135,8 @@ pub trait RoomStore: Send + Sync {
     /// Servers with at least one joined user in the room.
     async fn servers_in_room(&self, room_id: &RoomId) -> Result<Vec<ruma::OwnedServerName>>;
     async fn joined_member_count(&self, room_id: &RoomId) -> Result<i64>;
+    /// Everyone joined to a room the user is joined to (the user included).
+    async fn users_sharing_rooms_with(&self, user_id: &UserId) -> Result<Vec<OwnedUserId>>;
     /// All memberships of a user (any state), for sync.
     async fn memberships_for_user(&self, user_id: &UserId) -> Result<Vec<Membership>>;
     /// Memberships of a user whose current membership event is newer than `since`.
@@ -231,6 +233,8 @@ pub trait EventStore: Send + Sync {
     /// backfilled events can be stored oldest-first yet ordered correctly.
     async fn reserve_backfill_orderings(&self, n: usize) -> Result<Vec<StreamOrdering>>;
 
+    /// The newest position of every stream, for building a sync token.
+    async fn stream_positions(&self) -> Result<StreamPositions>;
     async fn get_event(&self, event_id: &EventId) -> Result<Option<StoredEvent>>;
     async fn get_events(&self, event_ids: &[OwnedEventId]) -> Result<Vec<StoredEvent>>;
     async fn have_events(&self, event_ids: &[OwnedEventId]) -> Result<Vec<OwnedEventId>>;
@@ -382,6 +386,12 @@ pub trait StateStore: Send + Sync {
     ) -> Result<Option<OwnedEventId>>;
     /// Current state as full PDUs.
     async fn current_state_pdus(&self, room_id: &RoomId) -> Result<Vec<StoredEvent>>;
+    /// The current state events for the given keys only.
+    async fn current_state_pdus_for(
+        &self,
+        room_id: &RoomId,
+        keys: &[(StateEventType, String)],
+    ) -> Result<Vec<StoredEvent>>;
     async fn apply_current_state_delta(
         &self,
         room_id: &RoomId,

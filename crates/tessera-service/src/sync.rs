@@ -268,15 +268,16 @@ impl Services {
     }
 
     pub(crate) async fn current_token(&self) -> Result<SyncToken> {
+        let p = self.store.stream_positions().await?;
         Ok(SyncToken {
-            events: self.store.max_stream_ordering().await?,
-            account_data: self.store.max_account_data_stream_id().await?,
-            receipts: self.store.max_receipt_stream_id().await?,
+            events: p.events,
+            account_data: p.account_data,
+            receipts: p.receipts,
             typing: self.typing.position(),
-            to_device: self.store.max_to_device_stream_id().await?,
-            device_lists: self.store.max_device_list_stream_id().await?,
+            to_device: p.to_device,
+            device_lists: p.device_lists,
             presence: self.presence.position(),
-            thread_subscriptions: self.store.max_thread_subscription_stream_id().await?,
+            thread_subscriptions: p.thread_subscriptions,
         })
     }
 
@@ -429,7 +430,7 @@ impl Services {
 
         // Presence of users we share rooms with.
         if filter.presence_enabled {
-            out.presence = self.sync_presence(user, since, &out, &newly_joined).await?;
+            out.presence = self.sync_presence(user, since, &newly_joined).await?;
         }
 
         // To-device messages and device lists (per device).
@@ -786,18 +787,16 @@ impl Services {
         &self,
         user: &UserId,
         since: Option<SyncToken>,
-        out: &SyncResult,
         newly_joined: &[OwnedRoomId],
     ) -> Result<Vec<Value>> {
         let mut interesting: HashSet<OwnedUserId> = HashSet::new();
-        let rooms: Vec<OwnedRoomId> = if since.is_none() {
-            out.join.keys().cloned().collect()
+        if since.is_none() {
+            interesting.extend(self.store.users_sharing_rooms_with(user).await?);
         } else {
-            newly_joined.to_vec()
-        };
-        for room in &rooms {
-            for m in self.store.members(room, Some("join")).await? {
-                interesting.insert(m.user_id);
+            for room in newly_joined {
+                for m in self.store.members(room, Some("join")).await? {
+                    interesting.insert(m.user_id);
+                }
             }
         }
         let mut events = Vec::new();
@@ -830,14 +829,7 @@ impl Services {
             if self.presence.position() <= s.presence {
                 return Ok(events);
             }
-            let my_rooms = self.store.rooms_for_user(user, "join").await?;
-            let mut shared: HashSet<OwnedUserId> = HashSet::new();
-            for room in &my_rooms {
-                for m in self.store.members(room, Some("join")).await? {
-                    shared.insert(m.user_id);
-                }
-            }
-            for u in shared {
+            for u in self.store.users_sharing_rooms_with(user).await? {
                 if emitted.contains(&u) {
                     continue;
                 }

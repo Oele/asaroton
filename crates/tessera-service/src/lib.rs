@@ -81,6 +81,8 @@ pub struct Services {
     pub sliding_sync: sliding_sync::SlidingSyncConnections,
     /// Delayed event scheduling state (MSC4140).
     pub delayed: delayed_events::DelayedEvents,
+    /// Parsed push rulesets with their stream id, dropped when the user changes them.
+    pub push_rules_cache: dashmap::DashMap<ruma::OwnedUserId, Arc<(ruma::push::Ruleset, i64)>>,
     /// Nonces handed out by the shared-secret registration endpoint.
     admin_nonces: dashmap::DashMap<String, std::time::Instant>,
     federation_hooks: federation_hooks::HooksSlot,
@@ -137,6 +139,7 @@ impl Services {
             presence: presence::PresenceMap::default(),
             sliding_sync: sliding_sync::SlidingSyncConnections::default(),
             delayed: delayed_events::DelayedEvents::default(),
+            push_rules_cache: dashmap::DashMap::new(),
             admin_nonces: dashmap::DashMap::new(),
             federation_hooks: federation_hooks::HooksSlot::default(),
             signing_key: Arc::new(signing_key),

@@ -208,10 +208,28 @@ impl Services {
         room_id: &RoomId,
         user: &UserId,
     ) -> Result<(ruma::push::Ruleset, PushConditionRoomCtx)> {
-        let ctx = self.room_context(room_id).await?;
-        let joined = self.store.members(room_id, Some("join")).await?;
-        let display_name = ctx
-            .get(StateEventType::RoomMember, user.as_str())
+        // Only the create event, the power levels and the user's own membership matter, so
+        // the full room state is not loaded.
+        let info = self
+            .store
+            .get_room(room_id)
+            .await?
+            .ok_or_else(|| crate::Error::not_found("Room not found."))?;
+        let rules = tessera_core::room_version::rules(&info.room_version)?;
+        let keys = [
+            (StateEventType::RoomCreate, String::new()),
+            (StateEventType::RoomPowerLevels, String::new()),
+            (StateEventType::RoomMember, user.to_string()),
+        ];
+        let mut state: crate::rooms::power::StatePdus = std::collections::HashMap::new();
+        for se in self.store.current_state_pdus_for(room_id, &keys).await? {
+            if let Some((ty, key)) = se.pdu.state_tuple() {
+                state.insert((ty, key.to_owned()), se.pdu.clone());
+            }
+        }
+        let joined = self.store.joined_member_count(room_id).await?;
+        let display_name = state
+            .get(&(StateEventType::RoomMember, user.to_string()))
             .and_then(|p| serde_json::from_str::<Value>(p.content().get()).ok())
             .and_then(|c| {
                 c.get("displayname")
@@ -223,7 +241,7 @@ impl Services {
             (self.store.clone(), user.to_owned(), room_id.to_owned());
         let mut push_ctx = PushConditionRoomCtx::new(
             room_id.to_owned(),
-            ruma::UInt::try_from(joined.len()).unwrap_or(ruma::UInt::MAX),
+            ruma::UInt::try_from(joined.max(0)).unwrap_or(ruma::UInt::MAX),
             user.to_owned(),
             display_name,
         )
@@ -243,7 +261,7 @@ impl Services {
                     .is_some_and(|s| s.subscribed)
             })
         });
-        if let Some(pl) = ctx.get(StateEventType::RoomPowerLevels, "")
+        if let Some(pl) = state.get(&(StateEventType::RoomPowerLevels, String::new()))
             && let Ok(content) = serde_json::from_str::<
                 ruma::events::room::power_levels::RoomPowerLevelsEventContent,
             >(pl.content().get())
@@ -253,8 +271,8 @@ impl Services {
                 content.users_default,
                 content.notifications,
                 RoomPowerLevelsRules::new(
-                    &ctx.rules.authorization,
-                    crate::rooms::power::creators(&ctx.state, &ctx.rules),
+                    &rules.authorization,
+                    crate::rooms::power::creators(&state, &rules),
                 ),
             ));
         }
