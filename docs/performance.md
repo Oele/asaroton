@@ -1,42 +1,58 @@
 # Performance notes
 
-Measured 2026-10-25 on a 16-core desktop with PostgreSQL 18 on the same machine, release
-build, `scripts/loadtest.py` (threads issue sends and incremental syncs back to back, so the
-server is saturated; a Complement run was loading the machine at the same time, so treat the
-numbers as a floor).
+Measured on a 16-core desktop with PostgreSQL 18 on the same machine, release build,
+`scripts/loadtest.py` (threads issue sends and incremental syncs back to back, so the server is
+saturated). The database had grown through many earlier runs, so the numbers are a floor.
 
-| Scenario | Result |
-|---|---|
-| 60 users, 10 shared rooms, 48 client threads | 231 msg/s; send p50 50 ms, p95 117 ms; incremental sync p50 448 ms |
-| 100 users, 10 shared rooms, 48 client threads | 177 msg/s; send p50 67 ms, p95 140 ms; incremental sync p50 544 ms |
-| Quiet server, user in 10 rooms | incremental sync with one new event 8 ms, idle 3.5 ms; initial sync 80–200 ms |
-| Registration | 100 users in 0.6 s |
-| Joins | 990 joins in 1.5 s |
+| Scenario (100 users, 10 shared rooms, 48 client threads) | 2026-10-25 | 2026-10-26 |
+|---|---|---|
+| Sends | 177 msg/s; p50 67 ms, p95 140 ms | 303 msg/s; p50 47 ms, p95 123 ms |
+| Incremental sync under that load | p50 544 ms, p95 724 ms | p50 287 ms, p95 456 ms |
+| Initial sync under that load | p50 914 ms | p50 648 ms |
+| Joins | 990 in 1.5 s | 990 in 1.4 s |
 
-## What the profile showed
+Quiet server, user in ten rooms: an incremental sync with one new event takes 8 ms, an idle one
+3.5 ms.
+
+## Where the time goes
 
 `perf` on the release binary under load put over 20% of CPU in socket writes to PostgreSQL and
 most of the rest in allocation: the server is bound by database round trips, not computation.
-Statement logging gave the counts per request:
+Statement logging (`log_min_duration_statement = 0`) gives the counts per request.
 
-- A message send issues about 30 statements inside one transaction (event, edges, auth edges,
-  forward extremities, search index, transaction-id bookkeeping, state lookups) and runs under
-  the room's lock, so one room sustains roughly 40 sends/s and throughput scales with the
-  number of active rooms.
-- An incremental sync used to visit every joined room (about 20 statements per room). It now
-  asks two set queries which rooms have new events or receipts and skips the rest; idle rooms
-  cost nothing, a room with new events about 15 statements.
-- An initial sync of ten rooms runs about 580 statements, dominated by per-event state lookups
-  for `unsigned.membership` and `prev_content`.
-- The push worker was querying every member's pushers for every event; it now keeps a cached
-  set of users that have pushers.
-- The pipeline's `unread_counts` is cached incrementally per room and user.
+Statements per request, before and after the 2026-10-26 work:
+
+| Request | Before | After |
+|---|---|---|
+| Message send (authentication, de-duplication, room load, persist, fan-out bookkeeping) | 35 | 15, of which 3 inside the persist transaction |
+| Idle incremental sync | 20 | 14 |
+| Incremental sync with one new event in one room | 40 | 30 |
+| Initial sync of one fresh room with ten timeline events | 39 | 35 (was 88 with three rooms, 55 now) |
+
+What changed:
+
+- The persist path writes the event with its edges, auth links, missing-prev bookkeeping and the
+  relation and search indexes in one statement; the state group and its delta are one statement;
+  the current-state delta (including the denormalised membership rows) is one statement; the
+  forward extremities are replaced in one statement.
+- Access tokens are cached for 30 seconds after validation (logout, device deletion and account
+  changes drop the entries), and a device's last-seen timestamp is written at most once a minute.
+  That removes three statements from every authenticated request.
+- A sync token is built from one query over all stream positions instead of six.
+- Push rule evaluation loads only the create event, the power levels and the user's own membership
+  (not the whole room state and member list), and parsed rulesets are cached per user.
+- Presence collects the users sharing a room through one join query instead of one query per room.
+- History-visibility filtering of a timeline slice settles in one lookup when the visibility is
+  `shared` or `world_readable` throughout; `prev_content` for a contiguous slice comes from one
+  state lookup at the slice's start instead of one state-group walk per state event.
+- The push worker keeps a cached set of users that have pushers; unread counts are cached
+  incrementally per room and user; idle rooms are skipped in incremental syncs through two set
+  queries.
 
 ## Next steps
 
-1. Collapse the persist path into fewer statements (one CTE or a stored function), and move the
-   search/relations indexing out of the room lock.
-2. Compute `unsigned.membership` and `prev_content` from the state groups of the whole slice in
-   one query instead of per event.
-3. Keep current room state in memory for hot rooms (the state map is re-read per event).
-4. Profile federation fan-out separately; the sender batches per destination already.
+1. Keep current room state in memory for hot rooms: the send path still loads the room's state,
+   extremities and prev events (about seven statements) before the persist transaction.
+2. Memoise per-sync lookups that recur (the user's memberships are read three times, the joined
+   room list twice).
+3. Profile federation fan-out separately; the sender batches per destination already.

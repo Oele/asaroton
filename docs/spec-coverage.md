@@ -24,13 +24,13 @@ fixed right after the run; see the deviations at the end for the rest).
 | Appservice API | done: registrations (YAML), namespaces, `as_token` auth with `user_id` and `device_id`, transactions incl. ephemeral data (`receive_ephemeral`: typing, receipts, presence), user/alias queries, ping, third-party protocol/location/user lookups, device management for appservice users |
 | Admin API | Synapse-compatible subset: shared-secret registration, server notices, `server_version`, users (list, get, create/update, deactivate, reset password, admin flag, devices, joined rooms), rooms (list, details, members, state, delete, force join), history purge |
 | Auth: MSC3861 delegation | done: `[mas]` config delegates token validation to Matrix Authentication Service (introspection with the shared secret, 2-minute cache, device scope handling), the `/_synapse/mas/*` management API MAS provisions users and devices through, `/auth_metadata` and MSC2965 well-known discovery, login/registration/password endpoints disabled, cross-signing resets gated on MAS approval. Tested against MAS 1.27 with compatibility tokens |
+| Unstable MSCs (Complement `msc*` packages, all passing) | account-data deletion (MSC3391: `DELETE` endpoints and `PUT {}`; deletions appear as empty events in incremental syncs), relation-type filters on `/messages` (MSC3874), push rules for polls (MSC3930, `event_match` form), idempotent cross-signing uploads without UIA (MSC3967), device notification settings removed with the device (MSC3890), invite filtering (MSC4155: `org.matrix.msc4155.invite_permission_config`, blocked invites fail with `ORG.MATRIX.MSC4155.M_INVITE_BLOCKED`, ignored ones succeed silently, also over federation), delayed events (MSC4140: `?org.matrix.msc4140.delay=` on send/state, the `delayed_event` endpoint, listing, cancel/restart/send, state changes cancel pending delayed state, survives restarts), thread subscriptions (MSC4306 endpoints with automatic-subscription conflicts, MSC4308 sliding-sync extension and `/thread_subscriptions` paging). The MSC4306 push rules are not in the default ruleset: they would silence every unsubscribed thread for clients that cannot subscribe |
 | Operations | rate limiting (per address and per token buckets, `M_LIMIT_EXCEEDED`), message retention (`m.room.retention` and a server default), fuzz targets for canonical JSON, PDU parsing and redaction (`scripts/fuzz.sh`), load-test swarm (`scripts/loadtest.py`), release Dockerfile and compose file (`docs/deployment.md`) |
 
 Known deviations (Complement): UIA accepts an `auth` dict without a session like Synapse does
 (TestRegistration's strictness subtest, skipped for Synapse too); TestIsDirectFlagFederation sends
 a room-version-12 invite without `m.room.create` in `invite_room_state`, which v1.16 (MSC4311)
 requires receivers to reject (it passes on servers that still default to room version 11);
-TestDeviceListsUpdateOverFederationOnRoomJoin is skipped for Synapse as well. Experimental (non-spec) Complement packages
-are not targeted: faster joins (MSC3902), delayed events (MSC4140), thread subscriptions
-(MSC4306), invite filtering (MSC4155), owned state (MSC3757), account-data deletion (MSC3391),
-relation filters (MSC3874), MSC2836, MSC3389, MSC3930, MSC3967, MSC3890, MSC4242.
+TestDeviceListsUpdateOverFederationOnRoomJoin is skipped for Synapse as well. Experimental Complement packages
+still not targeted: faster joins (MSC3902), owned state (MSC3757, needs the `org.matrix.msc3757.10`
+room version), MSC2836, MSC3389, MSC4242.
