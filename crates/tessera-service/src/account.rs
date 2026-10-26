@@ -338,6 +338,22 @@ impl Services {
     pub async fn delete_device_fully(&self, user_id: &UserId, device_id: &DeviceId) -> Result<()> {
         self.store.delete_device(user_id, device_id).await?;
         self.store.delete_device_keys(user_id, device_id).await?;
+        // The device's local notification settings go with it (MSC3890).
+        for ty in [
+            format!("m.local_notification_settings.{device_id}"),
+            format!("org.matrix.msc3890.local_notification_settings.{device_id}"),
+        ] {
+            if self
+                .store
+                .delete_account_data(user_id, None, &ty)
+                .await?
+                .is_some()
+            {
+                self.notifier.notify(crate::Notification::User {
+                    user_id: user_id.to_owned(),
+                });
+            }
+        }
         self.notify_device_list_change(user_id, Some(device_id))
             .await
     }

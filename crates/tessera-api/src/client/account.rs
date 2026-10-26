@@ -621,7 +621,7 @@ pub async fn delete_profile_field(
 }
 
 /// Bearer authentication for raw handlers.
-async fn authenticate_headers(
+pub(crate) async fn authenticate_headers(
     services: &AppState,
     headers: &axum::http::HeaderMap,
 ) -> Result<tessera_auth::Sender> {

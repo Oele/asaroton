@@ -25,6 +25,7 @@ tower-http.workspace = true
 http.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+percent-encoding.workspace = true
 sha2.workspace = true
 dashmap.workspace = true
 thiserror.workspace = true

@@ -298,6 +298,19 @@ impl Services {
         if ctx.membership(inviter) != Some(MembershipState::Join) {
             return Err(Error::forbidden("You are not in the room."));
         }
+        if self.is_local(invitee) {
+            match self.invite_decision(invitee, inviter).await? {
+                crate::invite_filter::InviteDecision::Allow => {}
+                crate::invite_filter::InviteDecision::Block => {
+                    return Err(Error::custom(
+                        "ORG.MATRIX.MSC4155.M_INVITE_BLOCKED",
+                        http::StatusCode::FORBIDDEN,
+                        "The invitee does not accept invites from you.",
+                    ));
+                }
+                crate::invite_filter::InviteDecision::Ignore => return Err(Error::InviteIgnored),
+            }
+        }
         let mut content = self.member_content_for(invitee, "invite", reason).await?;
         if is_direct {
             content["is_direct"] = json!(true);

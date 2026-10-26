@@ -13,6 +13,7 @@ pub mod config;
 pub mod e2ee;
 mod error;
 pub mod federation_hooks;
+pub mod invite_filter;
 pub mod media;
 pub mod notices;
 pub mod notifications;
@@ -37,6 +38,23 @@ use tessera_store::DynStore;
 pub use config::Config;
 pub use error::{Error, Result};
 pub use notifier::{Notification, Notifier};
+
+/// Shell-style glob matching (`*` any run, `?` one character), as used by filters and MSC4155.
+#[must_use]
+pub fn glob_match(pattern: &str, value: &str) -> bool {
+    fn rec(p: &[char], v: &[char]) -> bool {
+        match (p.first(), v.first()) {
+            (None, None) => true,
+            (Some('*'), _) => rec(&p[1..], v) || (!v.is_empty() && rec(p, &v[1..])),
+            (Some('?'), Some(_)) => rec(&p[1..], &v[1..]),
+            (Some(a), Some(b)) if a == b => rec(&p[1..], &v[1..]),
+            _ => false,
+        }
+    }
+    let p: Vec<char> = pattern.chars().collect();
+    let v: Vec<char> = value.chars().collect();
+    rec(&p, &v)
+}
 
 /// Everything the server's handlers need, behind one `Arc`.
 pub struct Services {

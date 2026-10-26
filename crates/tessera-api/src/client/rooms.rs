@@ -19,7 +19,10 @@ use ruma::{
     serde::Raw,
 };
 use serde_json::{Value, json};
-use tessera_service::rooms::{create::CreateRoomRequest, timeline::StreamToken};
+use tessera_service::{
+    glob_match,
+    rooms::{create::CreateRoomRequest, timeline::StreamToken},
+};
 use tessera_store::{Direction, StoredEvent};
 
 use crate::{AppState, Error, Result, Ruma};
@@ -360,7 +363,7 @@ pub async fn invite(
     let sender = req.sender()?;
     match &req.body.recipient {
         invite_user::v3::InvitationRecipient::UserId(r) => {
-            services
+            match services
                 .invite_user(
                     &req.body.room_id,
                     &sender.user_id,
@@ -368,7 +371,12 @@ pub async fn invite(
                     r.reason.as_deref(),
                     false,
                 )
-                .await?;
+                .await
+            {
+                // The invitee's filter drops the invite silently (MSC4155).
+                Ok(_) | Err(tessera_service::Error::InviteIgnored) => {}
+                Err(e) => return Err(e.into()),
+            }
         }
         _ => {
             return Err(Error::matrix(
@@ -676,9 +684,38 @@ pub async fn state_key(
     ))
 }
 
+/// Relation-type filtering of `/messages` (MSC3874), read from the raw filter JSON.
+#[derive(Debug, Default)]
+pub struct RelTypeFilter {
+    pub rel_types: Option<Vec<String>>,
+    pub not_rel_types: Vec<String>,
+}
+
+impl RelTypeFilter {
+    pub(crate) fn from_filter_json(filter: &Value) -> Self {
+        let list = |key: &str| -> Option<Vec<String>> {
+            filter.get(key)?.as_array().map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+        };
+        Self {
+            rel_types: list("org.matrix.msc3874.rel_types"),
+            not_rel_types: list("org.matrix.msc3874.not_rel_types").unwrap_or_default(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.rel_types.is_none() && self.not_rel_types.is_empty()
+    }
+}
+
 pub async fn messages(
     services: AppState,
     req: Ruma<get_message_events::v3::Request>,
+    rel_filter: RelTypeFilter,
 ) -> Result<get_message_events::v3::Response> {
     let sender = req.sender()?;
     let dir = match req.body.dir {
@@ -724,6 +761,24 @@ pub async fn messages(
                 .is_ok_and(|c| c.get("url").is_some());
             let want = matches!(want, ruma::api::client::filter::UrlFilter::EventsWithUrl);
             if has_url != want {
+                return false;
+            }
+        }
+        if !rel_filter.is_empty() {
+            let rel_type = serde_json::from_str::<Value>(e.pdu.content().get())
+                .ok()
+                .and_then(|c| {
+                    c.get("m.relates_to")?
+                        .get("rel_type")?
+                        .as_str()
+                        .map(str::to_owned)
+                });
+            if let Some(want) = &rel_filter.rel_types
+                && !rel_type.as_ref().is_some_and(|r| want.contains(r))
+            {
+                return false;
+            }
+            if rel_type.is_some_and(|r| rel_filter.not_rel_types.contains(&r)) {
                 return false;
             }
         }
@@ -1546,22 +1601,6 @@ pub async fn preview_url_legacy(
     resp.data =
         Some(serde_json::value::to_raw_value(&data).map_err(|e| Error::internal(e.to_string()))?);
     Ok(resp)
-}
-
-/// Matrix filter globs: `*` matches anything, `?` one character.
-fn glob_match(pattern: &str, value: &str) -> bool {
-    fn rec(p: &[char], v: &[char]) -> bool {
-        match (p.first(), v.first()) {
-            (None, None) => true,
-            (Some('*'), _) => rec(&p[1..], v) || (!v.is_empty() && rec(p, &v[1..])),
-            (Some('?'), Some(_)) => rec(&p[1..], &v[1..]),
-            (Some(a), Some(b)) if a == b => rec(&p[1..], &v[1..]),
-            _ => false,
-        }
-    }
-    let p: Vec<char> = pattern.chars().collect();
-    let v: Vec<char> = value.chars().collect();
-    rec(&p, &v)
 }
 
 // ---------------------------------------------------------------- spaces

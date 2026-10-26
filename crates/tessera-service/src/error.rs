@@ -22,6 +22,16 @@ pub enum Error {
     Json(#[from] serde_json::Error),
     #[error("internal error: {0}")]
     Internal(String),
+    /// A Matrix error whose errcode is outside ruma's set (unstable MSCs).
+    #[error("{message}")]
+    Custom {
+        errcode: String,
+        status: http::StatusCode,
+        message: String,
+    },
+    /// An invite the invitee's filter drops silently (MSC4155); callers report success.
+    #[error("invite ignored by the invitee")]
+    InviteIgnored,
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -36,6 +46,17 @@ impl Error {
     }
     pub fn forbidden(message: impl Into<String>) -> Self {
         Self::matrix(ErrorKind::Forbidden, http::StatusCode::FORBIDDEN, message)
+    }
+    pub fn custom(
+        errcode: impl Into<String>,
+        status: http::StatusCode,
+        message: impl Into<String>,
+    ) -> Self {
+        Self::Custom {
+            errcode: errcode.into(),
+            status,
+            message: message.into(),
+        }
     }
     pub fn not_found(message: impl Into<String>) -> Self {
         Self::matrix(ErrorKind::NotFound, http::StatusCode::NOT_FOUND, message)

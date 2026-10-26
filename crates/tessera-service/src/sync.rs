@@ -406,7 +406,7 @@ impl Services {
                 .push(json!({ "type": "m.push_rules", "content": self.push_rules_account_data(user).await? }));
         }
         for ad in self.store.account_data_since(user, ad_since).await? {
-            if ad.stream_id > now.account_data {
+            if ad.stream_id > now.account_data || (since.is_none() && ad.is_deleted()) {
                 continue;
             }
             let ev = json!({ "type": ad.data_type, "content": ad.content });

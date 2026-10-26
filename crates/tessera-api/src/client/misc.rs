@@ -114,6 +114,81 @@ pub async fn get_room_account_data(
     Ok(get_room_account_data::v3::Response::new(raw(&ad.content)?))
 }
 
+/// `DELETE /_matrix/client/unstable/org.matrix.msc3391/user/{userId}/account_data/{type}`
+pub async fn delete_global_account_data(
+    axum::extract::State(services): axum::extract::State<AppState>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Path((user_id, data_type)): axum::extract::Path<(String, String)>,
+) -> axum::response::Response {
+    delete_account_data(&services, &headers, &user_id, None, &data_type).await
+}
+
+/// `DELETE /_matrix/client/unstable/org.matrix.msc3391/user/{userId}/rooms/{roomId}/account_data/{type}`
+pub async fn delete_room_account_data(
+    axum::extract::State(services): axum::extract::State<AppState>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Path((user_id, room_id, data_type)): axum::extract::Path<(
+        String,
+        String,
+        String,
+    )>,
+) -> axum::response::Response {
+    delete_account_data(&services, &headers, &user_id, Some(&room_id), &data_type).await
+}
+
+async fn delete_account_data(
+    services: &AppState,
+    headers: &axum::http::HeaderMap,
+    user_id: &str,
+    room_id: Option<&str>,
+    data_type: &str,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    match delete_account_data_inner(services, headers, user_id, room_id, data_type).await {
+        Ok(()) => {
+            let mut resp = axum::Json(json!({})).into_response();
+            crate::extract::add_cors(resp.headers_mut());
+            resp
+        }
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn delete_account_data_inner(
+    services: &AppState,
+    headers: &axum::http::HeaderMap,
+    user_id: &str,
+    room_id: Option<&str>,
+    data_type: &str,
+) -> Result<()> {
+    let sender = crate::client::account::authenticate_headers(services, headers).await?;
+    if sender.user_id != user_id {
+        return Err(Error::forbidden(
+            "Cannot delete another user's account data.",
+        ));
+    }
+    if data_type == "m.fully_read" || data_type == "m.push_rules" {
+        return Err(Error::bad_json(format!(
+            "Cannot delete {data_type} through this API."
+        )));
+    }
+    let room_id = room_id
+        .map(ruma::OwnedRoomId::try_from)
+        .transpose()
+        .map_err(|_| Error::invalid_param("Invalid room ID."))?;
+    if services
+        .store
+        .delete_account_data(&sender.user_id, room_id.as_deref(), data_type)
+        .await?
+        .is_some()
+    {
+        services.notifier.notify(Notification::User {
+            user_id: sender.user_id.clone(),
+        });
+    }
+    Ok(())
+}
+
 pub async fn create_filter(
     services: AppState,
     req: Ruma<create_filter::v3::Request>,

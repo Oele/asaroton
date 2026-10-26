@@ -288,6 +288,16 @@ pub fn routes(router: Router<AppState>) -> Router<AppState> {
         r,
         misc::get_room_account_data,
     );
+    // Account data deletion (MSC3391).
+    let r = r
+        .route(
+            "/_matrix/client/unstable/org.matrix.msc3391/user/{user_id}/account_data/{data_type}",
+            axum::routing::delete(misc::delete_global_account_data),
+        )
+        .route(
+            "/_matrix/client/unstable/org.matrix.msc3391/user/{user_id}/rooms/{room_id}/account_data/{data_type}",
+            axum::routing::delete(misc::delete_room_account_data),
+        );
     let r = route::<c::filter::create_filter::v3::Request, _, _>(r, misc::create_filter);
     let r = route::<c::filter::get_filter::v3::Request, _, _>(r, misc::get_filter);
     let r = route::<c::typing::create_typing_event::v3::Request, _, _>(r, misc::typing);
@@ -548,11 +558,23 @@ async fn messages_handler(
             *req.uri_mut() = uri;
         }
     }
+    let rel_filter = req
+        .uri()
+        .query()
+        .and_then(|q| q.split('&').find_map(|kv| kv.strip_prefix("filter=")))
+        .map(|raw| {
+            percent_encoding::percent_decode_str(raw)
+                .decode_utf8_lossy()
+                .into_owned()
+        })
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .map(|f| rooms::RelTypeFilter::from_filter_json(&f))
+        .unwrap_or_default();
     let ruma = match crate::Ruma::<ruma::api::client::message::get_message_events::v3::Request>::from_request(req, &state).await {
         Ok(r) => r,
         Err(e) => return e.into_response(),
     };
-    match rooms::messages(state, ruma).await {
+    match rooms::messages(state, ruma, rel_filter).await {
         Ok(resp) => crate::extract::RumaResponse(resp).into_response(),
         Err(e) => e.into_response(),
     }

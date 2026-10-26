@@ -11,6 +11,7 @@ repository = "https://github.com/sanderoele/tessera"
 authors = ["Sander Oele <sander@oele.net>"]
 
 [workspace.dependencies]
+percent-encoding = "2"
 # internal crates
 tessera-core = { path = "crates/tessera-core" }
 tessera-store = { path = "crates/tessera-store" }
@@ -43,6 +44,7 @@ ruma = { version = "0.17.2", features = [
   "compat-unset-avatar",
   "compat-get-3pids",
   "unstable-msc4186",
+  "unstable-msc3930",
 ] }
 
 # async runtime / web

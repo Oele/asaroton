@@ -317,8 +317,13 @@ impl Services {
             if invitee == &creator {
                 continue;
             }
-            self.invite_locked(&mut ctx, &creator, invitee, None, req.is_direct)
-                .await?;
+            match self
+                .invite_locked(&mut ctx, &creator, invitee, None, req.is_direct)
+                .await
+            {
+                Ok(_) | Err(Error::InviteIgnored) => {}
+                Err(e) => return Err(e),
+            }
         }
 
         if req.visibility == Some(Visibility::Public) {

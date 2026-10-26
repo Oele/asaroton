@@ -25,6 +25,14 @@ fn to_json<T>(r: &Raw<T>) -> Result<Value> {
     serde_json::from_str(r.json().get()).map_err(|e| Error::bad_json(e.to_string()))
 }
 
+/// A cross-signing key without its `signatures`, for comparing uploads with stored keys.
+fn without_signatures(mut key: Value) -> Value {
+    if let Some(o) = key.as_object_mut() {
+        o.remove("signatures");
+    }
+    key
+}
+
 fn counts_to_api(counts: BTreeMap<String, u64>) -> BTreeMap<ruma::OneTimeKeyAlgorithm, UInt> {
     counts
         .into_iter()
@@ -260,7 +268,27 @@ pub async fn upload_signing(
         .get_cross_signing_key(&sender.user_id, "master")
         .await?
         .is_some();
-    if has_existing && services.mas.is_some() {
+    // Re-uploading exactly the stored keys is idempotent and needs no UIA (MSC3967).
+    let mut unchanged = has_existing;
+    for (ty, key) in [
+        ("master", &req.body.master_key),
+        ("self_signing", &req.body.self_signing_key),
+        ("user_signing", &req.body.user_signing_key),
+    ] {
+        if !unchanged {
+            break;
+        }
+        if let Some(key) = key {
+            let stored = services
+                .store
+                .get_cross_signing_key(&sender.user_id, ty)
+                .await?;
+            unchanged = stored.map(without_signatures) == Some(without_signatures(to_json(key)?));
+        }
+    }
+    if unchanged {
+        // Nothing to change; the request is accepted as a no-op.
+    } else if has_existing && services.mas.is_some() {
         // The authentication service re-authenticates the user and tells us when a reset is
         // allowed; the permission is good for a few minutes.
         let allowed = services

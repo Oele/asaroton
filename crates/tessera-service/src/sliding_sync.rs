@@ -703,10 +703,12 @@ impl Services {
                 if ad.stream_id > now.account_data {
                     continue;
                 }
+                // A deletion (MSC3391) is only news to a connection that saw the data.
+                let fresh = ad.stream_id > ad_since && !(ad_since == 0 && ad.is_deleted());
                 let ev = json!({ "type": ad.data_type, "content": ad.content });
                 match &ad.room_id {
                     None => {
-                        if ad.stream_id > ad_since {
+                        if fresh {
                             global.push(ev);
                         }
                     }
@@ -717,7 +719,7 @@ impl Services {
                         if !scope.applies(sel) {
                             continue;
                         }
-                        if initial_rooms.contains(r) || ad.stream_id > ad_since {
+                        if fresh || (initial_rooms.contains(r) && !ad.is_deleted()) {
                             per_room.entry(r.clone()).or_default().push(ev);
                         }
                     }

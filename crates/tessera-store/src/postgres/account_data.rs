@@ -37,7 +37,7 @@ impl AccountDataStore for PostgresStore {
     ) -> Result<Option<AccountData>> {
         let row = sqlx::query(
             "SELECT room_id, data_type, content, stream_id FROM account_data
-             WHERE user_id = $1 AND room_id = $2 AND data_type = $3",
+             WHERE user_id = $1 AND room_id = $2 AND data_type = $3 AND content <> '{}'::jsonb",
         )
         .bind(user_id.as_str())
         .bind(room_id.map_or("", RoomId::as_str))
@@ -45,6 +45,25 @@ impl AccountDataStore for PostgresStore {
         .fetch_optional(&self.pool)
         .await?;
         row.as_ref().map(account_data_from_row).transpose()
+    }
+
+    async fn delete_account_data(
+        &self,
+        user_id: &UserId,
+        room_id: Option<&RoomId>,
+        data_type: &str,
+    ) -> Result<Option<i64>> {
+        let row = sqlx::query(
+            "UPDATE account_data SET content = '{}'::jsonb, stream_id = nextval('account_data_seq')
+             WHERE user_id = $1 AND room_id = $2 AND data_type = $3 AND content <> '{}'::jsonb
+             RETURNING stream_id",
+        )
+        .bind(user_id.as_str())
+        .bind(room_id.map_or("", RoomId::as_str))
+        .bind(data_type)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| r.get::<i64, _>(0)))
     }
 
     async fn account_data_since(&self, user_id: &UserId, since: i64) -> Result<Vec<AccountData>> {

@@ -32,6 +32,14 @@ impl Error {
     pub fn forbidden(message: impl Into<String>) -> Self {
         Self::matrix(ErrorKind::Forbidden, StatusCode::FORBIDDEN, message)
     }
+    /// An error with an errcode outside ruma's set (unstable MSCs).
+    pub fn custom(
+        errcode: impl Into<String>,
+        status: StatusCode,
+        message: impl Into<String>,
+    ) -> Self {
+        Self::Service(tessera_service::Error::custom(errcode, status, message))
+    }
     pub fn not_found(message: impl Into<String>) -> Self {
         Self::matrix(ErrorKind::NotFound, StatusCode::NOT_FOUND, message)
     }
@@ -88,7 +96,8 @@ impl Error {
 fn service_status(e: &tessera_service::Error) -> StatusCode {
     use tessera_service::Error as S;
     match e {
-        S::Matrix { status, .. } => *status,
+        S::Matrix { status, .. } | S::Custom { status, .. } => *status,
+        S::InviteIgnored => StatusCode::FORBIDDEN,
         S::Auth(
             tessera_auth::AuthError::UnknownToken { .. } | tessera_auth::AuthError::Expired,
         ) => StatusCode::UNAUTHORIZED,
@@ -140,6 +149,21 @@ impl Error {
                 status,
                 message,
             }) => (kind, message, status),
+            Self::Service(S::Custom {
+                errcode,
+                status,
+                message,
+            }) => {
+                return Ok(MatrixError::new(
+                    status,
+                    ErrorBody::Json(serde_json::json!({ "errcode": errcode, "error": message })),
+                ));
+            }
+            Self::Service(S::InviteIgnored) => (
+                ErrorKind::Forbidden,
+                "The invitee does not accept invites from you.".to_owned(),
+                StatusCode::FORBIDDEN,
+            ),
             Self::Service(S::Auth(tessera_auth::AuthError::UnknownToken { soft_logout })) => (
                 ErrorKind::UnknownToken(unknown_token_data(soft_logout)),
                 "Unrecognised access token.".to_owned(),

@@ -410,6 +410,14 @@ pub trait AccountDataStore: Send + Sync {
         room_id: Option<&RoomId>,
         data_type: &str,
     ) -> Result<Option<AccountData>>;
+    /// Deletes account data (MSC3391) by replacing it with empty content, which incremental
+    /// syncs report; returns the new stream id when there was something to delete.
+    async fn delete_account_data(
+        &self,
+        user_id: &UserId,
+        room_id: Option<&RoomId>,
+        data_type: &str,
+    ) -> Result<Option<i64>>;
     /// All account data for the user with stream id > `since`.
     async fn account_data_since(&self, user_id: &UserId, since: i64) -> Result<Vec<AccountData>>;
     async fn max_account_data_stream_id(&self) -> Result<i64>;

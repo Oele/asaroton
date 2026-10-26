@@ -234,6 +234,17 @@ pub struct AccountData {
     pub stream_id: i64,
 }
 
+impl AccountData {
+    /// Deleted account data (MSC3391) is kept as an empty object so that incremental syncs can
+    /// report the deletion.
+    #[must_use]
+    pub fn is_deleted(&self) -> bool {
+        self.content
+            .as_object()
+            .is_some_and(serde_json::Map::is_empty)
+    }
+}
+
 // ------------------------------------------------------------------ keys
 
 /// One of this server's own signing keys.

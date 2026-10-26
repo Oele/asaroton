@@ -34,6 +34,16 @@ pub enum Error {
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
+/// An errcode outside the `M_` namespace in a remote error body, kept verbatim for the client.
+fn custom_errcode(body: &str) -> Option<String> {
+    let code = serde_json::from_str::<serde_json::Value>(body)
+        .ok()?
+        .get("errcode")?
+        .as_str()?
+        .to_owned();
+    (!code.starts_with("M_")).then_some(code)
+}
+
 impl From<Error> for tessera_service::Error {
     fn from(e: Error) -> Self {
         use ruma::api::error::ErrorKind;
@@ -83,6 +93,11 @@ impl From<Error> for tessera_service::Error {
                 } else {
                     http::StatusCode::BAD_GATEWAY
                 };
+                if kind == ErrorKind::Unknown
+                    && let Some(code) = custom_errcode(&body)
+                {
+                    return tessera_service::Error::custom(code, status, message);
+                }
                 tessera_service::Error::matrix(kind, status, message)
             }
             Error::Discovery(s, m) | Error::Transport(s, m) => tessera_service::Error::matrix(

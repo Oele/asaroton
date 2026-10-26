@@ -23,6 +23,14 @@ pub async fn versions(
     resp.unstable_features = BTreeMap::from([
         // Simplified Sliding Sync (MSC4186).
         ("org.matrix.simplified_msc3575".to_owned(), true),
+        // Account data deletion.
+        ("org.matrix.msc3391".to_owned(), true),
+        // Relation-type filtering of /messages.
+        ("org.matrix.msc3874".to_owned(), true),
+        // Push rules for polls.
+        ("org.matrix.msc3930".to_owned(), true),
+        // Invite filtering.
+        ("org.matrix.msc4155".to_owned(), true),
         // OAuth 2.0 API (MSC2965 discovery), when authentication is delegated.
         ("org.matrix.msc2965".to_owned(), services.mas.is_some()),
     ]);
