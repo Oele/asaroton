@@ -42,3 +42,13 @@ proxy; tessera answers them with an error when delegation is on. Clients discove
   `tessera_federation=debug` is useful when debugging federation).
 - `scripts/loadtest.py` is a synthetic client swarm for capacity checks and
   `scripts/fuzz.sh` runs the fuzz targets under `fuzz/` (needs the nightly toolchain).
+
+## Behind a reverse proxy on port 443
+
+Set `public_base_url = "https://matrix.example.org"` so `.well-known/matrix/client` and login
+responses carry the public URL, and `federation.well_known_server = "matrix.example.org:443"` so
+tessera serves `.well-known/matrix/server` and other servers reach it through the proxy instead
+of port 8448 (the federation listener can then be disabled). Proxy `/_matrix`, `/_synapse` and
+`/.well-known/matrix` to the client listener with `nocanon` and `AllowEncodedSlashes NoDecode`
+(Apache) or the equivalent, keep the proxy timeout above the longest `/sync` long-poll, and set
+`rate_limiting.trust_x_forwarded_for = true`.

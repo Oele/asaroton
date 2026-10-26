@@ -19,6 +19,11 @@ pub struct Config {
     /// Where to store server signing keys and media. Created if missing.
     #[serde(default = "default_data_dir")]
     pub data_dir: PathBuf,
+    /// The URL clients reach the server at (`https://matrix.example.org`), announced in
+    /// `.well-known/matrix/client` and login responses. Needed behind a reverse proxy; defaults
+    /// to the client listener's own address.
+    #[serde(default)]
+    pub public_base_url: Option<String>,
     #[serde(default)]
     pub listeners: Listeners,
     #[serde(default)]
@@ -104,6 +109,10 @@ pub struct FederationConfig {
     /// Servers to use as key notaries (defaults to matrix.org).
     #[serde(default)]
     pub trusted_key_servers: Vec<OwnedServerName>,
+    /// Serve `.well-known/matrix/server` pointing other servers at this host and port
+    /// (`matrix.example.org:443`), so federation can run through a reverse proxy on 443.
+    #[serde(default)]
+    pub well_known_server: Option<String>,
     /// Allow federation over plain HTTP to these servers (testing only).
     #[serde(default)]
     pub insecure_http_servers: Vec<OwnedServerName>,

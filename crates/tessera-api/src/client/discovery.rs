@@ -72,6 +72,19 @@ pub fn capabilities(
     Ok(resp)
 }
 
+/// `.well-known/matrix/server`: where other servers find this one, when configured.
+pub async fn well_known_server(State(services): State<AppState>) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    match &services.config.well_known_server {
+        Some(target) => {
+            let mut resp = Json(serde_json::json!({ "m.server": target })).into_response();
+            crate::extract::add_cors(resp.headers_mut());
+            resp
+        }
+        None => crate::Error::not_found("No server delegation configured.").into_response(),
+    }
+}
+
 pub async fn well_known_client(State(services): State<AppState>) -> Json<serde_json::Value> {
     let mut body = serde_json::json!({
         "m.homeserver": { "base_url": services.config.public_base_url }

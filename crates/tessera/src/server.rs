@@ -34,10 +34,12 @@ async fn connect_store(config: &Config) -> anyhow::Result<Arc<PostgresStore>> {
 }
 
 fn service_config(config: &Config) -> anyhow::Result<tessera_service::Config> {
-    let public_base_url = if config.listeners.client.tls().is_some() {
-        format!("https://{}", config.server_name)
-    } else {
-        format!("http://{}", config.listeners.client.bind)
+    let public_base_url = match &config.public_base_url {
+        Some(url) => url.trim_end_matches('/').to_owned(),
+        None if config.listeners.client.tls().is_some() => {
+            format!("https://{}", config.server_name)
+        }
+        None => format!("http://{}", config.listeners.client.bind),
     };
     let mut trusted = config.federation.trusted_key_servers.clone();
     if trusted.is_empty()
@@ -79,6 +81,7 @@ fn service_config(config: &Config) -> anyhow::Result<tessera_service::Config> {
             })
             .collect::<anyhow::Result<Vec<_>>>()?,
         public_base_url,
+        well_known_server: config.federation.well_known_server.clone(),
         software_version: env!("CARGO_PKG_VERSION").to_owned(),
         media_dir: config.data_dir.join("media"),
         appservices: load_appservices(config)?,

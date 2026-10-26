@@ -1,0 +1,4 @@
+[2026-10-26 14:07:58.670301] INFO: Creating TXT record for _acme-challenge.tessera with challenge 'wlvaf38JGJkcIpOxZQtWQcO5Q3QZmOL_QXz8zW-WEhQ' [] []
+[2026-10-26 14:07:59.727529] INFO: Waiting until nameservers (ns0.transip.net, ns1.transip.nl, ns2.transip.eu) are up-to-date [] []
+[2026-10-26 14:08:29.879519] INFO: All nameservers are updated! [] []
+[2026-10-26 14:09:05.048087] INFO: Cleaning up record _acme-challenge.tessera with value 'wlvaf38JGJkcIpOxZQtWQcO5Q3QZmOL_QXz8zW-WEhQ' [] []

@@ -5,6 +5,8 @@ server_name = "example.org"
 database_url = "postgres://tessera:tessera@postgres/tessera"
 # Signing keys and media are stored here.
 data_dir = "/data"
+# Behind a reverse proxy: the URL clients use (announced in .well-known/matrix/client).
+# public_base_url = "https://matrix.example.org"
 
 [listeners.client]
 bind = "0.0.0.0:8008"
@@ -14,6 +16,10 @@ bind = "0.0.0.0:8008"
 bind = "0.0.0.0:8448"
 # Federation must be reachable over HTTPS; terminate TLS here or in a reverse proxy.
 # tls = { cert = "/data/fullchain.pem", key = "/data/privkey.pem" }
+
+[federation]
+# Serve .well-known/matrix/server so other servers use the reverse proxy on 443 instead of 8448.
+# well_known_server = "matrix.example.org:443"
 
 [registration]
 enabled = false

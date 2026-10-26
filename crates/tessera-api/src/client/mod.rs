@@ -36,6 +36,10 @@ pub fn routes(router: Router<AppState>) -> Router<AppState> {
         "/.well-known/matrix/client",
         axum::routing::get(discovery::well_known_client),
     );
+    let r = r.route(
+        "/.well-known/matrix/server",
+        axum::routing::get(discovery::well_known_server),
+    );
     // session
     let r = route::<c::session::get_login_types::v3::Request, _, _>(r, session::login_types);
     let r = route::<c::session::login::v3::Request, _, _>(r, session::login);

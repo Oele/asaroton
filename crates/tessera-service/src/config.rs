@@ -18,6 +18,8 @@ pub struct Config {
     pub admins: Vec<ruma::OwnedUserId>,
     /// Public base URL for the client API, used in well-known and login responses.
     pub public_base_url: String,
+    /// `m.server` value for `.well-known/matrix/server`, when federation is delegated.
+    pub well_known_server: Option<String>,
     /// Software version string reported in `/versions`.
     pub software_version: String,
     /// Directory for media files.
