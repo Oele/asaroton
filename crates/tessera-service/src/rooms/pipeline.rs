@@ -137,9 +137,22 @@ impl Services {
         Ok(ctx)
     }
 
+    /// Keeps the context for later sends. The cache is bounded by the total number of state
+    /// events held, so a few very large rooms cannot pin hundreds of megabytes.
     pub(crate) fn cache_room_context(&self, ctx: &RoomContext) {
+        const MAX_STATE_ENTRIES: usize = 200_000;
+        if ctx.state.len() > MAX_STATE_ENTRIES / 2 {
+            return;
+        }
         if let Ok(mut c) = self.room_ctx_cache.lock() {
             c.put(ctx.room_id.clone(), Arc::new(ctx.clone()));
+            let mut total: usize = c.iter().map(|(_, v)| v.state.len()).sum();
+            while total > MAX_STATE_ENTRIES {
+                match c.pop_lru() {
+                    Some((_, v)) => total = total.saturating_sub(v.state.len()),
+                    None => break,
+                }
+            }
         }
     }
 
