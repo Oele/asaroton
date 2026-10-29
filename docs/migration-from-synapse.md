@@ -177,12 +177,27 @@ name points).
   set to 1 to match, at the cost of sequential scans for such terms.
 - The 107 unsent device-list pokes are for dead servers and can be dropped.
 
+## Selection: what is left behind on purpose
+
+Of the 399 rooms, 291 exist only because deactivated spam accounts joined large rooms elsewhere
+and 46 have no local member at all; they carry 2.28M of the 2.48M events and all but 20k of the
+53M state rows. The import therefore selects rather than copies:
+
+- Rooms: those with a real (non-deactivated) local account joined, invited, or left (62 rooms:
+  16 joined, 46 invited or left so the "historical" list keeps working). Rooms in partial state
+  are never selected; the two present are spam-only anyway.
+- Users: every row, but deactivated accounts come over as a name with `is_deactivated` only (no
+  devices, tokens, keys, account data, pushers or media), so the names stay reserved and other
+  servers' references to them still resolve.
+- Events: every event of a selected room, including those sent by spam accounts: a room's
+  history graph cannot lose events (other events point at them and other servers hold them).
+- Media: uploads by active accounts (16 GB); the 8 files of deactivated accounts are dropped.
+- Email addresses and email-based password reset: dropped (decided 2026-10-29).
+- Search minimum term length: tessera's default of 3, not the fork's 1 (decided 2026-10-29).
+- Rollback period: one week with Synapse stopped but intact (decided 2026-10-29).
+
+The comparison script compares the selected set, not the whole database.
+
 ## Open questions
 
-1. Whether the two partial-state rooms matter to anyone; if not, leaving them before the export
-   is the simplest.
-2. Whether the 8 email addresses and email-based password reset may be dropped (tessera has no
-   3PID or email support).
-3. Whether the Synapse substring-search fork's one-character minimum should be kept.
-4. The rollback period you are comfortable with (the plan assumes a week with Synapse stopped but
-   intact).
+None at the moment; the decisions are recorded under "Selection".
