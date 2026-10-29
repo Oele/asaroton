@@ -354,7 +354,7 @@ impl Importer {
             let algorithm = json!({ "algorithm": r.get::<String, _>("algorithm"), "auth_data": to_jsonb(&r.get::<String, _>("auth_data")) });
             n += sqlx::query("INSERT INTO key_backup_versions (user_id, version, algorithm, etag, deleted) VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING")
                 .bind(r.get::<String, _>("user_id")).bind(r.get::<i64, _>("version")).bind(algorithm.to_string())
-                .bind(r.get::<i64, _>("etag")).bind(r.get::<i16, _>("deleted") != 0)
+                .bind(r.get::<i64, _>("etag")).bind(r.get::<i32, _>("deleted") != 0)
                 .execute(&self.dst).await?.rows_affected() as usize;
         }
         counts.push(("backup versions", n));
