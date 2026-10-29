@@ -80,6 +80,7 @@ rand = "0.9"
 sha2 = "0.10"
 ed25519-dalek = "2"
 argon2 = "0.5"
+bcrypt = "0.17"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico", "tiff"] }
 hmac = "0.12"
 sha1 = "0.10"

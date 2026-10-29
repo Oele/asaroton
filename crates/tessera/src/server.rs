@@ -25,7 +25,7 @@ pub fn init_tracing(config: &Config) {
     }
 }
 
-async fn connect_store(config: &Config) -> anyhow::Result<Arc<PostgresStore>> {
+pub async fn connect_store(config: &Config) -> anyhow::Result<Arc<PostgresStore>> {
     let store = PostgresStore::connect(&config.database_url, config.database_max_connections)
         .await
         .context("connecting to PostgreSQL")?;

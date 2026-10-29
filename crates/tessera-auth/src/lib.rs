@@ -19,7 +19,7 @@ use std::{
 use ruma::{OwnedDeviceId, OwnedUserId};
 use tessera_store::{DynStore, now_ts};
 
-pub use password::{hash_password, verify_password};
+pub use password::{hash_password, is_bcrypt, verify_password};
 pub use token::{generate_device_id, generate_session_id, generate_token};
 pub use uia::{StageResult, UiaOutcome, UiaSessions};
 

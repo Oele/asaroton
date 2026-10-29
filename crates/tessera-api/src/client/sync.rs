@@ -144,9 +144,12 @@ pub async fn sync(
     let sender = req.sender()?;
     let since = match req.body.since.as_deref() {
         None | Some("") => None,
-        Some(s) => {
-            Some(SyncToken::parse(s).ok_or_else(|| Error::invalid_param("Invalid since token."))?)
-        }
+        Some(s) => match SyncToken::parse(s) {
+            Some(t) => Some(t),
+            // A token from the server this one replaced (after a migration): start over.
+            None if s.starts_with('s') && s.split('_').count() > 8 => None,
+            None => return Err(Error::invalid_param("Invalid since token.")),
+        },
     };
 
     let filter: Option<FilterDefinition> = match &req.body.filter {

@@ -134,11 +134,25 @@ impl Services {
             return Ok(None);
         };
         let password = password.to_owned();
-        let ok = tokio::task::spawn_blocking(move || verify_password(&hash, &password))
-            .await
-            .map_err(|e| Error::internal(e.to_string()))?;
+        let legacy = tessera_auth::is_bcrypt(&hash);
+        let (ok, rehashed) = tokio::task::spawn_blocking(move || {
+            let ok = verify_password(&hash, &password);
+            // A bcrypt hash from an imported Synapse account becomes argon2 once it is known
+            // to match.
+            let rehashed = (ok && legacy)
+                .then(|| hash_password(&password).ok())
+                .flatten();
+            (ok, rehashed)
+        })
+        .await
+        .map_err(|e| Error::internal(e.to_string()))?;
         if !ok {
             return Ok(None);
+        }
+        if let Some(new_hash) = rehashed {
+            self.store
+                .set_password_hash(user_id, Some(&new_hash))
+                .await?;
         }
         self.store.get_user(user_id).await.map_err(Into::into)
     }

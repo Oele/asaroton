@@ -3,6 +3,7 @@
 #![allow(unreachable_pub)]
 
 mod config;
+mod import_synapse;
 mod server;
 
 use std::path::PathBuf;
@@ -30,6 +31,8 @@ enum Command {
     ShowKey,
     /// Store the plain text of older messages for substring search (see `search.mode`).
     SearchBackfill,
+    /// Copy a Synapse homeserver's data into this (empty) database.
+    ImportSynapse(import_synapse::ImportArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -45,6 +48,7 @@ fn main() -> anyhow::Result<()> {
             Command::Migrate => server::migrate_only(config).await,
             Command::ShowKey => server::show_key(config).await,
             Command::SearchBackfill => server::search_backfill(config).await,
+            Command::ImportSynapse(args) => import_synapse::run(config, args).await,
         }
     })
 }

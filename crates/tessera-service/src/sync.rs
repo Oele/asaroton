@@ -35,6 +35,11 @@ pub struct SyncToken {
 impl SyncToken {
     pub fn parse(s: &str) -> Option<Self> {
         let rest = s.strip_prefix('s')?;
+        // Tokens have at most eight parts; longer ones come from another implementation
+        // (Synapse's have ten) and must not be read positionally.
+        if rest.split('_').count() > 8 {
+            return None;
+        }
         let mut it = rest.split('_').map(|p| p.parse::<i64>().ok());
         let events = it.next()??;
         let mut next = || it.next().flatten().unwrap_or(0);
