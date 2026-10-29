@@ -276,6 +276,19 @@ A rehearsal on the host (same commands into a `tessera_rehearsal` database, fede
 is the last step before the real window; the desktop rehearsal covered everything except media
 links and the key file.
 
+## Cutover record (2026-10-29, 16:46 to 16:48 local)
+
+`/root/tessera-cutover.sh` on the host: Synapse stopped and disabled, media files handed to the
+`tessera` user, import into the production database (197,725 events, 16,670 of 16,772 media
+files linked; the 102 missing ones were already absent from Synapse's store), comparison OK,
+`tessera.service` enabled and started, Apache switched to port 8018. Synapse was down for about
+two minutes. Afterwards: federationtester.matrix.org reports OK with the original key
+`ed25519:a_ceXC`; a local bot's messages went out to every server in its rooms; messages from
+matrix.enimatek.nl queued during the window were delivered; the only failed inbound requests
+(503) fall inside the window. The rollback script and Synapse's database, config and files stay
+untouched until 2026-11-05; after that the `tessera_rehearsal` database, /var/lib/tessera-rehearsal,
+the `tessera-rehearsal` unit and the SSH write permission on the desktop can go.
+
 ## Open questions
 
 None at the moment; the decisions are recorded under "Selection".
