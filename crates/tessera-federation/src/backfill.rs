@@ -11,7 +11,9 @@ impl Federation {
     /// as backfilled history, and return how many new events were stored.
     pub async fn backfill_room(&self, room_id: &RoomId, limit: usize) -> Result<usize> {
         let services = &self.services;
-        let mut from: Vec<OwnedEventId> = services.store.missing_prev_events(room_id).await?;
+        // Continue from the gaps in the timeline itself; the prev events of outlier state
+        // events (a join's auth chain reaches back to the room's creation) are not history.
+        let mut from: Vec<OwnedEventId> = services.store.backfill_points(room_id, 5).await?;
         if from.is_empty() {
             from = services.store.backward_extremities(room_id).await?;
         }

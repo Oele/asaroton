@@ -697,6 +697,19 @@ impl EventStore for PostgresStore {
         Ok(row.get::<Option<i64>, _>(0))
     }
 
+    async fn backfill_points(&self, room_id: &RoomId, limit: usize) -> Result<Vec<OwnedEventId>> {
+        let rows = sqlx::query(
+            "SELECT m.event_id FROM missing_events m JOIN events e ON e.event_id = m.referenced_by
+             WHERE m.room_id = $1 AND NOT e.outlier AND NOT e.rejected
+             GROUP BY m.event_id ORDER BY MIN(e.stream_ordering) LIMIT $2",
+        )
+        .bind(room_id.as_str())
+        .bind(i64::try_from(limit).unwrap_or(i64::MAX))
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(ids_from_rows(rows))
+    }
+
     async fn backward_extremities(&self, room_id: &RoomId) -> Result<Vec<OwnedEventId>> {
         let rows = sqlx::query(
             "SELECT DISTINCT m.referenced_by FROM missing_events m JOIN events e ON e.event_id = m.referenced_by

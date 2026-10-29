@@ -280,7 +280,8 @@ fn default_room_version() -> RoomVersionId {
     tessera_core::DEFAULT_ROOM_VERSION
 }
 fn default_log_filter() -> String {
-    "info,tessera=debug".to_owned()
+    // ruma's state resolution logs every auth check at info level.
+    "info,tessera=debug,ruma_state_res=warn".to_owned()
 }
 
 impl Config {

@@ -262,6 +262,10 @@ pub trait EventStore: Send + Sync {
     ) -> Result<Option<StreamOrdering>>;
     /// Oldest events in the room that have missing prev events (backfill points).
     async fn backward_extremities(&self, room_id: &RoomId) -> Result<Vec<OwnedEventId>>;
+    /// Missing prev events of the room's *timeline* (events that are not outliers), oldest gap
+    /// first: where backfill should continue. Prev events of outlier state events are not
+    /// history and are left out.
+    async fn backfill_points(&self, room_id: &RoomId, limit: usize) -> Result<Vec<OwnedEventId>>;
 
     /// The full auth chain (transitive `auth_events`) of the given events, excluding them.
     async fn auth_chain(&self, event_ids: &[OwnedEventId]) -> Result<Vec<OwnedEventId>>;

@@ -212,7 +212,13 @@ impl Federation {
         }
         let mut map = PublicKeyMap::new();
         map.insert(server_name.to_string(), set);
-        tessera_core::signing::verify_json(&map, &keys)
+        // A notary passes the response on with its own signature (and those of notaries it
+        // got it from) added; only the origin server's signature is checked here.
+        let mut to_verify = keys.clone();
+        if let Some(ruma::CanonicalJsonValue::Object(sigs)) = to_verify.get_mut("signatures") {
+            sigs.retain(|entity, _| entity == server_name.as_str());
+        }
+        tessera_core::signing::verify_json(&map, &to_verify)
             .map_err(|e| Error::Protocol(format!("server key response not validly signed: {e}")))?;
 
         // Spec: cache for at most half the remaining validity period.
