@@ -56,6 +56,33 @@ impl SyncToken {
     }
 }
 
+impl SyncToken {
+    /// A token issued by Synapse (`s<events>_<presence>_<typing>_<receipt>_<account_data>_...`,
+    /// ten parts) mapped onto ours after a migration. The event position is shared because the
+    /// stream orderings were imported unchanged; the other streams start over so pending
+    /// to-device messages, account data and receipts are delivered, while device lists and
+    /// typing continue from now.
+    #[must_use]
+    pub fn from_synapse(s: &str, now: &SyncToken) -> Option<Self> {
+        let rest = s.strip_prefix('s')?;
+        let parts: Vec<&str> = rest.split('_').collect();
+        if parts.len() <= 8 {
+            return None;
+        }
+        let events = parts[0].parse::<i64>().ok()?;
+        Some(Self {
+            events: events.min(now.events),
+            account_data: 0,
+            receipts: 0,
+            typing: now.typing,
+            to_device: 0,
+            device_lists: now.device_lists,
+            presence: 0,
+            thread_subscriptions: 0,
+        })
+    }
+}
+
 impl std::fmt::Display for SyncToken {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -270,6 +297,16 @@ impl Services {
             }
         }
         Ok(result)
+    }
+
+    /// The token a client should continue from: ours parsed, or Synapse's mapped (see
+    /// [`SyncToken::from_synapse`]); `None` when it is neither.
+    pub async fn resolve_since_token(&self, s: &str) -> Result<Option<SyncToken>> {
+        if let Some(t) = SyncToken::parse(s) {
+            return Ok(Some(t));
+        }
+        let now = self.current_token().await?;
+        Ok(SyncToken::from_synapse(s, &now))
     }
 
     pub(crate) async fn current_token(&self) -> Result<SyncToken> {

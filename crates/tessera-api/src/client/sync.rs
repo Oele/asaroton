@@ -9,7 +9,7 @@ use ruma::api::client::{
     sync::sync_events::v3::{self as sync_v3, Filter},
 };
 use serde_json::{Map, Value, json};
-use tessera_service::sync::{RoomSync, SyncFilter, SyncRequest, SyncToken};
+use tessera_service::sync::{RoomSync, SyncFilter, SyncRequest};
 use tessera_store::StoredEvent;
 
 use crate::{AppState, Error, Result, Ruma, client::rooms::client_event};
@@ -144,12 +144,12 @@ pub async fn sync(
     let sender = req.sender()?;
     let since = match req.body.since.as_deref() {
         None | Some("") => None,
-        Some(s) => match SyncToken::parse(s) {
-            Some(t) => Some(t),
-            // A token from the server this one replaced (after a migration): start over.
-            None if s.starts_with('s') && s.split('_').count() > 8 => None,
-            None => return Err(Error::invalid_param("Invalid since token.")),
-        },
+        Some(s) => Some(
+            services
+                .resolve_since_token(s)
+                .await?
+                .ok_or_else(|| Error::invalid_param("Invalid since token."))?,
+        ),
     };
 
     let filter: Option<FilterDefinition> = match &req.body.filter {
