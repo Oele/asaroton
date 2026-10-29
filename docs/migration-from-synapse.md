@@ -198,6 +198,66 @@ and 46 have no local member at all; they carry 2.28M of the 2.48M events and all
 
 The comparison script compares the selected set, not the whole database.
 
+## Rehearsal results (2026-10-29, on the desktop)
+
+The selected data was streamed from the host with read-only `COPY` queries into a local
+`synapse_copy` database (39 tables, under three minutes), then imported with
+`tessera import-synapse` into `tessera_rehearsal`:
+
+- 6 active users, 62 rooms, 197,722 events (none skipped, 456 redactions applied), 1,463 state
+  groups with 19,725 delta rows, 16,772 media rows, 86 access tokens, 155 devices, 12,438 pending
+  to-device messages. Wall time: 5 minutes, almost all of it the event batches (the trigram index
+  on the search text is what makes those slow; it could be built after the import instead).
+- `scripts/compare-synapse.py` reports no differences on any of its 14 comparisons.
+- Functional checks against the rehearsal server (island mode, port 8028): a bcrypt password
+  logs in and is re-hashed to argon2; the largest room's full history (186,802 events back to
+  2023-08-24) paginates in 9 seconds and matches the database; search works over the imported
+  text; a Synapse-format `since` token yields a 200 initial sync; an initial sync returns the
+  room with state and timeline; no warnings in the log.
+
+Not covered by the rehearsal: the media files (the host's permissions would have forced a copy
+instead of hard links; the metadata was imported), the signing key (the rehearsal generated its
+own), and a login by a real account (their passwords are not known here; the bcrypt path was
+exercised with a synthetic account).
+
+## Running it on the host
+
+The import must run on the cluephone host itself for the final cutover (local socket, media in
+place). The commands, to be run as root there; the binary is the release build of the commit
+that passed the rehearsal:
+
+```
+install -m 755 tessera /usr/local/bin/tessera
+useradd --system --home-dir /var/lib/tessera --shell /usr/sbin/nologin tessera
+install -d -o tessera -g tessera -m 750 /var/lib/tessera /var/lib/tessera/media
+install -d -o root -g tessera -m 750 /etc/tessera
+sudo -u postgres createuser tessera && sudo -u postgres createdb -O tessera tessera
+# /etc/tessera/tessera.toml: server_name = "cluephone.org", database_url =
+# "postgres:///tessera?host=/var/run/postgresql", data_dir = "/var/lib/tessera",
+# public_base_url = "https://cluephone.org", client listener 127.0.0.1:8018, federation
+# listener disabled, [federation] well_known_server = "cluephone.org:443", registration
+# disabled with a shared secret, [search] mode = "both".
+sudo -u tessera tessera --config /etc/tessera/tessera.toml migrate
+# Synapse stopped at this point (final state); the Synapse database is read as postgres,
+# so run the import as a user that can read it and write media links:
+sudo -u postgres psql -c "GRANT pg_read_all_data TO tessera"
+sudo -u tessera tessera --config /etc/tessera/tessera.toml import-synapse \
+    --from "postgres:///synapse?host=/var/run/postgresql" \
+    --signing-key /etc/matrix-synapse/homeserver.signing.key \
+    --media-src /var/lib/matrix-synapse/media
+python3 compare-synapse.py "postgres:///synapse?host=/var/run/postgresql" "postgres:///tessera?host=/var/run/postgresql"
+```
+
+Media hard links need the `tessera` user to be able to read the Synapse files; the directories
+are world-readable, and the signing key file must be readable by `tessera` too (copy it with
+`install -o tessera -m 400` first). Then the systemd unit from docs/deployment.md, the
+`ProxyPass` target in `/etc/apache2/sites-enabled/cluephone.org.conf` switched from 8008 to
+8018 (and `/_synapse/admin` added), `apachectl graceful`, and the checks listed under Cutover.
+
+A rehearsal on the host (same commands into a `tessera_rehearsal` database, federation disabled)
+is the last step before the real window; the desktop rehearsal covered everything except media
+links and the key file.
+
 ## Open questions
 
 None at the moment; the decisions are recorded under "Selection".
