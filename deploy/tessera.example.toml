@@ -31,6 +31,13 @@ enabled = true
 # trust_x_forwarded_for = true   # behind a reverse proxy
 # messages = { per_second = 0.2, burst = 10 }
 
+[search]
+# "word" (full-text search on English lexemes; whole words only), "substring" (case-insensitive
+# substrings, language-agnostic, needs the plain text stored: run `tessera search-backfill`
+# once after switching) or "both" (their union).
+mode = "word"
+# substring_min_length = 3
+
 [retention]
 enabled = false
 # default_max_lifetime_ms = 31536000000   # one year, for rooms without m.room.retention

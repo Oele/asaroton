@@ -46,6 +46,9 @@ pub struct Config {
     /// Message retention (purging old history).
     #[serde(default)]
     pub retention: RetentionConfig,
+    /// Message search.
+    #[serde(default)]
+    pub search: SearchConfig,
     #[serde(default)]
     pub logging: LoggingConfig,
     /// User IDs made server admins at startup (they must exist).
@@ -359,6 +362,42 @@ pub struct RetentionConfig {
 
 fn default_retention_interval_secs() -> u64 {
     3600
+}
+
+/// How `/search` matches text. `word` is PostgreSQL full-text search on English lexemes;
+/// `substring` matches case-insensitive substrings of the plain text (stored from then on;
+/// `tessera search-backfill` fills in older messages); `both` is their union.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SearchConfig {
+    #[serde(default)]
+    pub mode: SearchMode,
+    /// Substring terms shorter than this many characters are ignored (default 3, the
+    /// trigram index's grain).
+    #[serde(default = "default_search_min_length")]
+    pub substring_min_length: usize,
+}
+
+impl Default for SearchConfig {
+    fn default() -> Self {
+        Self {
+            mode: SearchMode::Word,
+            substring_min_length: default_search_min_length(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SearchMode {
+    #[default]
+    Word,
+    Substring,
+    Both,
+}
+
+fn default_search_min_length() -> usize {
+    3
 }
 
 fn default_mas_endpoint() -> String {

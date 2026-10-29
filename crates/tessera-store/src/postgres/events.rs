@@ -6,10 +6,15 @@ use tessera_core::Pdu;
 use super::{EVENT_COLUMNS, EventRow, PostgresStore, strings};
 use crate::{
     Direction, Error, EventState, EventStore, PersistEvent, PersistedEvent, RelationRow, Result,
-    SearchHit, StoredEvent, StreamOrdering, ThreadSummary, now_ts, parse_ids, uint_to_i64,
+    SearchHit, SearchMode, SearchQuery, StoredEvent, StreamOrdering, ThreadSummary, now_ts,
+    parse_ids, uint_to_i64,
 };
 
-async fn persist_one(conn: &mut PgConnection, ev: PersistEvent) -> Result<PersistedEvent> {
+async fn persist_one(
+    conn: &mut PgConnection,
+    ev: PersistEvent,
+    keep_plaintext: bool,
+) -> Result<PersistedEvent> {
     let pdu = &ev.pdu;
     let room_id = pdu.room_id();
 
@@ -114,8 +119,8 @@ async fn persist_one(conn: &mut PgConnection, ev: PersistEvent) -> Result<Persis
             WHERE $17::text IS NOT NULL AND NOT $11 ON CONFLICT DO NOTHING
          ),
          search AS (
-            INSERT INTO event_search (event_id, room_id, stream_ordering, origin_server_ts, vector)
-            SELECT $2, $3, ev.stream_ordering, $7, to_tsvector('english', $19) FROM ev
+            INSERT INTO event_search (event_id, room_id, stream_ordering, origin_server_ts, vector, value)
+            SELECT $2, $3, ev.stream_ordering, $7, to_tsvector('english', $19), $20 FROM ev
             WHERE $19::text IS NOT NULL AND NOT $11 ON CONFLICT DO NOTHING
          )
          SELECT stream_ordering FROM ev"
@@ -139,7 +144,8 @@ async fn persist_one(conn: &mut PgConnection, ev: PersistEvent) -> Result<Persis
         .bind(strings(pdu.auth_events()))
         .bind(relates_to)
         .bind(rel_type)
-        .bind(search_text)
+        .bind(&search_text)
+        .bind(search_text.as_deref().filter(|_| keep_plaintext))
         .fetch_one(&mut *conn)
         .await?
         .get(0);
@@ -171,13 +177,63 @@ fn relation_of(pdu: &Pdu) -> Option<(String, String)> {
 /// The text the search index gets for this event, if any.
 fn search_text_of(pdu: &Pdu) -> Option<String> {
     let content: serde_json::Value = serde_json::from_str(pdu.content().get()).ok()?;
-    let key = match pdu.event_type().to_string().as_str() {
+    search_text_for(&pdu.event_type().to_string(), &content)
+}
+
+/// Same, from an event's stored JSON.
+fn search_text_of_json(json: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let ty = v.get("type")?.as_str()?.to_owned();
+    search_text_for(&ty, v.get("content")?)
+}
+
+fn search_text_for(event_type: &str, content: &serde_json::Value) -> Option<String> {
+    let key = match event_type {
         "m.room.message" => "body",
         "m.room.name" => "name",
         "m.room.topic" => "topic",
         _ => return None,
     };
-    content.get(key)?.as_str().map(str::to_owned)
+    let text = content.get(key)?.as_str()?;
+    // PostgreSQL text cannot hold NUL.
+    Some(text.replace('\0', ""))
+}
+
+/// Whitespace-separated terms, with double-quoted phrases kept whole and terms shorter than
+/// `min_length` characters dropped (a trigram index needs three characters to be useful).
+fn substring_terms(query: &str, min_length: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    for c in query.chars() {
+        match c {
+            '"' => {
+                quoted = !quoted;
+                if !quoted && !current.is_empty() {
+                    out.push(std::mem::take(&mut current));
+                }
+            }
+            c if c.is_whitespace() && !quoted => {
+                if !current.is_empty() {
+                    out.push(std::mem::take(&mut current));
+                }
+            }
+            c => current.push(c),
+        }
+    }
+    if !current.is_empty() {
+        out.push(current);
+    }
+    out.into_iter()
+        .filter(|t| t.chars().count() >= min_length.max(1))
+        .collect()
+}
+
+/// Escapes `LIKE` metacharacters (the pattern uses `ESCAPE '\\'`).
+fn like_escape(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
 }
 
 async fn resolve_state_group(
@@ -244,16 +300,22 @@ impl EventStore for PostgresStore {
 
     async fn persist_event(&self, event: PersistEvent) -> Result<PersistedEvent> {
         let mut tx = self.pool.begin().await?;
-        let out = persist_one(&mut tx, event).await?;
+        let keep = self
+            .search_plaintext
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let out = persist_one(&mut tx, event, keep).await?;
         tx.commit().await?;
         Ok(out)
     }
 
     async fn persist_events(&self, events: Vec<PersistEvent>) -> Result<Vec<PersistedEvent>> {
         let mut tx = self.pool.begin().await?;
+        let keep = self
+            .search_plaintext
+            .load(std::sync::atomic::Ordering::Relaxed);
         let mut out = Vec::with_capacity(events.len());
         for ev in events {
-            out.push(persist_one(&mut tx, ev).await?);
+            out.push(persist_one(&mut tx, ev, keep).await?);
         }
         tx.commit().await?;
         Ok(out)
@@ -592,44 +654,86 @@ impl EventStore for PostgresStore {
     async fn search_events(
         &self,
         room_ids: &[OwnedRoomId],
-        term: &str,
-        order_recent: bool,
-        offset: usize,
-        limit: usize,
+        query: &SearchQuery<'_>,
     ) -> Result<(Vec<SearchHit>, usize)> {
         if room_ids.is_empty() {
             return Ok((Vec::new(), 0));
         }
+        let (term, mode, min_length, order_recent, offset, limit) = (
+            query.term,
+            query.mode,
+            query.min_length,
+            query.order_recent,
+            query.offset,
+            query.limit,
+        );
         let rooms = strings(room_ids);
-        let count: i64 = sqlx::query(
-            "SELECT COUNT(*) FROM event_search s
-              WHERE s.room_id = ANY($1) AND s.vector @@ websearch_to_tsquery('english', $2)",
-        )
-        .bind(&rooms)
-        .bind(term)
-        .fetch_one(&self.pool)
-        .await?
-        .get(0);
+        // Substring terms: whitespace-separated, quoted phrases kept whole, short ones dropped.
+        let patterns: Vec<String> = match mode {
+            SearchMode::Word => Vec::new(),
+            SearchMode::Substring | SearchMode::Both => substring_terms(term, min_length)
+                .into_iter()
+                .take(8)
+                .map(|t| format!("%{}%", like_escape(&t)))
+                .collect(),
+        };
+        let word = match mode {
+            SearchMode::Substring => false,
+            SearchMode::Word | SearchMode::Both => true,
+        };
+        if !word && patterns.is_empty() {
+            return Ok((Vec::new(), 0));
+        }
+        // $1 rooms, $2 term, $3 offset, $4 limit, $5.. substring patterns.
+        let mut conds: Vec<String> = Vec::new();
+        if word {
+            conds.push("s.vector @@ websearch_to_tsquery('english', $2)".to_owned());
+        }
+        if !patterns.is_empty() {
+            let subs: Vec<String> = (0..patterns.len())
+                .map(|i| format!("s.value ILIKE ${} ESCAPE '\\'", i + 5))
+                .collect();
+            conds.push(format!("({})", subs.join(" AND ")));
+        }
+        let matching = conds.join(" OR ");
+        let count_sql = format!(
+            "SELECT COUNT(*) FROM event_search s WHERE s.room_id = ANY($1) AND ({matching})"
+        );
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(count_sql))
+            .bind(&rooms)
+            .bind(term)
+            .bind(0i64)
+            .bind(0i64);
+        for p in &patterns {
+            q = q.bind(p);
+        }
+        let count: i64 = q.fetch_one(&self.pool).await?.get(0);
         let order = if order_recent {
             "s.origin_server_ts DESC, s.stream_ordering DESC"
         } else {
             "rank DESC, s.stream_ordering DESC"
         };
+        let rank = if word {
+            "ts_rank(s.vector, websearch_to_tsquery('english', $2))"
+        } else {
+            "0::real"
+        };
         let sql = format!(
-            "SELECT {EVENT_COLUMNS}, ts_rank(s.vector, websearch_to_tsquery('english', $2)) AS rank
+            "SELECT {EVENT_COLUMNS}, {rank} AS rank
                FROM event_search s JOIN events e ON e.event_id = s.event_id
                JOIN rooms r ON r.room_id = e.room_id
-              WHERE s.room_id = ANY($1) AND s.vector @@ websearch_to_tsquery('english', $2)
-                AND NOT e.rejected
+              WHERE s.room_id = ANY($1) AND ({matching}) AND NOT e.rejected
               ORDER BY {order} OFFSET $3 LIMIT $4"
         );
-        let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(sql))
             .bind(&rooms)
             .bind(term)
             .bind(i64::try_from(offset).unwrap_or(i64::MAX))
-            .bind(i64::try_from(limit).unwrap_or(i64::MAX))
-            .fetch_all(&self.pool)
-            .await?;
+            .bind(i64::try_from(limit).unwrap_or(i64::MAX));
+        for p in &patterns {
+            q = q.bind(p);
+        }
+        let rows = q.fetch_all(&self.pool).await?;
         let mut hits = Vec::with_capacity(rows.len());
         for row in rows {
             let rank: f32 = row.get("rank");
@@ -640,6 +744,66 @@ impl EventStore for PostgresStore {
             });
         }
         Ok((hits, usize::try_from(count).unwrap_or(0)))
+    }
+
+    fn set_search_plaintext(&self, enabled: bool) {
+        self.search_plaintext
+            .store(enabled, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    async fn search_backfill_batch(
+        &self,
+        after: i64,
+        limit: usize,
+    ) -> Result<(usize, Option<i64>)> {
+        let rows = sqlx::query(
+            "SELECT e.event_id, e.room_id, e.stream_ordering, e.origin_server_ts, e.json
+               FROM events e LEFT JOIN event_search s ON s.event_id = e.event_id
+              WHERE e.stream_ordering > $1 AND NOT e.rejected
+                AND e.event_type IN ('m.room.message', 'm.room.name', 'm.room.topic')
+                AND (s.event_id IS NULL OR s.value IS NULL)
+              ORDER BY e.stream_ordering LIMIT $2",
+        )
+        .bind(after)
+        .bind(i64::try_from(limit).unwrap_or(i64::MAX))
+        .fetch_all(&self.pool)
+        .await?;
+        let Some(last) = rows.last() else {
+            return Ok((0, None));
+        };
+        let last_so: i64 = last.get("stream_ordering");
+        let (mut ids, mut room_ids, mut sos, mut tss, mut texts) =
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        for r in &rows {
+            let json: String = r.get("json");
+            let Some(text) = search_text_of_json(&json) else {
+                continue;
+            };
+            ids.push(r.get::<String, _>("event_id"));
+            room_ids.push(r.get::<String, _>("room_id"));
+            sos.push(r.get::<i64, _>("stream_ordering"));
+            tss.push(r.get::<i64, _>("origin_server_ts"));
+            texts.push(text);
+        }
+        if ids.is_empty() {
+            return Ok((0, Some(last_so)));
+        }
+        // NUL cannot be stored in text; the vector and the text both skip it.
+        let written = sqlx::query(
+            "INSERT INTO event_search (event_id, room_id, stream_ordering, origin_server_ts, vector, value)
+             SELECT id, room, so, ts, to_tsvector('english', txt), txt
+               FROM UNNEST($1::text[], $2::text[], $3::bigint[], $4::bigint[], $5::text[]) AS u(id, room, so, ts, txt)
+             ON CONFLICT (event_id) DO UPDATE SET value = EXCLUDED.value",
+        )
+        .bind(&ids)
+        .bind(&room_ids)
+        .bind(&sos)
+        .bind(&tss)
+        .bind(&texts)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        Ok((usize::try_from(written).unwrap_or(0), Some(last_so)))
     }
 
     async fn de_outlier(&self, event_id: &EventId, state_group: i64) -> Result<()> {
@@ -888,5 +1052,20 @@ impl EventStore for PostgresStore {
 impl From<ruma::IdParseError> for Error {
     fn from(e: ruma::IdParseError) -> Self {
         Error::Corrupt(e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+
+    #[test]
+    fn terms_and_escaping() {
+        assert_eq!(
+            substring_terms("foo \"bar baz\" qu x", 3),
+            vec!["foo".to_owned(), "bar baz".to_owned()]
+        );
+        assert_eq!(substring_terms("  ", 3), Vec::<String>::new());
+        assert_eq!(like_escape("50%_a\\b"), "50\\%\\_a\\\\b");
     }
 }

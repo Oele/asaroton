@@ -312,11 +312,15 @@ pub trait EventStore: Send + Sync {
     async fn search_events(
         &self,
         room_ids: &[OwnedRoomId],
-        term: &str,
-        order_recent: bool,
-        offset: usize,
-        limit: usize,
+        query: &SearchQuery<'_>,
     ) -> Result<(Vec<SearchHit>, usize)>;
+    /// Whether newly persisted events keep their plain text for substring search.
+    fn set_search_plaintext(&self, enabled: bool);
+    /// Fills the plain text of up to `limit` searchable events after stream position `after`
+    /// (older rows get the text they were missing). Returns how many rows were written and the
+    /// last position looked at, `None` when there is nothing left.
+    async fn search_backfill_batch(&self, after: i64, limit: usize)
+    -> Result<(usize, Option<i64>)>;
     /// Events between `earliest` (exclusive) and `latest` (inclusive) by walking prev events.
     async fn missing_events_between(
         &self,

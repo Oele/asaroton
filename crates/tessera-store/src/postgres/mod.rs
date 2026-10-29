@@ -29,6 +29,8 @@ pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 #[derive(Clone, Debug)]
 pub struct PostgresStore {
     pool: PgPool,
+    /// Keep the plain text of searchable events (substring search).
+    search_plaintext: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl PostgresStore {
@@ -39,12 +41,18 @@ impl PostgresStore {
             .acquire_timeout(Duration::from_secs(30))
             .connect(url)
             .await?;
-        Ok(Self { pool })
+        Ok(Self {
+            pool,
+            search_plaintext: std::sync::Arc::default(),
+        })
     }
 
     /// Wrap an existing pool (used by tests).
     pub fn from_pool(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            search_plaintext: std::sync::Arc::default(),
+        }
     }
 
     /// The underlying pool.

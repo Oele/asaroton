@@ -438,6 +438,30 @@ pub struct ThreadSummary {
     pub latest_stream_ordering: StreamOrdering,
 }
 
+/// How `/search` matches text.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SearchMode {
+    /// Whole words via the lexeme vector (stemmed, stop words dropped).
+    #[default]
+    Word,
+    /// Case-insensitive substrings of the plain text.
+    Substring,
+    /// The union of both.
+    Both,
+}
+
+/// A `/search` request as the store sees it.
+#[derive(Clone, Debug)]
+pub struct SearchQuery<'a> {
+    pub term: &'a str,
+    pub mode: SearchMode,
+    /// Substring terms shorter than this are ignored.
+    pub min_length: usize,
+    pub order_recent: bool,
+    pub offset: usize,
+    pub limit: usize,
+}
+
 /// A full-text search hit.
 #[derive(Debug, Clone)]
 pub struct SearchHit {

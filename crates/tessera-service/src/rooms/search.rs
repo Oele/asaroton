@@ -58,7 +58,17 @@ impl Services {
         let limit = req.limit.clamp(1, 100);
         let (hits, count) = self
             .store
-            .search_events(&rooms, &req.term, req.order_recent, req.offset, limit)
+            .search_events(
+                &rooms,
+                &tessera_store::SearchQuery {
+                    term: &req.term,
+                    mode: self.config.search.mode,
+                    min_length: self.config.search.min_length,
+                    order_recent: req.order_recent,
+                    offset: req.offset,
+                    limit,
+                },
+            )
             .await?;
         let page_full = hits.len() >= limit;
         let mut results = Vec::with_capacity(hits.len());

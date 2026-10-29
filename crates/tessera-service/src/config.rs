@@ -30,6 +30,16 @@ pub struct Config {
     pub appservices: Vec<crate::appservice::Registration>,
     /// Delegated authentication (Matrix Authentication Service), when enabled.
     pub mas: Option<MasSettings>,
+    /// How `/search` matches text.
+    pub search: SearchSettings,
+}
+
+/// Message search settings.
+#[derive(Clone, Debug, Default)]
+pub struct SearchSettings {
+    pub mode: tessera_store::SearchMode,
+    /// Substring terms shorter than this are ignored.
+    pub min_length: usize,
 }
 
 /// Matrix Authentication Service connection.

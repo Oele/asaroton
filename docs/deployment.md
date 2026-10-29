@@ -52,3 +52,15 @@ of port 8448 (the federation listener can then be disabled). Proxy `/_matrix`, `
 `/.well-known/matrix` to the client listener with `nocanon` and `AllowEncodedSlashes NoDecode`
 (Apache) or the equivalent, keep the proxy timeout above the longest `/sync` long-poll, and set
 `rate_limiting.trust_x_forwarded_for = true`.
+
+## Message search
+
+`/search` uses PostgreSQL full-text search by default (`search.mode = "word"`): English lexemes,
+so only whole words match and URLs, version strings and stop words are poor search terms.
+`mode = "substring"` matches case-insensitive substrings of the plain text through a `pg_trgm`
+index, language-agnostic; `"both"` returns the union, ranked by the full-text rank with substring-
+only hits last. Terms shorter than `substring_min_length` (default 3) are ignored; double-quoted
+phrases are matched as one substring. The plain text is stored from the moment substring search is
+enabled; run `tessera --config ... search-backfill` once (safe while the server runs) to cover
+older messages. Expect the text plus its trigram index to add roughly a third to the size of the
+search table.

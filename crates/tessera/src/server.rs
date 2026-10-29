@@ -6,7 +6,7 @@ use anyhow::Context;
 use tessera_api::App;
 use tessera_federation::{Federation, FederationConfig, hooks::Hooks};
 use tessera_service::Services;
-use tessera_store::{PostgresStore, Store};
+use tessera_store::{EventStore, PostgresStore, Store};
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::config::Config;
@@ -30,7 +30,32 @@ async fn connect_store(config: &Config) -> anyhow::Result<Arc<PostgresStore>> {
         .await
         .context("connecting to PostgreSQL")?;
     store.migrate().await.context("running migrations")?;
+    store.set_search_plaintext(config.search.mode != crate::config::SearchMode::Word);
     Ok(Arc::new(store))
+}
+
+/// `tessera search-backfill`: store the plain text of every searchable event that lacks it, in
+/// batches, so substring search covers history from before it was enabled.
+pub async fn search_backfill(config: Config) -> anyhow::Result<()> {
+    if config.search.mode == crate::config::SearchMode::Word {
+        anyhow::bail!("search.mode is \"word\"; set it to \"substring\" or \"both\" first");
+    }
+    let store = connect_store(&config).await?;
+    let (mut after, mut total, mut batches) = (i64::MIN, 0usize, 0u64);
+    loop {
+        let (written, last) = store.search_backfill_batch(after, 2000).await?;
+        total += written;
+        batches += 1;
+        match last {
+            Some(so) => after = so,
+            None => break,
+        }
+        if batches % 25 == 0 {
+            println!("{total} rows written, at stream position {after}");
+        }
+    }
+    println!("done: {total} rows written");
+    Ok(())
 }
 
 fn service_config(config: &Config) -> anyhow::Result<tessera_service::Config> {
@@ -82,6 +107,14 @@ fn service_config(config: &Config) -> anyhow::Result<tessera_service::Config> {
             .collect::<anyhow::Result<Vec<_>>>()?,
         public_base_url,
         well_known_server: config.federation.well_known_server.clone(),
+        search: tessera_service::config::SearchSettings {
+            mode: match config.search.mode {
+                crate::config::SearchMode::Word => tessera_store::SearchMode::Word,
+                crate::config::SearchMode::Substring => tessera_store::SearchMode::Substring,
+                crate::config::SearchMode::Both => tessera_store::SearchMode::Both,
+            },
+            min_length: config.search.substring_min_length,
+        },
         software_version: env!("CARGO_PKG_VERSION").to_owned(),
         media_dir: config.data_dir.join("media"),
         appservices: load_appservices(config)?,

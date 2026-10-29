@@ -28,6 +28,8 @@ enum Command {
     Migrate,
     /// Print the server's signing key ID and public key.
     ShowKey,
+    /// Store the plain text of older messages for substring search (see `search.mode`).
+    SearchBackfill,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -42,6 +44,7 @@ fn main() -> anyhow::Result<()> {
             Command::Serve => server::serve(config).await,
             Command::Migrate => server::migrate_only(config).await,
             Command::ShowKey => server::show_key(config).await,
+            Command::SearchBackfill => server::search_backfill(config).await,
         }
     })
 }
