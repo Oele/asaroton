@@ -220,6 +220,24 @@ instead of hard links; the metadata was imported), the signing key (the rehearsa
 own), and a login by a real account (their passwords are not known here; the bcrypt path was
 exercised with a synthetic account).
 
+## Rehearsal on the host (2026-10-29)
+
+Done with the commands below into `tessera_rehearsal` (system user `tessera`, role `tessera`
+with `pg_read_all_data`, config in /var/lib/tessera-rehearsal, transient unit
+`tessera-rehearsal` on 127.0.0.1:8018, island mode): import in 3 minutes 16 seconds (197,725
+events, the signing key imported from Synapse's file), comparison script OK on all 14 checks,
+bcrypt login re-hashed, the largest room's history paginated in 26 seconds, search 3,346 hits,
+Synapse token accepted, initial sync fine, no warnings. The rehearsal server stays up for a
+login test by a real account through an SSH tunnel (`ssh -L 8018:127.0.0.1:8018
+root@cluephone.org`, then Element Web with homeserver `http://localhost:8018`).
+
+Left for the cutover itself: media hard links (the Synapse files belong to `synapse`, so link
+creation as `tessera` is refused by `fs.protected_hardlinks`; at cutover, with Synapse stopped,
+`chown -R tessera:tessera /var/lib/matrix-synapse/media/local_content` first, or run the media
+step as root), the production unit and config under /etc/tessera and /var/lib/tessera, and the
+Apache switch. The database URL form sqlx needs for the socket is
+`postgres://tessera@%2Fvar%2Frun%2Fpostgresql/<db>`.
+
 ## Running it on the host
 
 The import must run on the cluephone host itself for the final cutover (local socket, media in
@@ -233,7 +251,7 @@ install -d -o tessera -g tessera -m 750 /var/lib/tessera /var/lib/tessera/media
 install -d -o root -g tessera -m 750 /etc/tessera
 sudo -u postgres createuser tessera && sudo -u postgres createdb -O tessera tessera
 # /etc/tessera/tessera.toml: server_name = "cluephone.org", database_url =
-# "postgres:///tessera?host=/var/run/postgresql", data_dir = "/var/lib/tessera",
+# "postgres://tessera@%2Fvar%2Frun%2Fpostgresql/tessera", data_dir = "/var/lib/tessera",
 # public_base_url = "https://cluephone.org", client listener 127.0.0.1:8018, federation
 # listener disabled, [federation] well_known_server = "cluephone.org:443", registration
 # disabled with a shared secret, [search] mode = "both".
@@ -242,7 +260,7 @@ sudo -u tessera tessera --config /etc/tessera/tessera.toml migrate
 # so run the import as a user that can read it and write media links:
 sudo -u postgres psql -c "GRANT pg_read_all_data TO tessera"
 sudo -u tessera tessera --config /etc/tessera/tessera.toml import-synapse \
-    --from "postgres:///synapse?host=/var/run/postgresql" \
+    --from "postgres://tessera@%2Fvar%2Frun%2Fpostgresql/synapse" \
     --signing-key /etc/matrix-synapse/homeserver.signing.key \
     --media-src /var/lib/matrix-synapse/media
 python3 compare-synapse.py "postgres:///synapse?host=/var/run/postgresql" "postgres:///tessera?host=/var/run/postgresql"
