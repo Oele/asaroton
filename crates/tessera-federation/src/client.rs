@@ -21,6 +21,17 @@ const LONG_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const LONG_TIMEOUT: Duration = Duration::from_secs(180);
 
+/// An error with its sources, as reqwest's top-level message hides the actual cause.
+fn error_chain(e: &reqwest::Error) -> String {
+    let mut parts = vec![e.to_string()];
+    let mut source = std::error::Error::source(e);
+    while let Some(s) = source {
+        parts.push(s.to_string());
+        source = s.source();
+    }
+    parts.join(": ")
+}
+
 /// DNS hook: honour discovery overrides, otherwise system DNS.
 struct OverrideResolver {
     overrides: Arc<dashmap::DashMap<String, Vec<SocketAddr>>>,
@@ -96,8 +107,12 @@ impl FederationClient {
             .map_err(|e| Error::Protocol(format!("dns resolver: {e}")))?
             .build()
             .map_err(|e| Error::Protocol(format!("dns resolver: {e}")))?;
+        // HTTP/1.1 only: with HTTP/2 the explicit `Host` header (the delegated name, possibly
+        // with a port) next to `:authority` makes some servers (Synapse's own HTTP/2 stack)
+        // reset the stream with a protocol error.
         let mut builder = reqwest::Client::builder()
             .user_agent(concat!("tessera/", env!("CARGO_PKG_VERSION")))
+            .http1_only()
             .connect_timeout(Duration::from_secs(10))
             .pool_idle_timeout(Duration::from_secs(90))
             .redirect(reqwest::redirect::Policy::none())
@@ -228,7 +243,7 @@ impl FederationClient {
             Ok(r) => r,
             Err(e) => {
                 self.discovery.invalidate(destination);
-                return Err(Error::Transport(destination.to_owned(), e.to_string()));
+                return Err(Error::Transport(destination.to_owned(), error_chain(&e)));
             }
         };
         let status = resp.status();
@@ -239,7 +254,7 @@ impl FederationClient {
         let bytes = resp
             .bytes()
             .await
-            .map_err(|e| Error::Transport(destination.to_owned(), e.to_string()))?;
+            .map_err(|e| Error::Transport(destination.to_owned(), error_chain(&e)))?;
         if !status.is_success() {
             return Err(Error::RemoteError {
                 server: destination.to_owned(),
@@ -276,13 +291,13 @@ impl FederationClient {
             .await
             .map_err(|e| {
                 self.discovery.invalidate(destination);
-                Error::Transport(destination.to_owned(), e.to_string())
+                Error::Transport(destination.to_owned(), error_chain(&e))
             })?;
         let status = resp.status();
         let bytes = resp
             .bytes()
             .await
-            .map_err(|e| Error::Transport(destination.to_owned(), e.to_string()))?;
+            .map_err(|e| Error::Transport(destination.to_owned(), error_chain(&e)))?;
         if !status.is_success() {
             return Err(Error::RemoteError {
                 server: destination.to_owned(),
@@ -311,7 +326,7 @@ impl FederationClient {
             .await
             .map_err(|e| {
                 self.discovery.invalidate(destination);
-                Error::Transport(destination.to_owned(), e.to_string())
+                Error::Transport(destination.to_owned(), error_chain(&e))
             })?;
         let status = resp.status();
         let content_type = resp
@@ -328,7 +343,7 @@ impl FederationClient {
         let bytes = resp
             .bytes()
             .await
-            .map_err(|e| Error::Transport(destination.to_owned(), e.to_string()))?;
+            .map_err(|e| Error::Transport(destination.to_owned(), error_chain(&e)))?;
         if !status.is_success() {
             return Err(Error::RemoteError {
                 server: destination.to_owned(),
