@@ -122,13 +122,67 @@ name points).
 - Anything that pokes Synapse's admin API (scripts, dashboards) must be checked against
   tessera's `/_synapse/admin` subset.
 
+## Inventory of the Synapse installation (checked 2026-10-29 over SSH)
+
+- Host `oele` (cluephone.org, 45.137.205.247): Ubuntu 26.04, 8 cores, 30 GB RAM, one 250 GB
+  volume with 41 GB free. It also serves twelve other Apache sites, MySQL, Icecast and Postfix,
+  so the Matrix service is one tenant among several.
+- Synapse 1.158.0 with the substring-search fork, running from a virtualenv as user `synapse`
+  (`/home/synapse/synapse/homeserver.yaml` is the live config; the copy in
+  `/etc/matrix-synapse` is stale). One process, no workers. Apache on the same host proxies
+  `/_matrix` and `/_synapse/client` to 127.0.0.1:8008 with the `oele.net` certificate.
+  `.well-known/matrix/server` is a static file saying `cluephone.org:443`.
+- Password logins only (no OIDC, SAML or external ids); registration disabled; no application
+  services; no registration tokens or retention policies; `enable_authenticated_media: false`;
+  search mode `substring` with `min_length: 1`; URL previews with a YouTube oEmbed provider.
+- Users: 2264 rows, of which 6 active and 2258 deactivated (a spam wave); 2 admins; 8 email
+  addresses; 2470 devices and 2344 access tokens (most on deactivated accounts); 11 pushers.
+- Rooms: 399 known, 144 with a local member joined. Room versions 1 through 12 are all present
+  (1: 3, 5: 31, 6: 46, 7: 2, 8: 2, 9: 165, 10: 142, 11: 5, 12: 3). Two rooms are in partial
+  state (`!hHefamtySLIPywfyCX:nope.chat`, `!kJwenoTPuEviPeTDxt:cutefunny.art`).
+- Events: 2.48M (178k sent by local users), stream orderings from -729,450 to 2,105,313,
+  320 rejected, none without JSON; 37k events in the old format (room versions 1 and 2).
+- State: 263k state groups, 53M state delta rows (12 GB of the 22 GB database). The largest rooms
+  have 38k, 9k and 4.5k joined members; three rooms hold over 5M delta rows each.
+- Device-list stream at 2,390,785; 107 unsent pokes, all to servers that are gone.
+- Media: 16,782 local files, 16 GB; 120k thumbnails, 33 GB (regenerable, `dynamic_thumbnails`);
+  1.6 GB remote cache.
+
+## What the inventory changes
+
+- tessera should run on the `oele` host itself, as another systemd service beside Apache: the
+  import then reads the Synapse database over the local socket and reuses the media files in
+  place, and the cutover is one `ProxyPass` target change in the existing vhost. The desktop at
+  home has the faster machine but sits behind a slow uplink; moving 22 GB plus 16 GB of media over
+  it is not practical for the final run. Rehearsals can still happen on the desktop from a dump.
+- Disk space is the first obstacle: a second database of comparable size does not fit in 41 GB
+  next to the thumbnails. Deleting the 33 GB of thumbnails (they come back on demand, and
+  tessera regenerates them from the originals) makes room; the import itself stores less than
+  Synapse does for the same data because tessera has no `event_search` vectors until the backfill
+  runs and no chain-cover tables.
+- The 53M state delta rows set the import time. A straight `COPY` of the mapped rows runs at
+  hundreds of thousands of rows per second; expect the state import to take 10 to 20 minutes
+  and the whole import under an hour. The maintenance window is therefore one to two hours.
+- Rooms with tens of thousands of members decide whether tessera copes: the hot-room state cache
+  keeps whole state maps in memory (bounded, these rooms fit), and sending in the 38k-member room
+  must be load-tested on the rehearsal copy before cutover.
+- The two partial-state rooms have to finish resyncing in Synapse first, or be left before the
+  export.
+- Only 6 accounts are active; the 2258 deactivated rows are imported as deactivated so their names
+  stay reserved. Pushers and sessions matter for those 6 users and are imported verbatim.
+- `enable_authenticated_media: false` means clients and servers still fetch media through the
+  unauthenticated `/_matrix/media/v3` endpoints; tessera serves those too, so nothing changes for
+  them.
+- Synapse's substring search accepts one-character terms; tessera's `substring_min_length` can be
+  set to 1 to match, at the cost of sequential scans for such terms.
+- The 107 unsent device-list pokes are for dead servers and can be dropped.
+
 ## Open questions
 
-1. Where does Synapse run (same machine, another host), which version, and what are the database
-   and media store sizes?
-2. Password logins only, or OIDC/SAML as well?
-3. Which application services (bridges) and whether they must keep running during the window?
-4. Are 3PIDs (email addresses) and email notifications in use, and may they be dropped?
-5. Does anything use the Synapse admin API or metrics?
-6. Is `cluephone.org`'s `.well-known/matrix/server` delegation under your control, and does the
-   reverse proxy for it live on the Synapse host?
+1. Whether the two partial-state rooms matter to anyone; if not, leaving them before the export
+   is the simplest.
+2. Whether the 8 email addresses and email-based password reset may be dropped (tessera has no
+   3PID or email support).
+3. Whether the Synapse substring-search fork's one-character minimum should be kept.
+4. The rollback period you are comfortable with (the plan assumes a week with Synapse stopped but
+   intact).
