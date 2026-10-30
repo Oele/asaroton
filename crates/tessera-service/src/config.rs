@@ -32,6 +32,32 @@ pub struct Config {
     pub mas: Option<MasSettings>,
     /// How `/search` matches text.
     pub search: SearchSettings,
+    /// The `LiveKit` SFU this server offers for `MatrixRTC` calls (MSC4195), when configured.
+    pub rtc: Option<LivekitSettings>,
+}
+
+/// A `LiveKit` SFU operated for this server.
+#[derive(Clone)]
+pub struct LivekitSettings {
+    /// The WebSocket URL clients connect to (`wss://livekit.example.org`).
+    pub url: String,
+    /// The HTTP URL of the SFU's management API.
+    pub api_url: String,
+    pub api_key: String,
+    pub api_secret: String,
+    /// Whether users of other homeservers may publish media on this SFU.
+    pub remote_can_publish: bool,
+}
+
+impl std::fmt::Debug for LivekitSettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LivekitSettings")
+            .field("url", &self.url)
+            .field("api_url", &self.api_url)
+            .field("api_key", &self.api_key)
+            .field("remote_can_publish", &self.remote_can_publish)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Message search settings.

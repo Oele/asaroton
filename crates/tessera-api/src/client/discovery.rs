@@ -33,6 +33,8 @@ pub async fn versions(
         ("org.matrix.msc4155".to_owned(), true),
         // Delayed events.
         ("org.matrix.msc4140".to_owned(), true),
+        // MatrixRTC transports, when a LiveKit SFU is configured.
+        ("org.matrix.msc4143".to_owned(), services.has_rtc()),
         // Thread subscriptions and their sliding sync extension.
         ("io.element.msc4306".to_owned(), true),
         ("io.element.msc4308".to_owned(), true),
@@ -99,6 +101,10 @@ pub async fn well_known_client(State(services): State<AppState>) -> Json<serde_j
             auth["account"] = account.clone();
         }
         body["org.matrix.msc2965.authentication"] = auth;
+    }
+    // Where calls find the SFU, for clients that predate `/rtc/transports`.
+    if services.has_rtc() {
+        body["org.matrix.msc4143.rtc_foci"] = serde_json::Value::Array(services.rtc_foci());
     }
     Json(body)
 }

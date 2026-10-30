@@ -513,6 +513,42 @@ pub trait DelayedEventStore: Send + Sync {
     async fn count_delayed_state_events(&self) -> Result<u64>;
 }
 
+/// `OpenID` tokens and `MatrixRTC` over `LiveKit` (MSC4195).
+#[async_trait]
+pub trait RtcStore: Send + Sync {
+    async fn add_openid_token(&self, token: &str, user_id: &UserId, expires_ts: i64) -> Result<()>;
+    /// The owner of a still valid `OpenID` token.
+    async fn openid_token_owner(&self, token: &str, now: i64) -> Result<Option<OwnedUserId>>;
+    async fn purge_expired_openid_tokens(&self, now: i64) -> Result<u64>;
+
+    /// Records (or refreshes) a participant a token was issued to.
+    async fn add_rtc_participant(&self, participant: &RtcParticipant) -> Result<()>;
+    async fn rtc_participant(
+        &self,
+        lk_room: &str,
+        lk_identity: &str,
+    ) -> Result<Option<RtcParticipant>>;
+    /// Every SFU participant identity issued to a user in a room.
+    async fn rtc_participants_for(
+        &self,
+        room_id: &RoomId,
+        user_id: &UserId,
+    ) -> Result<Vec<RtcParticipant>>;
+    async fn remove_rtc_participant(&self, lk_room: &str, lk_identity: &str) -> Result<()>;
+    async fn purge_rtc_participants_before(&self, issued_before: i64) -> Result<u64>;
+
+    /// Registers a delegated leave; replaces an earlier one for the same participant.
+    async fn add_delegated_leave(&self, leave: &DelegatedLeave) -> Result<()>;
+    async fn delegated_leaves(&self) -> Result<Vec<DelegatedLeave>>;
+    async fn delegated_leave_for(
+        &self,
+        lk_room: &str,
+        lk_identity: &str,
+    ) -> Result<Option<DelegatedLeave>>;
+    async fn mark_delegated_leave_connected(&self, delay_id: &str, now: i64) -> Result<()>;
+    async fn remove_delegated_leave(&self, delay_id: &str) -> Result<bool>;
+}
+
 /// Signing keys: ours and cached remote ones.
 #[async_trait]
 pub trait KeyStore: Send + Sync {
@@ -785,6 +821,7 @@ pub trait Store:
     + StateStore
     + AccountDataStore
     + DelayedEventStore
+    + RtcStore
     + ThreadSubscriptionStore
     + KeyStore
     + E2eeStore

@@ -49,6 +49,9 @@ pub struct Config {
     /// Message search.
     #[serde(default)]
     pub search: SearchConfig,
+    /// Voice and video calls (`MatrixRTC` over `LiveKit`).
+    #[serde(default)]
+    pub rtc: RtcConfig,
     #[serde(default)]
     pub logging: LoggingConfig,
     /// User IDs made server admins at startup (they must exist).
@@ -231,6 +234,62 @@ impl Default for RoomsConfig {
     fn default() -> Self {
         Self {
             default_version: default_room_version(),
+        }
+    }
+}
+
+/// Voice and video calls: the `LiveKit` SFU this server offers (MSC4195). With a `[rtc.livekit]`
+/// section the server issues the SFU tokens itself; no separate JWT service is needed.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RtcConfig {
+    #[serde(default)]
+    pub livekit: Option<LivekitConfig>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LivekitConfig {
+    /// The WebSocket URL clients connect to (`wss://livekit.example.org`).
+    pub url: String,
+    /// The HTTP URL of the SFU's API, for creating rooms and removing participants. Defaults
+    /// to `url` with the scheme changed to http(s).
+    #[serde(default)]
+    pub api_url: Option<String>,
+    /// An API key and secret from `LiveKit`'s `keys` configuration.
+    pub api_key: String,
+    pub api_secret: String,
+    /// Let users of other homeservers publish media on this SFU (they can always subscribe).
+    #[serde(default = "default_true")]
+    pub remote_can_publish: bool,
+}
+
+impl std::fmt::Debug for LivekitConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LivekitConfig")
+            .field("url", &self.url)
+            .field("api_url", &self.api_url)
+            .field("api_key", &self.api_key)
+            .field("remote_can_publish", &self.remote_can_publish)
+            .finish_non_exhaustive()
+    }
+}
+
+impl LivekitConfig {
+    /// The API URL: explicit, or the WebSocket URL over HTTP.
+    pub fn api_url(&self) -> String {
+        match &self.api_url {
+            Some(u) => u.trim_end_matches('/').to_owned(),
+            None => {
+                let url = self.url.trim_end_matches('/');
+                url.strip_prefix("wss://")
+                    .map(|rest| format!("https://{rest}"))
+                    .or_else(|| {
+                        url.strip_prefix("ws://")
+                            .map(|rest| format!("http://{rest}"))
+                    })
+                    .unwrap_or_else(|| url.to_owned())
+            }
         }
     }
 }

@@ -23,7 +23,7 @@ pub const MAX_DELAY_MS: i64 = 24 * 60 * 60 * 1000;
 #[derive(Debug, Default)]
 pub struct DelayedEvents {
     /// Woken whenever the schedule changes so the worker recomputes its next deadline.
-    wake: tokio::sync::Notify,
+    pub(crate) wake: tokio::sync::Notify,
     /// Pending delayed *state* events; the state-change hook is free while this is zero.
     pending_state: AtomicUsize,
 }

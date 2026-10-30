@@ -7,7 +7,7 @@
 use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
-use ruma::{OwnedRoomId, OwnedServerName, OwnedUserId, RoomAliasId, RoomId, UserId};
+use ruma::{OwnedRoomId, OwnedServerName, OwnedUserId, RoomAliasId, RoomId, ServerName, UserId};
 use serde_json::Value;
 use tessera_core::Pdu;
 
@@ -57,6 +57,14 @@ pub trait FederationHooks: Send + Sync {
     ) -> Result<(OwnedRoomId, Vec<OwnedServerName>)>;
     /// Fetch a remote user's profile (`displayname`, `avatar_url`).
     async fn remote_profile(&self, user_id: &UserId) -> Result<Value>;
+    /// Asks a remote homeserver for a `LiveKit` token for one of our users (MSC4195).
+    async fn remote_livekit_token(&self, server: &ServerName, body: Value) -> Result<Value>;
+    /// Asks the issuing server who an `OpenID` token belongs to.
+    async fn remote_openid_userinfo(
+        &self,
+        server: &ServerName,
+        access_token: &str,
+    ) -> Result<OwnedUserId>;
     /// A room's hierarchy summary from one of `servers` (federation `/hierarchy`), as the
     /// raw response object.
     async fn remote_hierarchy(
@@ -154,6 +162,12 @@ impl FederationHooks for NoFederation {
         Err(disabled())
     }
     async fn remote_profile(&self, _: &UserId) -> Result<Value> {
+        Err(disabled())
+    }
+    async fn remote_livekit_token(&self, _: &ServerName, _: Value) -> Result<Value> {
+        Err(disabled())
+    }
+    async fn remote_openid_userinfo(&self, _: &ServerName, _: &str) -> Result<OwnedUserId> {
         Err(disabled())
     }
     async fn remote_hierarchy(&self, _: &[OwnedServerName], _: &RoomId, _: bool) -> Result<Value> {

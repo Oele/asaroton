@@ -19,10 +19,12 @@ pub mod media;
 pub mod notices;
 pub mod notifications;
 pub mod notifier;
+pub mod openid;
 pub mod presence;
 pub mod profile;
 pub mod push;
 pub mod rooms;
+pub mod rtc;
 pub mod signing;
 pub mod sliding_sync;
 pub mod spaces;
@@ -81,6 +83,8 @@ pub struct Services {
     pub sliding_sync: sliding_sync::SlidingSyncConnections,
     /// Delayed event scheduling state (MSC4140).
     pub delayed: delayed_events::DelayedEvents,
+    /// `MatrixRTC` over `LiveKit` (MSC4195).
+    pub rtc: rtc::RtcState,
     /// Room contexts left behind by the last local write per room (see `room_context`).
     pub(crate) room_ctx_cache:
         std::sync::Mutex<lru::LruCache<ruma::OwnedRoomId, Arc<rooms::pipeline::RoomContext>>>,
@@ -142,6 +146,7 @@ impl Services {
             presence: presence::PresenceMap::default(),
             sliding_sync: sliding_sync::SlidingSyncConnections::default(),
             delayed: delayed_events::DelayedEvents::default(),
+            rtc: rtc::RtcState::new(config.rtc.as_ref()),
             push_rules_cache: dashmap::DashMap::new(),
             room_ctx_cache: std::sync::Mutex::new(lru::LruCache::new(
                 std::num::NonZeroUsize::new(256).unwrap_or(std::num::NonZeroUsize::MIN),

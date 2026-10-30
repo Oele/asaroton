@@ -64,3 +64,50 @@ phrases are matched as one substring. The plain text is stored from the moment s
 enabled; run `tessera --config ... search-backfill` once (safe while the server runs) to cover
 older messages. Expect the text plus its trigram index to add roughly a third to the size of the
 search table.
+
+## Voice and video calls
+
+Calls (Element Call, in Element Web, Element X and the standalone app) use MatrixRTC over
+LiveKit: the clients exchange call membership as room events and send media through a LiveKit
+SFU. tessera implements the homeserver side of MSC4195 itself, so the only extra service is the
+SFU. Run `livekit-server` with a config like
+
+```yaml
+port: 7880
+rtc:
+  tcp_port: 7881
+  port_range_start: 50000
+  port_range_end: 60000
+  use_external_ip: true
+keys:
+  APIabc123: the-secret-from-livekit-server-generate-keys
+webhook:
+  api_key: APIabc123
+  urls:
+    - https://matrix.example.org/_matrix/client/unstable/io.element.msc4195/rtc/livekit/sfu_webhook
+```
+
+open UDP 50000–60000 and TCP 7881 to the world, put TLS in front of port 7880 (a WebSocket
+proxy at `wss://livekit.example.org`), and tell tessera about it:
+
+```toml
+[rtc.livekit]
+url = "wss://livekit.example.org"
+api_key = "APIabc123"
+api_secret = "the-secret-from-livekit-server-generate-keys"
+# api_url = "https://livekit.example.org"   # defaults to url over https
+# remote_can_publish = true                 # users of other servers may publish here
+```
+
+That is the whole setup: tessera advertises the SFU through `/rtc/transports` and the
+`org.matrix.msc4143.rtc_foci` entry of `.well-known/matrix/client`, checks room membership,
+signs the LiveKit access tokens, creates the LiveKit rooms, serves the federation endpoint
+through which users of other homeservers join calls hosted here (and asks the remote server for
+tokens when a local user joins a call on another server's SFU), keeps the delayed leave event
+alive while a participant is connected and sends it the moment the SFU reports the
+disconnection (webhook, with a poll every fifteen seconds as the fallback), and removes
+participants who leave or are kicked from the Matrix room. Older clients that still expect a
+separate LiveKit JWT service find one at the same URL prefix, including the OpenID token exchange
+it relies on; no `lk-jwt-service` is needed. A TURN server is not required for LiveKit: every
+participant talks to the SFU directly. LiveKit's built-in TURN (its `turn:` section) only helps
+users on networks that block UDP entirely.

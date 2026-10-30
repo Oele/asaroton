@@ -609,6 +609,7 @@ impl Federation {
                     .cancel_delayed_state_events(&room_id, &ty.to_string(), key)
                     .await;
             }
+            services.rtc_on_event(&pdu);
         }
         Ok(if soft_failed {
             Outcome::SoftFailed

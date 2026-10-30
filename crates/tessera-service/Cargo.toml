@@ -33,3 +33,5 @@ parking_lot.workspace = true
 base64.workspace = true
 rand.workspace = true
 http.workspace = true
+reqwest.workspace = true
+hmac.workspace = true

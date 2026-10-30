@@ -9,6 +9,7 @@ mod federation;
 mod keys;
 mod media;
 mod rooms;
+mod rtc;
 mod state;
 mod thread_subscriptions;
 mod users;

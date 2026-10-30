@@ -38,6 +38,15 @@ enabled = true
 mode = "word"
 # substring_min_length = 3
 
+# Voice and video calls: the LiveKit SFU this server offers (MSC4195). tessera signs the SFU
+# tokens itself; see docs/deployment.md for the LiveKit side.
+# [rtc.livekit]
+# url = "wss://livekit.example.org"
+# api_key = "APIabc123"
+# api_secret = "the-secret-from-livekit-server-generate-keys"
+# api_url = "https://livekit.example.org"   # defaults to url over https
+# remote_can_publish = true                 # users of other servers may publish here
+
 [retention]
 enabled = false
 # default_max_lifetime_ms = 31536000000   # one year, for rooms without m.room.retention

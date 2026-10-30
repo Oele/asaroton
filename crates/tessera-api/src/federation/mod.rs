@@ -81,6 +81,20 @@ pub fn routes(router: Router<AppState>) -> Router<AppState> {
         "/_matrix/federation/v1/hierarchy/{room_id}",
         axum::routing::get(hierarchy_handler),
     );
+    // MatrixRTC over LiveKit (MSC4195) and the OpenID userinfo exchange behind its legacy flow.
+    let r = r
+        .route(
+            tessera_service::rtc::FEDERATION_GET_TOKEN_PATH,
+            axum::routing::post(crate::client::rtc::federation_get_token),
+        )
+        .route(
+            tessera_service::rtc::FEDERATION_GET_TOKEN_STABLE_PATH,
+            axum::routing::post(crate::client::rtc::federation_get_token),
+        );
+    let r = route::<ruma::api::federation::openid::get_openid_userinfo::v1::Request, _, _>(
+        r,
+        openid_userinfo,
+    );
     // Media responses are hand-built multipart bodies, so these bypass the typed route helper.
     r.route(
         "/_matrix/federation/v1/media/download/{media_id}",
@@ -226,6 +240,15 @@ async fn require_in_room(
     } else {
         Err(Error::forbidden("Your server is not in this room."))
     }
+}
+
+/// `GET /_matrix/federation/v1/openid/userinfo`
+pub async fn openid_userinfo(
+    app: AppState,
+    req: Ruma<ruma::api::federation::openid::get_openid_userinfo::v1::Request>,
+) -> Result<ruma::api::federation::openid::get_openid_userinfo::v1::Response> {
+    let sub = app.openid_userinfo(&req.body.access_token).await?;
+    Ok(ruma::api::federation::openid::get_openid_userinfo::v1::Response::new(sub))
 }
 
 // ---------------------------------------------------------------- discovery

@@ -291,6 +291,31 @@ pub struct DelayedEvent {
     pub txn_id: Option<String>,
 }
 
+// ------------------------------------------------------------------ rtc (MSC4195)
+
+/// A participant this server issued a `LiveKit` token to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RtcParticipant {
+    pub lk_room: String,
+    pub lk_identity: String,
+    pub user_id: OwnedUserId,
+    pub room_id: OwnedRoomId,
+    pub issued_ts: i64,
+}
+
+/// A delayed leave event whose restarting the server took over from the client.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DelegatedLeave {
+    pub delay_id: String,
+    pub user_id: OwnedUserId,
+    pub room_id: OwnedRoomId,
+    pub lk_room: String,
+    pub lk_identity: String,
+    pub created_ts: i64,
+    /// When the participant was last seen connected to the SFU; `None` until first seen.
+    pub connected_ts: Option<i64>,
+}
+
 // ------------------------------------------------------------------ keys
 
 /// One of this server's own signing keys.

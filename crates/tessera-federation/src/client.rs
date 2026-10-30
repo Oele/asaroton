@@ -274,6 +274,69 @@ impl FederationClient {
         })
     }
 
+    /// A signed request with a JSON body to an endpoint ruma does not model, returning the
+    /// JSON response. Matrix errors from the remote come back as [`Error::RemoteError`].
+    pub async fn send_signed_json(
+        &self,
+        destination: &ServerName,
+        method: http::Method,
+        path: &str,
+        body: Option<&serde_json::Value>,
+    ) -> Result<serde_json::Value> {
+        let resolved = self.discovery.resolve(destination).await?;
+        let url = format!("{}{path}", resolved.base_url());
+        let bytes = body
+            .map(serde_json::to_vec)
+            .transpose()?
+            .unwrap_or_default();
+        let mut builder = http::Request::builder().method(method).uri(&url);
+        if body.is_some() {
+            builder = builder.header(http::header::CONTENT_TYPE, "application/json");
+        }
+        let request = builder
+            .body(bytes)
+            .map_err(|e| Error::Protocol(format!("building request: {e}")))?;
+        let signing = XMatrixSigningInput::new(
+            self.services.config.server_name.clone(),
+            destination.to_owned(),
+            self.services.signing_key.key_pair(),
+        );
+        let auth = XMatrix::sign_http_request(&request, signing)
+            .map_err(|e| Error::Protocol(format!("signing request: {e}")))?;
+        let (parts, body) = request.into_parts();
+        let mut req = self
+            .http
+            .request(parts.method, url)
+            .timeout(REQUEST_TIMEOUT)
+            .header(http::header::AUTHORIZATION, http::HeaderValue::from(&auth))
+            .header(http::header::HOST, &resolved.host_header)
+            .body(body);
+        for (k, v) in &parts.headers {
+            req = req.header(k, v);
+        }
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                self.discovery.invalidate(destination);
+                return Err(Error::Transport(destination.to_owned(), error_chain(&e)));
+            }
+        };
+        let status = resp.status();
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| Error::Transport(destination.to_owned(), error_chain(&e)))?;
+        if !status.is_success() {
+            return Err(Error::RemoteError {
+                server: destination.to_owned(),
+                status,
+                body: String::from_utf8_lossy(&bytes).into_owned(),
+            });
+        }
+        serde_json::from_slice(&bytes)
+            .map_err(|e| Error::Protocol(format!("{destination}: bad JSON: {e}")))
+    }
+
     /// Unsigned `GET` returning JSON (server keys).
     pub async fn get_json(
         &self,

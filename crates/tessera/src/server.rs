@@ -115,6 +115,17 @@ fn service_config(config: &Config) -> anyhow::Result<tessera_service::Config> {
             },
             min_length: config.search.substring_min_length,
         },
+        rtc: config
+            .rtc
+            .livekit
+            .as_ref()
+            .map(|lk| tessera_service::config::LivekitSettings {
+                url: lk.url.trim_end_matches('/').to_owned(),
+                api_url: lk.api_url(),
+                api_key: lk.api_key.clone(),
+                api_secret: lk.api_secret.clone(),
+                remote_can_publish: lk.remote_can_publish,
+            }),
         software_version: env!("CARGO_PKG_VERSION").to_owned(),
         media_dir: config.data_dir.join("media"),
         appservices: load_appservices(config)?,
@@ -202,6 +213,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         Some(fed)
     };
     tessera_service::delayed_events::start_worker(Arc::clone(&services));
+    tessera_service::rtc::delegation::start_worker(Arc::clone(&services));
     if config.retention.enabled {
         tessera_service::admin::start_retention(
             Arc::clone(&services),

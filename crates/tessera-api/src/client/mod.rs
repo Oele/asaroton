@@ -11,6 +11,7 @@ pub mod media;
 pub mod misc;
 pub mod push;
 pub mod rooms;
+pub mod rtc;
 pub mod session;
 pub mod sliding_sync;
 pub mod synapse_admin;
@@ -176,6 +177,39 @@ pub fn routes(router: Router<AppState>) -> Router<AppState> {
             "/_matrix/client/unstable/org.matrix.msc4140/delayed_events/{delay_id}/{action}",
             axum::routing::post(delayed_events::update_with_path),
         );
+    // MatrixRTC transports (MSC4143) and the LiveKit transport (MSC4195).
+    let r = r
+        .route(
+            "/_matrix/client/v1/rtc/transports",
+            axum::routing::get(rtc::transports),
+        )
+        .route(
+            "/_matrix/client/unstable/org.matrix.msc4143/rtc/transports",
+            axum::routing::get(rtc::transports),
+        )
+        .route(
+            "/_matrix/client/v1/rtc/livekit/get_token",
+            axum::routing::post(rtc::get_token),
+        )
+        .route(
+            "/_matrix/client/v1/rtc/livekit/delegate_delayed_leave",
+            axum::routing::post(rtc::delegate_delayed_leave),
+        );
+    let r = [
+        ("get_token", axum::routing::post(rtc::get_token)),
+        ("sfu/get", axum::routing::post(rtc::sfu_get)),
+        (
+            "delegate_delayed_leave",
+            axum::routing::post(rtc::delegate_delayed_leave),
+        ),
+        ("sfu_webhook", axum::routing::post(rtc::sfu_webhook)),
+    ]
+    .into_iter()
+    .fold(r, |r, (path, handler)| {
+        r.route(&format!("{}/{path}", rtc::PREFIX), handler)
+    });
+    let r =
+        route::<c::account::request_openid_token::v3::Request, _, _>(r, rtc::request_openid_token);
     let r = route::<c::redact::redact_event::v3::Request, _, _>(r, rooms::redact);
     let r = route::<c::state::get_state_events::v3::Request, _, _>(r, rooms::state);
     let r = route_with_extra_paths::<c::state::get_state_event_for_key::v3::Request, _, _>(

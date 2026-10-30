@@ -235,6 +235,40 @@ impl FederationHooks for Hooks {
         serde_json::to_value(resp.data).map_err(Into::into)
     }
 
+    async fn remote_livekit_token(
+        &self,
+        server: &ruma::ServerName,
+        body: Value,
+    ) -> tessera_service::Result<Value> {
+        self.0
+            .client
+            .send_signed_json(
+                server,
+                http::Method::POST,
+                tessera_service::rtc::FEDERATION_GET_TOKEN_PATH,
+                Some(&body),
+            )
+            .await
+            .map_err(tessera_service::Error::from)
+    }
+
+    async fn remote_openid_userinfo(
+        &self,
+        server: &ruma::ServerName,
+        access_token: &str,
+    ) -> tessera_service::Result<OwnedUserId> {
+        let req = ruma::api::federation::openid::get_openid_userinfo::v1::Request::new(
+            access_token.to_owned(),
+        );
+        let resp = self
+            .0
+            .client
+            .send_unauthenticated(server, req)
+            .await
+            .map_err(tessera_service::Error::from)?;
+        Ok(resp.sub)
+    }
+
     async fn backfill(
         &self,
         room_id: &ruma::RoomId,
