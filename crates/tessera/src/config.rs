@@ -250,10 +250,13 @@ pub struct RtcConfig {
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LivekitConfig {
-    /// The WebSocket URL clients connect to (`wss://livekit.example.org`).
-    pub url: String,
+    /// The WebSocket URL clients connect to. Leave it out and clients connect to tessera, which
+    /// forwards the signalling to the SFU on `sfu.bind:sfu.port`; set it when the SFU's
+    /// WebSocket is exposed some other way (`wss://livekit.example.org`).
+    #[serde(default)]
+    pub url: Option<String>,
     /// The HTTP URL of the SFU's API, for creating rooms and removing participants. Defaults
-    /// to `url` with the scheme changed to http(s).
+    /// to `url` with the scheme changed to http(s), or to `sfu.bind:sfu.port`.
     #[serde(default)]
     pub api_url: Option<String>,
     /// An API key and secret from `LiveKit`'s `keys` configuration.
@@ -329,9 +332,10 @@ pub struct TurnConfig {
     /// of `url`.
     #[serde(default)]
     pub domain: Option<String>,
-    /// Where `livekit-server` listens for TURN over TLS. Clients are always told to connect to
-    /// port 443 of `domain` (`LiveKit` hard-codes that), so with another port here something on
-    /// 443 of that name must forward to it (a dedicated address, or an SNI router).
+    /// Where `livekit-server` listens for TURN over TLS. `LiveKit` tells clients to use port 443
+    /// whatever this says; tessera's signalling proxy corrects that, so any free port works
+    /// (443 itself still reaches the most restrictive networks). With an explicit `url` the
+    /// correction cannot happen and this must be 443.
     #[serde(default = "default_turn_tls_port")]
     pub tls_port: u16,
     /// Certificate chain and key, readable by the user `livekit-server` runs as.
@@ -339,27 +343,30 @@ pub struct TurnConfig {
     pub cert_file: PathBuf,
     #[serde(default = "default_turn_key")]
     pub key_file: PathBuf,
+    /// Private addresses the relay may forward to. The relay only ever needs to reach the SFU
+    /// itself, and `LiveKit` refuses private, loopback and link-local peers unless listed here;
+    /// so on a host behind NAT (where the SFU's own address is private) put that address here,
+    /// as `10.0.0.5/32`. A host with its public address on an interface needs nothing.
+    #[serde(default)]
+    pub allow_peer_cidrs: Vec<String>,
 }
 
 impl LivekitConfig {
-    /// The host name in `url`, without scheme, port or path.
-    pub fn url_host(&self) -> &str {
-        let rest = self
-            .url
-            .split_once("://")
-            .map_or(self.url.as_str(), |(_, rest)| rest);
+    /// The host name of a URL, without scheme, port or path.
+    pub fn host_of(url: &str) -> &str {
+        let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
         let host = rest.split('/').next().unwrap_or(rest);
         host.rsplit_once(':')
             .filter(|(_, port)| port.chars().all(|c| c.is_ascii_digit()))
             .map_or(host, |(h, _)| h)
     }
 
-    /// The API URL: explicit, or the WebSocket URL over HTTP.
+    /// The API URL: explicit, the WebSocket URL over HTTP, or the SFU's own listener.
     pub fn api_url(&self) -> String {
-        match &self.api_url {
-            Some(u) => u.trim_end_matches('/').to_owned(),
-            None => {
-                let url = self.url.trim_end_matches('/');
+        match (&self.api_url, &self.url) {
+            (Some(u), _) => u.trim_end_matches('/').to_owned(),
+            (None, Some(url)) => {
+                let url = url.trim_end_matches('/');
                 url.strip_prefix("wss://")
                     .map(|rest| format!("https://{rest}"))
                     .or_else(|| {
@@ -368,7 +375,25 @@ impl LivekitConfig {
                     })
                     .unwrap_or_else(|| url.to_owned())
             }
+            (None, None) => {
+                let host = match self.sfu.bind.as_str() {
+                    "0.0.0.0" | "::" => "127.0.0.1",
+                    other => other,
+                };
+                format!("http://{host}:{}", self.sfu.port)
+            }
         }
+    }
+
+    /// The port tessera's signalling proxy writes into the SFU's `turns:` URLs: the TURN port
+    /// when it is not the 443 `LiveKit` claims, and only when clients go through the proxy.
+    pub fn advertised_turn_port(&self) -> Option<u16> {
+        self.url.is_none().then_some(()).and(
+            self.turn
+                .as_ref()
+                .filter(|t| t.enabled && t.tls_port != 443)
+                .map(|t| t.tls_port),
+        )
     }
 }
 
@@ -407,7 +432,7 @@ fn default_udp_ports() -> (u16, u16) {
     (50000, 60000)
 }
 fn default_turn_tls_port() -> u16 {
-    443
+    5349
 }
 fn default_turn_cert() -> PathBuf {
     PathBuf::from("/etc/livekit/tls/fullchain.pem")
@@ -447,6 +472,18 @@ fn default_log_filter() -> String {
 
 impl Config {
     /// Load from a TOML file.
+    /// The URL clients reach this server at: `public_base_url`, or derived from the client
+    /// listener.
+    pub fn public_base_url(&self) -> String {
+        match &self.public_base_url {
+            Some(url) => url.trim_end_matches('/').to_owned(),
+            None if self.listeners.client.tls().is_some() => {
+                format!("https://{}", self.server_name)
+            }
+            None => format!("http://{}", self.listeners.client.bind),
+        }
+    }
+
     pub fn load(path: &std::path::Path) -> anyhow::Result<Self> {
         let text = std::fs::read_to_string(path)
             .map_err(|e| anyhow::anyhow!("reading config {}: {e}", path.display()))?;

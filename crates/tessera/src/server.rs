@@ -59,13 +59,7 @@ pub async fn search_backfill(config: Config) -> anyhow::Result<()> {
 }
 
 fn service_config(config: &Config) -> anyhow::Result<tessera_service::Config> {
-    let public_base_url = match &config.public_base_url {
-        Some(url) => url.trim_end_matches('/').to_owned(),
-        None if config.listeners.client.tls().is_some() => {
-            format!("https://{}", config.server_name)
-        }
-        None => format!("http://{}", config.listeners.client.bind),
-    };
+    let public_base_url = config.public_base_url();
     let mut trusted = config.federation.trusted_key_servers.clone();
     if trusted.is_empty()
         && let Ok(m) = ruma::OwnedServerName::try_from("matrix.org")
@@ -105,7 +99,7 @@ fn service_config(config: &Config) -> anyhow::Result<tessera_service::Config> {
                     .map_err(|e| anyhow::anyhow!("invalid admin user ID {a}: {e}"))
             })
             .collect::<anyhow::Result<Vec<_>>>()?,
-        public_base_url,
+        public_base_url: public_base_url.clone(),
         well_known_server: config.federation.well_known_server.clone(),
         search: tessera_service::config::SearchSettings {
             mode: match config.search.mode {
@@ -120,11 +114,15 @@ fn service_config(config: &Config) -> anyhow::Result<tessera_service::Config> {
             .livekit
             .as_ref()
             .map(|lk| tessera_service::config::LivekitSettings {
-                url: lk.url.trim_end_matches('/').to_owned(),
+                url: lk.url.as_ref().map_or_else(
+                    || tessera_service::rtc::signal::signal_url(&public_base_url),
+                    |u| u.trim_end_matches('/').to_owned(),
+                ),
                 api_url: lk.api_url(),
                 api_key: lk.api_key.clone(),
                 api_secret: lk.api_secret.clone(),
                 remote_can_publish: lk.remote_can_publish,
+                advertised_turn_port: lk.advertised_turn_port(),
             }),
         software_version: env!("CARGO_PKG_VERSION").to_owned(),
         media_dir: config.data_dir.join("media"),

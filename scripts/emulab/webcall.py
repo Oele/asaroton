@@ -5,7 +5,7 @@ usage: webcall.py USER PASS ROOM_ID [SECONDS]
 Environment: ELEMENT_WEB (default http://localhost:8089), EMULAB_OUT (screenshots and
 web-console.log, default .). Needs `pip install playwright && playwright install chromium`.
 """
-import os, sys, time, json
+import os, shlex, sys, time, json
 from playwright.sync_api import sync_playwright
 
 user, pw, room_id = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -19,12 +19,13 @@ def note(msg):
     print(line, flush=True); log.write(line + "\n"); log.flush()
 
 with sync_playwright() as p:
-    # CHROME_ARGS adds flags, e.g. "--force-webrtc-ip-handling-policy=disable_non_proxied_udp" to
-    # imitate a network that blocks UDP (the client must then relay through TURN over TLS).
+    # CHROME_ARGS adds flags (shell quoting), e.g. --force-webrtc-ip-handling-policy=disable_non_proxied_udp
+    # to imitate a network that blocks UDP (the client must then relay through TURN over TLS), or
+    # --host-resolver-rules="MAP turn.lab.test 127.0.0.1" to point a TURN name at the lab.
     browser = p.chromium.launch(args=[
         "--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream",
         "--autoplay-policy=no-user-gesture-required",
-        *os.environ.get("CHROME_ARGS", "").split(),
+        *shlex.split(os.environ.get("CHROME_ARGS", "")),
     ])
     ctx = browser.new_context(viewport={"width": 1280, "height": 900}, permissions=["camera", "microphone"])
     page = ctx.new_page()
@@ -38,6 +39,15 @@ with sync_playwright() as p:
                 console.log('[icedebug] iceServers ' + JSON.stringify((cfg || {}).iceServers || []).slice(0, 800));
                 pc.addEventListener('icecandidateerror', e => console.log(`[icedebug] error ${e.errorCode} ${e.url} ${e.errorText}`));
                 pc.addEventListener('iceconnectionstatechange', () => console.log('[icedebug] state ' + pc.iceConnectionState));
+                pc.addEventListener('icecandidate', e => { if (e.candidate) console.log('[icedebug] local ' + e.candidate.candidate.split(' ').slice(2, 8).join(' ')); });
+                pc.addEventListener('connectionstatechange', async () => {
+                    if (pc.connectionState !== 'connected') return;
+                    const stats = await pc.getStats();
+                    stats.forEach(r => { if (r.type === 'candidate-pair' && r.nominated) {
+                        const l = stats.get(r.localCandidateId), m = stats.get(r.remoteCandidateId);
+                        console.log(`[icedebug] pair local ${l.candidateType}/${l.protocol}${l.relayProtocol ? '/' + l.relayProtocol : ''} remote ${m.candidateType}/${m.protocol} ${m.address}:${m.port}`);
+                    }});
+                });
                 return pc;
             };
             W.prototype = P.prototype; Object.setPrototypeOf(W, P); window.RTCPeerConnection = W;

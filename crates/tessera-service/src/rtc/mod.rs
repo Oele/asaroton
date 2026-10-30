@@ -12,6 +12,7 @@
 pub mod delegation;
 pub mod jwt;
 pub mod livekit;
+pub mod signal;
 
 use std::sync::Arc;
 

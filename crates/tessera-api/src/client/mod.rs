@@ -12,6 +12,7 @@ pub mod misc;
 pub mod push;
 pub mod rooms;
 pub mod rtc;
+pub mod rtc_signal;
 pub mod session;
 pub mod sliding_sync;
 pub mod synapse_admin;
@@ -208,6 +209,15 @@ pub fn routes(router: Router<AppState>) -> Router<AppState> {
     .fold(r, |r, (path, handler)| {
         r.route(&format!("{}/{path}", rtc::PREFIX), handler)
     });
+    let r = r
+        .route(
+            &format!("{}/rtc", tessera_service::rtc::signal::SIGNAL_PATH),
+            axum::routing::get(rtc_signal::websocket),
+        )
+        .route(
+            &format!("{}/rtc/validate", tessera_service::rtc::signal::SIGNAL_PATH),
+            axum::routing::get(rtc_signal::validate),
+        );
     let r =
         route::<c::account::request_openid_token::v3::Request, _, _>(r, rtc::request_openid_token);
     let r = route::<c::redact::redact_event::v3::Request, _, _>(r, rooms::redact);

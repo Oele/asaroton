@@ -69,71 +69,63 @@ search table.
 
 Calls (Element Call, in Element Web, Element X and the standalone app) use MatrixRTC over
 LiveKit: the clients exchange call membership as room events and send media through a LiveKit
-SFU. tessera implements the homeserver side of MSC4195 itself, so the only extra service is
-`livekit-server`, and tessera writes its configuration. Put the SFU in tessera's config:
+SFU. tessera implements the homeserver side of MSC4195 itself, relays the SFU's signalling, and
+writes the SFU's configuration, so the only extra service is `livekit-server` on the same host.
 
 ```toml
 [rtc.livekit]
-url = "wss://matrix.example.org/livekit"     # where clients reach the SFU's signalling
 api_key = "APIabc123"                        # from `livekit-server generate-keys`
 api_secret = "the-secret-from-livekit-server-generate-keys"
-# api_url = "http://127.0.0.1:7880"          # the SFU's API; defaults to url over https
 # remote_can_publish = true                  # users of other servers may publish here
 
-# [rtc.livekit.turn]                         # media relay over TLS for clients without UDP
-# domain = "turn.example.org"                # defaults to the host of url; the cert must match
-# tls_port = 443
+[rtc.livekit.turn]                           # media relay over TLS for clients without UDP
+# domain = "matrix.example.org"              # defaults to the host of public_base_url
+# tls_port = 5349
 # cert_file = "/etc/livekit/tls/fullchain.pem"
 # key_file = "/etc/livekit/tls/privkey.pem"
+# allow_peer_cidrs = ["10.0.0.5/32"]         # the SFU's own address, only when it is private (NAT)
 ```
-
-then
 
 ```sh
 tessera --config /etc/tessera/tessera.toml livekit-config > /etc/livekit/livekit.yaml
 ```
 
-produces the complete `livekit.yaml` (signalling on 127.0.0.1:7880 for the reverse proxy to
-forward `url` to, media on UDP 50000–60000 and TCP 7881, the key, the webhook back to tessera,
-and the TURN section when configured); `[rtc.livekit.sfu]` changes the ports and bind address.
-Open UDP 50000–60000 and TCP 7881 to the world and proxy `url` to `http://127.0.0.1:7880/` as
-a WebSocket (Apache: `ProxyPass "/livekit/" "http://127.0.0.1:7880/" upgrade=websocket`).
-That is the whole setup for networks that allow UDP, which is most of them.
+produces the complete `livekit.yaml`: signalling and API on 127.0.0.1:7880, media on UDP
+50000–60000 and TCP 7881, the key, the webhook back to tessera and the TURN section.
+`[rtc.livekit.sfu]` changes those ports and the bind address. Open UDP 50000–60000, TCP 7881
+and (with TURN) TCP 5349 to the world; nothing else. Clients open their LiveKit WebSocket on
+tessera's own URL, under `/_matrix/client/unstable/io.element.msc4195/rtc/livekit/signal`,
+which the reverse proxy already forwards along with the rest of `/_matrix`, and tessera relays
+it to the SFU. If the SFU's WebSocket is exposed in some other way, set `url` to it instead.
 
-tessera advertises the SFU through `/rtc/transports` and the
-`org.matrix.msc4143.rtc_foci` entry of `.well-known/matrix/client`, checks room membership,
-signs the LiveKit access tokens, creates the LiveKit rooms, serves the federation endpoint
-through which users of other homeservers join calls hosted here (and asks the remote server for
-tokens when a local user joins a call on another server's SFU), keeps the delayed leave event
-alive while a participant is connected and sends it the moment the SFU reports the
-disconnection (webhook, with a poll every fifteen seconds as the fallback), and removes
-participants who leave or are kicked from the Matrix room. Older clients that still expect a
-separate LiveKit JWT service find one at the same URL prefix, including the OpenID token exchange
-it relies on; no `lk-jwt-service` is needed.
+tessera advertises the SFU through `/rtc/transports` and the `org.matrix.msc4143.rtc_foci`
+entry of `.well-known/matrix/client`, checks room membership, signs the LiveKit access tokens,
+creates the LiveKit rooms, serves the federation endpoint through which users of other
+homeservers join calls hosted here (and asks the remote server for tokens when a local user
+joins a call on another server's SFU), keeps the delayed leave event alive while a participant
+is connected and sends it the moment the SFU reports the disconnection (webhook, with a poll
+every fifteen seconds as the fallback), and removes participants who leave or are kicked from
+the Matrix room. Older clients that still expect a separate LiveKit JWT service find one at the
+same URL prefix, including the OpenID token exchange it relies on; no `lk-jwt-service` is needed.
 
 ### Clients without UDP (VPNs, strict firewalls)
 
 Every participant talks to the SFU directly, over UDP when it can. On a VPN or corporate network
 that blocks UDP, a browser only falls back to the SFU's TCP port after its UDP attempts time out,
-which means up to a minute of black tiles, and a network that only lets port 443 through never
-connects at all. The `[rtc.livekit.turn]` section makes `livekit-server` also offer a TURN
-relay over TLS: the client then has a working candidate in its first round of connectivity
-checks and connects at once. It is a listener of the SFU itself, not a separate TURN server,
-and the relayed media never leaves the host.
+which means up to a minute of black tiles. The `[rtc.livekit.turn]` section makes
+`livekit-server` also offer a TURN relay over TLS: the client then has a working candidate in
+its first round of connectivity checks and connects at once. It is a listener of the SFU itself,
+not a separate TURN server, and the relayed media never leaves the host.
 
-The catch is the port: LiveKit tells clients to connect to **port 443** of the TURN domain,
-whatever `tls_port` says, and that port is normally the web server's. The options are
-
-- a second address for the host: let `domain` resolve to it, keep `tls_port = 443` and give
-  the unit `AmbientCapabilities=CAP_NET_BIND_SERVICE` (or bind LiveKit's TURN to that address
-  only with `bind_addresses` in LiveKit's `turn` section);
-- one address: set `tls_port = 5349` and put an SNI router in front of 443 that passes
-  connections for the TURN domain through to 5349 and everything else to the web server
-  (HAProxy `mode tcp` with `req.ssl_sni`, or nginx `stream` with `ssl_preread`);
-- no TURN: leave the section out; UDP-blocked clients still connect, slowly, over TCP 7881.
-
-In every case the SFU needs a readable copy of a certificate for the TURN domain. With certbot a
-deploy hook keeps it current:
+LiveKit tells clients to find that relay on port 443 whatever port it listens on (its
+maintainers assume a load balancer in front). tessera's signalling relay corrects the port in
+the SFU's answers, so the relay can use 5349 or any other free port, and 443 is only needed
+for the strictest networks, which allow nothing else: give it a second address then, or an
+SNI router in front of 443. The relay forwards only to the SFU itself, and LiveKit refuses to
+relay to private addresses unless they are listed, so on a host behind NAT (cloud 1:1 NAT
+included) put the SFU's own private address in `allow_peer_cidrs`. The SFU needs a readable
+copy of a certificate for the TURN domain;
+with certbot a deploy hook keeps it current:
 
 ```sh
 #!/bin/sh

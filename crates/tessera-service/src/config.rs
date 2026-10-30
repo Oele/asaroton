@@ -47,6 +47,9 @@ pub struct LivekitSettings {
     pub api_secret: String,
     /// Whether users of other homeservers may publish media on this SFU.
     pub remote_can_publish: bool,
+    /// The port to put into the SFU's `turns:` URLs in place of the 443 it always advertises;
+    /// `None` leaves them alone. Applied by the signalling proxy (`rtc::signal`).
+    pub advertised_turn_port: Option<u16>,
 }
 
 impl std::fmt::Debug for LivekitSettings {

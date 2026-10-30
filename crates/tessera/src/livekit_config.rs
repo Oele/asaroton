@@ -3,7 +3,7 @@
 
 use std::{fmt::Write as _, path::Path};
 
-use crate::config::Config;
+use crate::config::{Config, LivekitConfig};
 
 const WEBHOOK_PATH: &str = "/_matrix/client/unstable/io.element.msc4195/rtc/livekit/sfu_webhook";
 
@@ -23,6 +23,7 @@ pub fn print(config: &Config, config_path: &Path) -> anyhow::Result<()> {
     };
     let webhook_url = format!("{scheme}://{}{WEBHOOK_PATH}", client.bind);
     let sfu = &lk.sfu;
+    let public_base_url = config.public_base_url();
 
     let mut out = String::new();
     writeln!(
@@ -54,7 +55,9 @@ pub fn print(config: &Config, config_path: &Path) -> anyhow::Result<()> {
     )?;
     out.push_str("room:\n  auto_create: true\n");
     if let Some(turn) = lk.turn.as_ref().filter(|t| t.enabled) {
-        let domain = turn.domain.as_deref().unwrap_or_else(|| lk.url_host());
+        let domain = turn.domain.as_deref().unwrap_or_else(|| {
+            LivekitConfig::host_of(lk.url.as_deref().unwrap_or(&public_base_url))
+        });
         writeln!(
             out,
             "turn:\n  enabled: true\n  domain: {}\n  tls_port: {}\n  cert_file: {}\n  key_file: {}",
@@ -63,10 +66,17 @@ pub fn print(config: &Config, config_path: &Path) -> anyhow::Result<()> {
             yaml_str(&turn.cert_file.display().to_string()),
             yaml_str(&turn.key_file.display().to_string())
         )?;
-        if turn.tls_port != 443 {
+        if !turn.allow_peer_cidrs.is_empty() {
+            out.push_str("  allow_restricted_peer_cidrs:\n");
+            for cidr in &turn.allow_peer_cidrs {
+                writeln!(out, "    - {}", yaml_str(cidr))?;
+            }
+        }
+        if turn.tls_port != 443 && lk.url.is_some() {
             eprintln!(
-                "note: clients connect to {domain}:443 for TURN; make sure that port reaches the \
-                 SFU's TLS port {}",
+                "warning: with rtc.livekit.url set, clients bypass tessera's signalling proxy and \
+                 LiveKit will tell them to use {domain}:443 for TURN, not port {}; unset url or \
+                 use tls_port = 443",
                 turn.tls_port
             );
         }
