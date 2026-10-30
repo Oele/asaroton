@@ -47,3 +47,16 @@ alphanumeric because `adb shell input text` mangles punctuation. Dismiss the key
 WebView, so read screenshots there. A member of a room created through the raw API cannot
 join calls until power levels allow the call membership state events, which `setup-room.py`
 sets like Element does on room creation.
+
+## Testing the TURN relay
+
+To imitate a client whose network blocks UDP, pass `ICE_DEBUG=1` and
+`CHROME_ARGS='--force-webrtc-ip-handling-policy=disable_non_proxied_udp'` to `webcall.py`; the
+console log then shows the ICE servers the client received, its candidates and the nominated
+pair (`relay/udp/tls` when it went through TURN). Run the lab SFU with `tcp_port: 0` so ICE-TCP
+cannot mask a broken relay, and list the SFU's own private address in `allow_peer_cidrs`, as
+LiveKit refuses private relay peers by default. Chromium only uses TURN over TLS with a
+certificate it trusts: generate one for a lab name (`turn.lab.test`), point the name at the lab
+with `--host-resolver-rules="MAP turn.lab.test 127.0.0.1"` and trust it in a throwaway profile,
+never in your own: `HOME=$lab/fakehome` with `certutil -d sql:$HOME/.pki/nssdb -A -t C,, -i cert.pem`
+(`libnss3-tools`), plus `PLAYWRIGHT_BROWSERS_PATH` pointing at the real browser cache.
