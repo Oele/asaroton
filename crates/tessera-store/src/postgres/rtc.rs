@@ -135,7 +135,7 @@ impl RtcStore for PostgresStore {
         Ok(res.rows_affected())
     }
 
-    async fn add_delegated_leave(&self, leave: &DelegatedLeave) -> Result<()> {
+    async fn add_delegated_leave(&self, leave: &DelegatedLeave) -> Result<bool> {
         let mut tx = self.pool.begin().await?;
         // One delegation per participant: a newer delay ID replaces the old one.
         sqlx::query(
@@ -146,10 +146,11 @@ impl RtcStore for PostgresStore {
         .bind(&leave.delay_id)
         .execute(&mut *tx)
         .await?;
-        sqlx::query(
+        let res = sqlx::query(
             "INSERT INTO rtc_delegated_leaves
                 (delay_id, user_id, room_id, lk_room, lk_identity, created_ts, connected_ts)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)
+             SELECT $1, $2, $3, $4, $5, $6, $7
+             WHERE EXISTS (SELECT 1 FROM delayed_events WHERE delay_id = $1)
              ON CONFLICT (delay_id) DO UPDATE
                 SET lk_room = EXCLUDED.lk_room, lk_identity = EXCLUDED.lk_identity,
                     created_ts = EXCLUDED.created_ts, connected_ts = EXCLUDED.connected_ts",
@@ -164,7 +165,7 @@ impl RtcStore for PostgresStore {
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
-        Ok(())
+        Ok(res.rows_affected() > 0)
     }
 
     async fn delegated_leaves(&self) -> Result<Vec<DelegatedLeave>> {

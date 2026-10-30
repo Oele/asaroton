@@ -537,8 +537,9 @@ pub trait RtcStore: Send + Sync {
     async fn remove_rtc_participant(&self, lk_room: &str, lk_identity: &str) -> Result<()>;
     async fn purge_rtc_participants_before(&self, issued_before: i64) -> Result<u64>;
 
-    /// Registers a delegated leave; replaces an earlier one for the same participant.
-    async fn add_delegated_leave(&self, leave: &DelegatedLeave) -> Result<()>;
+    /// Registers a delegated leave, replacing an earlier one for the same participant; `false`
+    /// when the delayed event no longer exists.
+    async fn add_delegated_leave(&self, leave: &DelegatedLeave) -> Result<bool>;
     async fn delegated_leaves(&self) -> Result<Vec<DelegatedLeave>>;
     async fn delegated_leave_for(
         &self,

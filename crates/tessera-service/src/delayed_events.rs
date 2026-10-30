@@ -2,13 +2,7 @@
 //! cancelled, restarted or sent early. Element Call uses them to expire call membership state
 //! when a client drops off.
 
-use std::{
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 
 use ruma::{DeviceId, OwnedEventId, RoomId, UserId};
 use serde_json::{Value, json};
@@ -20,30 +14,15 @@ use crate::{Error, Result, Services};
 pub const MAX_DELAY_MS: i64 = 24 * 60 * 60 * 1000;
 
 /// Scheduler state shared between the API and the worker.
+///
+/// A delayed state event is deliberately *not* cancelled when a state event with the same key
+/// is sent in the meantime: Element Call schedules its delayed leave first and sends its join
+/// membership for the same key right after, and the merged proposal (like Synapse) keeps the
+/// delayed event scheduled.
 #[derive(Debug, Default)]
 pub struct DelayedEvents {
     /// Woken whenever the schedule changes so the worker recomputes its next deadline.
     pub(crate) wake: tokio::sync::Notify,
-    /// Pending delayed *state* events; the state-change hook is free while this is zero.
-    pending_state: AtomicUsize,
-}
-
-impl DelayedEvents {
-    /// Lowers the pending state count without going below zero.
-    fn sub_pending_state(&self, n: usize) {
-        let mut current = self.pending_state.load(Ordering::Relaxed);
-        loop {
-            match self.pending_state.compare_exchange_weak(
-                current,
-                current.saturating_sub(n),
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => return,
-                Err(actual) => current = actual,
-            }
-        }
-    }
 }
 
 /// What `POST /delayed_events/{delay_id}` may do.
@@ -115,9 +94,6 @@ impl Services {
             txn_id: txn_id.map(ToOwned::to_owned),
         };
         self.store.add_delayed_event(&ev).await?;
-        if ev.state_key.is_some() {
-            self.delayed.pending_state.fetch_add(1, Ordering::Relaxed);
-        }
         self.delayed.wake.notify_one();
         Ok(ev.delay_id)
     }
@@ -174,37 +150,8 @@ impl Services {
         Ok(())
     }
 
-    /// A state event was persisted: delayed state events for the same tuple are moot.
-    pub async fn cancel_delayed_state_events(
-        &self,
-        room_id: &RoomId,
-        event_type: &str,
-        state_key: &str,
-    ) {
-        if self.delayed.pending_state.load(Ordering::Relaxed) == 0 {
-            return;
-        }
-        match self
-            .store
-            .remove_delayed_state_events(room_id, event_type, state_key)
-            .await
-        {
-            Ok(0) => {}
-            Ok(n) => {
-                let n = usize::try_from(n).unwrap_or(usize::MAX);
-                self.delayed.sub_pending_state(n);
-                self.delayed.wake.notify_one();
-            }
-            Err(e) => tracing::warn!(error = %e, "cancelling delayed state events failed"),
-        }
-    }
-
     async fn remove_delayed(&self, ev: &DelayedEvent) -> Result<bool> {
-        let removed = self.store.remove_delayed_event(&ev.delay_id).await?;
-        if removed && ev.state_key.is_some() {
-            self.delayed.sub_pending_state(1);
-        }
-        Ok(removed)
+        Ok(self.store.remove_delayed_event(&ev.delay_id).await?)
     }
 
     async fn fire_delayed(&self, ev: DelayedEvent) -> Result<OwnedEventId> {
@@ -239,13 +186,6 @@ impl Services {
 /// Starts the worker that sends delayed events when their timeout passes.
 pub fn start_worker(services: Arc<Services>) {
     tokio::spawn(async move {
-        match services.store.count_delayed_state_events().await {
-            Ok(n) => services
-                .delayed
-                .pending_state
-                .store(usize::try_from(n).unwrap_or(usize::MAX), Ordering::Relaxed),
-            Err(e) => tracing::warn!(error = %e, "counting delayed state events failed"),
-        }
         loop {
             match services.store.due_delayed_events(now_ts()).await {
                 Ok(due) => {

@@ -412,7 +412,8 @@ impl Services {
         if ev.user_id != user_id || ev.room_id != room_id {
             return Err(Error::invalid_param("No such delayed event."));
         }
-        self.store
+        let added = self
+            .store
             .add_delegated_leave(&DelegatedLeave {
                 delay_id: delay_id.to_owned(),
                 user_id: user_id.to_owned(),
@@ -423,6 +424,9 @@ impl Services {
                 connected_ts: None,
             })
             .await?;
+        if !added {
+            return Err(Error::invalid_param("No such delayed event."));
+        }
         self.rtc.wake.notify_one();
         tracing::info!(%user_id, %room_id, delay_id, lk_room, identity, "delayed leave delegated");
         Ok(())
