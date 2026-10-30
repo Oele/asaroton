@@ -262,6 +262,13 @@ pub struct LivekitConfig {
     /// Let users of other homeservers publish media on this SFU (they can always subscribe).
     #[serde(default = "default_true")]
     pub remote_can_publish: bool,
+    /// How `livekit-server` itself should listen; only used by `tessera livekit-config`.
+    #[serde(default)]
+    pub sfu: SfuConfig,
+    /// TURN over TLS for clients on networks that block UDP; only used by
+    /// `tessera livekit-config`.
+    #[serde(default)]
+    pub turn: Option<TurnConfig>,
 }
 
 impl std::fmt::Debug for LivekitConfig {
@@ -271,11 +278,82 @@ impl std::fmt::Debug for LivekitConfig {
             .field("api_url", &self.api_url)
             .field("api_key", &self.api_key)
             .field("remote_can_publish", &self.remote_can_publish)
+            .field("sfu", &self.sfu)
+            .field("turn", &self.turn)
             .finish_non_exhaustive()
     }
 }
 
+/// The SFU's own listeners, as written into the generated `livekit.yaml`.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SfuConfig {
+    /// Address of the signalling (WebSocket and API) listener; the reverse proxy forwards
+    /// `url` to it. `0.0.0.0` to listen on every interface.
+    #[serde(default = "default_sfu_bind")]
+    pub bind: String,
+    #[serde(default = "default_sfu_port")]
+    pub port: u16,
+    /// Media over TCP, for clients whose UDP is blocked (open it in the firewall).
+    #[serde(default = "default_sfu_tcp_port")]
+    pub tcp_port: u16,
+    /// Media over UDP, `[first, last]` (open the range in the firewall).
+    #[serde(default = "default_udp_ports")]
+    pub udp_ports: (u16, u16),
+    /// Let the SFU discover its public address (needed behind NAT / cloud 1:1 NAT).
+    #[serde(default = "default_true")]
+    pub external_ip: bool,
+}
+
+impl Default for SfuConfig {
+    fn default() -> Self {
+        Self {
+            bind: default_sfu_bind(),
+            port: default_sfu_port(),
+            tcp_port: default_sfu_tcp_port(),
+            udp_ports: default_udp_ports(),
+            external_ip: true,
+        }
+    }
+}
+
+/// TURN over TLS served by `livekit-server` itself. Clients that cannot use UDP (VPNs, strict
+/// firewalls) relay their media through it, over a TLS connection to `domain:tls_port`, and
+/// connect right away instead of waiting for the UDP attempts to time out.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TurnConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Host name clients connect to; the certificate must be valid for it. Defaults to the host
+    /// of `url`.
+    #[serde(default)]
+    pub domain: Option<String>,
+    /// Where `livekit-server` listens for TURN over TLS. Clients are always told to connect to
+    /// port 443 of `domain` (`LiveKit` hard-codes that), so with another port here something on
+    /// 443 of that name must forward to it (a dedicated address, or an SNI router).
+    #[serde(default = "default_turn_tls_port")]
+    pub tls_port: u16,
+    /// Certificate chain and key, readable by the user `livekit-server` runs as.
+    #[serde(default = "default_turn_cert")]
+    pub cert_file: PathBuf,
+    #[serde(default = "default_turn_key")]
+    pub key_file: PathBuf,
+}
+
 impl LivekitConfig {
+    /// The host name in `url`, without scheme, port or path.
+    pub fn url_host(&self) -> &str {
+        let rest = self
+            .url
+            .split_once("://")
+            .map_or(self.url.as_str(), |(_, rest)| rest);
+        let host = rest.split('/').next().unwrap_or(rest);
+        host.rsplit_once(':')
+            .filter(|(_, port)| port.chars().all(|c| c.is_ascii_digit()))
+            .map_or(host, |(h, _)| h)
+    }
+
     /// The API URL: explicit, or the WebSocket URL over HTTP.
     pub fn api_url(&self) -> String {
         match &self.api_url {
@@ -315,6 +393,27 @@ impl Default for LoggingConfig {
 
 fn default_true() -> bool {
     true
+}
+fn default_sfu_bind() -> String {
+    "127.0.0.1".to_owned()
+}
+fn default_sfu_port() -> u16 {
+    7880
+}
+fn default_sfu_tcp_port() -> u16 {
+    7881
+}
+fn default_udp_ports() -> (u16, u16) {
+    (50000, 60000)
+}
+fn default_turn_tls_port() -> u16 {
+    443
+}
+fn default_turn_cert() -> PathBuf {
+    PathBuf::from("/etc/livekit/tls/fullchain.pem")
+}
+fn default_turn_key() -> PathBuf {
+    PathBuf::from("/etc/livekit/tls/privkey.pem")
 }
 fn default_db_connections() -> u32 {
     32

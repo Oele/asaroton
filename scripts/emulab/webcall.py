@@ -19,12 +19,29 @@ def note(msg):
     print(line, flush=True); log.write(line + "\n"); log.flush()
 
 with sync_playwright() as p:
+    # CHROME_ARGS adds flags, e.g. "--force-webrtc-ip-handling-policy=disable_non_proxied_udp" to
+    # imitate a network that blocks UDP (the client must then relay through TURN over TLS).
     browser = p.chromium.launch(args=[
         "--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream",
         "--autoplay-policy=no-user-gesture-required",
+        *os.environ.get("CHROME_ARGS", "").split(),
     ])
     ctx = browser.new_context(viewport={"width": 1280, "height": 900}, permissions=["camera", "microphone"])
     page = ctx.new_page()
+    if os.environ.get("ICE_DEBUG"):
+        # Log the ICE servers handed to each peer connection and every candidate error, which
+        # shows whether a TURN relay is offered and why it fails.
+        ctx.add_init_script("""(() => {
+            const P = window.RTCPeerConnection; if (!P) return;
+            const W = function(cfg, ...rest) {
+                const pc = new P(cfg, ...rest);
+                console.log('[icedebug] iceServers ' + JSON.stringify((cfg || {}).iceServers || []).slice(0, 800));
+                pc.addEventListener('icecandidateerror', e => console.log(`[icedebug] error ${e.errorCode} ${e.url} ${e.errorText}`));
+                pc.addEventListener('iceconnectionstatechange', () => console.log('[icedebug] state ' + pc.iceConnectionState));
+                return pc;
+            };
+            W.prototype = P.prototype; Object.setPrototypeOf(W, P); window.RTCPeerConnection = W;
+        })();""")
     page.on("console", lambda m: log.write(f"{time.strftime('%H:%M:%S')} [{m.type}] {m.text[:300]}\n"))
     page.goto(f"{BASE}/#/login")
     page.wait_for_selector("input[name=username], input[autocomplete=username]", timeout=60000)

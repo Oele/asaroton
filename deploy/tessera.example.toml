@@ -39,13 +39,25 @@ mode = "word"
 # substring_min_length = 3
 
 # Voice and video calls: the LiveKit SFU this server offers (MSC4195). tessera signs the SFU
-# tokens itself; see docs/deployment.md for the LiveKit side.
+# tokens itself and `tessera livekit-config` writes the SFU's livekit.yaml from this section;
+# see docs/deployment.md.
 # [rtc.livekit]
-# url = "wss://livekit.example.org"
+# url = "wss://matrix.example.org/livekit"
 # api_key = "APIabc123"
 # api_secret = "the-secret-from-livekit-server-generate-keys"
-# api_url = "https://livekit.example.org"   # defaults to url over https
+# api_url = "http://127.0.0.1:7880"         # defaults to url over https
 # remote_can_publish = true                 # users of other servers may publish here
+# [rtc.livekit.sfu]                         # listeners written into livekit.yaml
+# bind = "127.0.0.1"
+# port = 7880
+# tcp_port = 7881
+# udp_ports = [50000, 60000]
+# external_ip = true
+# [rtc.livekit.turn]                        # relay over TLS for clients whose UDP is blocked
+# domain = "turn.example.org"               # defaults to the host of url; clients use its port 443
+# tls_port = 443
+# cert_file = "/etc/livekit/tls/fullchain.pem"
+# key_file = "/etc/livekit/tls/privkey.pem"
 
 [retention]
 enabled = false
