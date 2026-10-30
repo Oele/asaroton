@@ -13,6 +13,8 @@ specification (v1.19, room version 12 by default).
 - Application services (registration files, namespaces, transactions, third-party lookups).
 - Authentication delegated to Matrix Authentication Service (MSC3861), or classic tokens.
 - Synapse-compatible admin API subset, rate limiting, message retention.
+- Voice and video calls: MatrixRTC over LiveKit (MSC4195) with the token service built in;
+  a LiveKit server is the only extra component.
 - PostgreSQL behind a storage trait; one binary; distroless container image.
 
 Conformance is measured with [Complement](https://github.com/matrix-org/complement); the
