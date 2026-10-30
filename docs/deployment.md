@@ -50,8 +50,9 @@ responses carry the public URL, and `federation.well_known_server = "matrix.exam
 tessera serves `.well-known/matrix/server` and other servers reach it through the proxy instead
 of port 8448 (the federation listener can then be disabled). Proxy `/_matrix`, `/_synapse` and
 `/.well-known/matrix` to the client listener with `nocanon` and `AllowEncodedSlashes NoDecode`
-(Apache) or the equivalent, keep the proxy timeout above the longest `/sync` long-poll, and set
-`rate_limiting.trust_x_forwarded_for = true`.
+(Apache) or the equivalent, keep the proxy timeout above the longest `/sync` long-poll, let
+WebSocket upgrades through on `/_matrix` if calls are enabled (Apache: `upgrade=websocket` on the
+`ProxyPass`), and set `rate_limiting.trust_x_forwarded_for = true`.
 
 ## Message search
 
@@ -94,9 +95,13 @@ produces the complete `livekit.yaml`: signalling and API on 127.0.0.1:7880, medi
 50000–60000 and TCP 7881, the key, the webhook back to tessera and the TURN section.
 `[rtc.livekit.sfu]` changes those ports and the bind address. Open UDP 50000–60000, TCP 7881
 and (with TURN) TCP 5349 to the world; nothing else. Clients open their LiveKit WebSocket on
-tessera's own URL, under `/_matrix/client/unstable/io.element.msc4195/rtc/livekit/signal`,
-which the reverse proxy already forwards along with the rest of `/_matrix`, and tessera relays
-it to the SFU. If the SFU's WebSocket is exposed in some other way, set `url` to it instead.
+tessera's own URL, under `/_matrix/client/unstable/io.element.msc4195/rtc/livekit/signal`, and
+tessera relays it to the SFU. The reverse proxy must let WebSocket upgrades through on
+`/_matrix`, which a proxy set up for Synapse does not do by default: Apache 2.4.47+ takes
+`upgrade=websocket` on the existing `ProxyPass /_matrix ...` line, nginx needs
+`proxy_set_header Upgrade $http_upgrade;` and `proxy_set_header Connection "upgrade";` in the
+`/_matrix` location, Caddy and Traefik need nothing. If the SFU's WebSocket is exposed in some
+other way, set `url` to it instead.
 
 tessera advertises the SFU through `/rtc/transports` and the `org.matrix.msc4143.rtc_foci`
 entry of `.well-known/matrix/client`, checks room membership, signs the LiveKit access tokens,
