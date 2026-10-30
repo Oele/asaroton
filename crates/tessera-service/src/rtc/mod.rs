@@ -210,14 +210,12 @@ impl Services {
         self.config.rtc.is_some()
     }
 
-    /// The transports this server offers, for `/rtc/transports`.
+    /// The transports this server offers, for `/rtc/transports`. Besides the SFU `url` of the
+    /// merged proposal, the entry carries the `livekit_service_url` of the earlier drafts: the
+    /// Element Call builds in the field (Element Web 1.12.33's component, for one) only accept a
+    /// transport that has it, and the proposal's appendix sanctions advertising both.
     pub fn rtc_transports(&self) -> Vec<Value> {
-        self.config
-            .rtc
-            .as_ref()
-            .map(|s| json!({ "type": TRANSPORT_TYPE, "url": s.url }))
-            .into_iter()
-            .collect()
+        self.rtc_foci()
     }
 
     /// The `org.matrix.msc4143.rtc_foci` entry for `.well-known/matrix/client`, for clients

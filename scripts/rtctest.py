@@ -4,8 +4,8 @@ LiveKit started with the lab key (LK_KEY/LK_SECRET), using the `lk` CLI (LK_CLI)
 import base64, hashlib, hmac, json, os, subprocess, sys, time, urllib.request, urllib.error, urllib.parse
 
 HS = os.environ.get("HS", "http://127.0.0.1:8008")
-LK_URL = "ws://127.0.0.1:7880"
-LK_HTTP = "http://127.0.0.1:7880"
+LK_URL = os.environ.get("LK_URL", "ws://127.0.0.1:7880")
+LK_HTTP = LK_URL.replace("ws://", "http://")
 LK_KEY = os.environ.get("LK_KEY", "APISXUj3b3J5g32")
 LK_SECRET = os.environ.get("LK_SECRET", "MD6h9BYv5sqtN6Ao4JWpTiHXhXMdOO5juiYmfaTqqsI")
 LK = os.environ.get("LK_CLI", "lk")
@@ -76,7 +76,7 @@ st, r = req("POST", f"/_matrix/client/v3/join/{urllib.parse.quote(room)}", {}, b
 st, r = req("GET", "/_matrix/client/versions")
 check(r["unstable_features"].get("org.matrix.msc4143") is True, "versions advertises org.matrix.msc4143")
 st, r = req("GET", "/_matrix/client/unstable/org.matrix.msc4143/rtc/transports", token=atok)
-check(st == 200 and r["rtc_transports"][0] == {"type": "livekit", "url": LK_URL}, f"transports: {r}")
+check(st == 200 and r["rtc_transports"][0]["type"] == "livekit" and r["rtc_transports"][0]["url"] == LK_URL and r["rtc_transports"][0]["livekit_service_url"] == HS + PREFIX, f"transports: {r}")
 st, r = req("GET", "/_matrix/client/v1/rtc/transports")
 check(st == 401, f"transports without token -> 401 ({st})")
 st, r = req("GET", "/.well-known/matrix/client")
