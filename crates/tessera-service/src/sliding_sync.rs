@@ -961,16 +961,18 @@ impl Services {
             }
         }
 
-        // Required state: everything matching for a first (or widened) request, otherwise the
-        // changes since the last position that the timeline does not already carry.
+        // Required state: the whole current state for a first (or widened) request, as Synapse
+        // sends it, even where the timeline carries the same events; afterwards the changes
+        // since the last position that the timeline does not already carry.
         let expanded = track.is_some_and(|t| !sel.required_state.is_subset(&t.required_state));
+        let full = initial || expanded;
         let in_timeline: HashSet<OwnedEventId> =
             events.iter().map(|e| e.pdu.event_id().to_owned()).collect();
         let senders: HashSet<OwnedUserId> =
             events.iter().map(|e| e.pdu.sender().to_owned()).collect();
         let pool: Vec<StoredEvent> = if sel.required_state.is_empty() {
             Vec::new()
-        } else if initial || expanded {
+        } else if full {
             self.store.current_state_pdus(room_id).await?
         } else if let Some(l) = lower {
             self.state_changes_since(room_id, l).await?
@@ -980,7 +982,7 @@ impl Services {
         out.required_state = pool
             .into_iter()
             .filter(|e| {
-                !in_timeline.contains(e.pdu.event_id())
+                (full || !in_timeline.contains(e.pdu.event_id()))
                     && required_state_matches(&sel.required_state, e, user, &senders)
             })
             .collect();
