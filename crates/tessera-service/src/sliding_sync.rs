@@ -961,13 +961,12 @@ impl Services {
             }
         }
 
-        // Required state: the whole current state for a first (or widened) request, as Synapse
-        // sends it, even where the timeline carries the same events; afterwards the changes
-        // since the last position that the timeline does not already carry.
+        // Required state: the whole current state for a first (or widened) request, afterwards
+        // the changes since the last position. Events the timeline also carries are included
+        // either way, as Synapse does: the Rust SDK reads room state from `required_state` only
+        // and ignores state events in the timeline.
         let expanded = track.is_some_and(|t| !sel.required_state.is_subset(&t.required_state));
         let full = initial || expanded;
-        let in_timeline: HashSet<OwnedEventId> =
-            events.iter().map(|e| e.pdu.event_id().to_owned()).collect();
         let senders: HashSet<OwnedUserId> =
             events.iter().map(|e| e.pdu.sender().to_owned()).collect();
         let pool: Vec<StoredEvent> = if sel.required_state.is_empty() {
@@ -981,10 +980,7 @@ impl Services {
         };
         out.required_state = pool
             .into_iter()
-            .filter(|e| {
-                (full || !in_timeline.contains(e.pdu.event_id()))
-                    && required_state_matches(&sel.required_state, e, user, &senders)
-            })
+            .filter(|e| required_state_matches(&sel.required_state, e, user, &senders))
             .collect();
 
         // Name, avatar, counts and heroes.
