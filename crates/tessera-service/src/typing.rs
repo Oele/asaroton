@@ -12,11 +12,22 @@ use ruma::{OwnedRoomId, OwnedUserId, RoomId, UserId};
 use crate::{Notification, Services};
 
 /// Typing state of every room with at least one typing user.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct TypingState {
     rooms: DashMap<OwnedRoomId, RoomTyping>,
     /// Monotonic counter bumped on every change; sync tokens carry it.
     position: AtomicI64,
+}
+
+impl Default for TypingState {
+    /// Positions start at the current time in milliseconds, so after a restart they are above
+    /// anything a client's sync token still carries from the previous process.
+    fn default() -> Self {
+        Self {
+            rooms: DashMap::new(),
+            position: AtomicI64::new(tessera_store::now_ts()),
+        }
+    }
 }
 
 #[derive(Debug, Default)]

@@ -20,10 +20,22 @@ pub struct PresenceEntry {
 }
 
 /// All known presence.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct PresenceMap {
     users: DashMap<OwnedUserId, PresenceEntry>,
     position: AtomicI64,
+}
+
+impl Default for PresenceMap {
+    /// Positions start at the current time in milliseconds, so after a restart they are above
+    /// anything a client's sync token still carries from the previous process (which bumped by
+    /// one per change, far slower than the clock): the client then sees presence again.
+    fn default() -> Self {
+        Self {
+            users: DashMap::new(),
+            position: AtomicI64::new(now_ts()),
+        }
+    }
 }
 
 impl PresenceMap {
