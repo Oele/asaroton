@@ -267,9 +267,15 @@ impl Services {
     /// Run a sync, long-polling up to `timeout` for an incremental sync with nothing new.
     pub async fn sync(&self, req: SyncRequest) -> Result<SyncResult> {
         // Syncing marks the user active with the requested presence.
-        if req.set_presence != PresenceState::Offline || self.presence.get(&req.user_id).is_some() {
-            self.set_presence(&req.user_id, req.set_presence.clone(), None)
-                .await;
+        // `offline` on a sync means "do not affect my presence" (a background sync).
+        if req.set_presence != PresenceState::Offline {
+            self.set_presence(
+                &req.user_id,
+                req.device_id.as_deref(),
+                req.set_presence.clone(),
+                None,
+            )
+            .await;
         }
         self.presence.touch(&req.user_id);
 

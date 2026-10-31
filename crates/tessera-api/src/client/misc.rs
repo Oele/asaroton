@@ -400,6 +400,7 @@ pub async fn set_presence(
     services
         .set_presence(
             &sender.user_id,
+            sender.device_id.as_deref(),
             req.body.presence.clone(),
             Some(req.body.status_msg.clone()),
         )

@@ -399,9 +399,15 @@ impl Services {
     /// One sliding sync request: resolve the connection position, compute the response, long
     /// poll when nothing changed, and remember what was sent.
     pub async fn sliding_sync(&self, req: SlidingSyncRequest) -> Result<SlidingSyncResult> {
-        if req.set_presence != PresenceState::Offline || self.presence.get(&req.user_id).is_some() {
-            self.set_presence(&req.user_id, req.set_presence.clone(), None)
-                .await;
+        // `offline` on a sync means "do not affect my presence" (a background sync).
+        if req.set_presence != PresenceState::Offline {
+            self.set_presence(
+                &req.user_id,
+                req.device_id.as_deref(),
+                req.set_presence.clone(),
+                None,
+            )
+            .await;
         }
         self.presence.touch(&req.user_id);
 

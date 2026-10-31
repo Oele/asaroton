@@ -211,6 +211,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         Some(fed)
     };
     tessera_service::delayed_events::start_worker(Arc::clone(&services));
+    tessera_service::presence::start_worker(Arc::clone(&services));
     tessera_service::rtc::delegation::start_worker(Arc::clone(&services));
     if config.retention.enabled {
         tessera_service::admin::start_retention(

@@ -1325,9 +1325,11 @@ impl Federation {
                     if update.user_id.server_name() != origin {
                         continue;
                     }
-                    services
-                        .set_presence(&update.user_id, update.presence, Some(update.status_msg))
-                        .await;
+                    services.set_remote_presence(
+                        &update.user_id,
+                        update.presence,
+                        update.status_msg,
+                    );
                 }
             }
             Edu::DeviceListUpdate(d) => {
