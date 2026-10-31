@@ -149,6 +149,7 @@ async fn worker(fed: Arc<Federation>, destination: OwnedServerName, notify: Arc<
 
         let mut pdus = Vec::new();
         let mut edus = Vec::new();
+        let mut edu_types: Vec<String> = Vec::new();
         let mut ids = Vec::new();
         for item in items {
             match item.kind {
@@ -171,6 +172,9 @@ async fn worker(fed: Arc<Federation>, destination: OwnedServerName, notify: Arc<
                 OutboxKind::Edu(json) => {
                     if edus.len() >= MAX_EDUS {
                         break;
+                    }
+                    if let Some(t) = json.get("edu_type").and_then(|t| t.as_str()) {
+                        edu_types.push(t.to_owned());
                     }
                     if let Ok(raw) = serde_json::value::to_raw_value(&json) {
                         edus.push(ruma::serde::Raw::from_json(raw));
@@ -198,7 +202,7 @@ async fn worker(fed: Arc<Federation>, destination: OwnedServerName, notify: Arc<
                         tracing::warn!(%destination, %event_id, %reason, "remote rejected PDU");
                     }
                 }
-                tracing::debug!(%destination, pdu_count, edu_count, "transaction sent");
+                tracing::debug!(%destination, pdu_count, edu_count, edu_types = %edu_types.join(","), "transaction sent");
                 let _ = fed.services.store.delete_outbox_items(&ids).await;
                 let _ = fed
                     .services

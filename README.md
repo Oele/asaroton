@@ -33,6 +33,7 @@ scripts/check.sh                # fmt + clippy + tests
 scripts/complement.sh -run TestRegistration   # conformance suite (builds a Docker image)
 scripts/loadtest.py --users 50  # synthetic client swarm against a running server
 scripts/emulab/                 # Element X in an Android emulator + headless Element Web, see its README
+scripts/fedpresencetest.py LAB   # presence fan-out over federation stays bounded (two-server lab)
 ```
 
 ## License
