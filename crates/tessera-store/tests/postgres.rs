@@ -689,3 +689,60 @@ async fn migrate_is_idempotent(pool: PgPool) {
     store.migrate().await.unwrap();
     let _: OwnedUserId = user_id!("@x:example.org").to_owned();
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn queued_presence_and_typing_edus_are_replaced(pool: PgPool) {
+    use tessera_store::FederationStore;
+    let store = PostgresStore::from_pool(pool);
+    let dest: ruma::OwnedServerName = "remote.example.org".try_into().unwrap();
+    let presence = |state: &str| json!({"edu_type": "m.presence", "content": {"push": [{"user_id": "@a:example.org", "presence": state}]}});
+    store
+        .enqueue_edu(std::slice::from_ref(&dest), &presence("online"))
+        .await
+        .unwrap();
+    store
+        .enqueue_edu(std::slice::from_ref(&dest), &presence("unavailable"))
+        .await
+        .unwrap();
+    store
+        .enqueue_edu(std::slice::from_ref(&dest), &presence("online"))
+        .await
+        .unwrap();
+    store
+        .enqueue_edu(std::slice::from_ref(&dest), &json!({"edu_type": "m.presence", "content": {"push": [{"user_id": "@b:example.org", "presence": "online"}]}}))
+        .await
+        .unwrap();
+    store
+        .enqueue_edu(
+            &[dest.clone()],
+            &json!({"edu_type": "m.receipt", "content": {"!r:example.org": {}}}),
+        )
+        .await
+        .unwrap();
+    store
+        .enqueue_edu(
+            &[dest.clone()],
+            &json!({"edu_type": "m.receipt", "content": {"!r:example.org": {}}}),
+        )
+        .await
+        .unwrap();
+    let items = store.outbox_for(&dest, 100).await.unwrap();
+    // one presence row per user (the latest), both receipts kept
+    assert_eq!(items.len(), 4, "{items:?}");
+    let latest_a = items
+        .iter()
+        .filter_map(|i| match &i.kind {
+            tessera_store::OutboxKind::Edu(e) => Some(e),
+            tessera_store::OutboxKind::Pdu(_) => None,
+        })
+        .find(|e| {
+            e.pointer("/content/push/0/user_id")
+                .and_then(|u| u.as_str())
+                == Some("@a:example.org")
+        })
+        .unwrap();
+    assert_eq!(
+        latest_a.pointer("/content/push/0/presence").unwrap(),
+        "online"
+    );
+}

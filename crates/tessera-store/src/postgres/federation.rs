@@ -38,6 +38,35 @@ impl FederationStore for PostgresStore {
         if destinations.is_empty() {
             return Ok(());
         }
+        // Presence and typing describe a current state: a newer update for the same user (or
+        // room) makes a queued older one worthless, so replace it instead of queueing behind it.
+        // Without this a user whose presence changed quickly could pile up an unbounded number
+        // of updates per destination.
+        let edu_type = edu.get("edu_type").and_then(|t| t.as_str());
+        let superseded_by = match edu_type {
+            Some("m.presence") => edu
+                .pointer("/content/push/0/user_id")
+                .and_then(|u| u.as_str())
+                .map(|u| ("/content/push/0/user_id", u)),
+            Some("m.typing") => edu
+                .pointer("/content/room_id")
+                .and_then(|r| r.as_str())
+                .map(|r| ("/content/room_id", r)),
+            _ => None,
+        };
+        if let (Some(edu_type), Some((path, value))) = (edu_type, superseded_by) {
+            sqlx::query(
+                "DELETE FROM federation_outbox
+                 WHERE destination = ANY($1) AND kind = 'edu'
+                   AND edu_json->>'edu_type' = $2 AND edu_json #>> $3 = $4",
+            )
+            .bind(strings(destinations))
+            .bind(edu_type)
+            .bind(json_path(path))
+            .bind(value)
+            .execute(&self.pool)
+            .await?;
+        }
         sqlx::query(
             "INSERT INTO federation_outbox (destination, kind, edu_json, created_ts)
              SELECT d, 'edu', $2, $3 FROM UNNEST($1::text[]) AS d",
@@ -242,4 +271,13 @@ impl FederationStore for PostgresStore {
             .await?;
         Ok(())
     }
+}
+
+/// A JSON pointer (`/content/push/0/user_id`) as the `text[]` path PostgreSQL's `#>>` takes.
+fn json_path(pointer: &str) -> Vec<String> {
+    pointer
+        .split('/')
+        .filter(|p| !p.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
