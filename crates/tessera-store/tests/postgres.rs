@@ -714,14 +714,14 @@ async fn queued_presence_and_typing_edus_are_replaced(pool: PgPool) {
         .unwrap();
     store
         .enqueue_edu(
-            &[dest.clone()],
+            std::slice::from_ref(&dest),
             &json!({"edu_type": "m.receipt", "content": {"!r:example.org": {}}}),
         )
         .await
         .unwrap();
     store
         .enqueue_edu(
-            &[dest.clone()],
+            std::slice::from_ref(&dest),
             &json!({"edu_type": "m.receipt", "content": {"!r:example.org": {}}}),
         )
         .await
