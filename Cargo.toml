@@ -11,6 +11,7 @@ repository = "https://github.com/sanderoele/tessera"
 authors = ["Sander Oele <sander@oele.net>"]
 
 [workspace.dependencies]
+html-escape = "0.3.0"
 percent-encoding = "2"
 # internal crates
 tessera-core = { path = "crates/tessera-core" }

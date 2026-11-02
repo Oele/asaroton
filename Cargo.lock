@@ -1317,6 +1317,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "html-escape"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "491194d601b4fa9fac3c9571e014070a0ad1bc3392d1bc10419695196a8b3cc3"
+
+[[package]]
 name = "http"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3361,6 +3367,7 @@ dependencies = [
  "dashmap",
  "futures",
  "hickory-resolver",
+ "html-escape",
  "http",
  "image",
  "parking_lot",

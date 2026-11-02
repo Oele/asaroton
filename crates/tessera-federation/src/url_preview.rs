@@ -204,13 +204,9 @@ fn attr(tag: &str, name: &str) -> Option<String> {
     None
 }
 
+/// Decodes named and numeric character references (`&amp;`, `&#39;`, `&#x27;`, `&eacute;`, ...).
 fn decode_entities(s: &str) -> String {
-    s.replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-        .replace("&apos;", "'")
+    html_escape::decode_html_entities(s).into_owned()
 }
 
 #[cfg(test)]
@@ -228,5 +224,13 @@ mod tests {
         assert_eq!(tags[1], ("description".into(), "Desc".into()));
         assert_eq!(tags[2].1, "/img.png");
         assert_eq!(title_tag(html).as_deref(), Some("T & U"));
+    }
+
+    #[test]
+    fn decodes_numeric_and_named_entities() {
+        assert_eq!(
+            decode_entities("auto&#x27;s &#233;n caf&eacute; &quot;x&quot; &#39;y&#39;"),
+            "auto's én café \"x\" 'y'"
+        );
     }
 }
