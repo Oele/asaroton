@@ -299,12 +299,17 @@ The importer copies the cache now. For a server that was migrated earlier, while
 database still exists:
 
 ```
-sudo -u postgres asaroton --config /etc/asaroton/asaroton.toml import-synapse \
-    --from 'postgres:///synapse?host=/var/run/postgresql' --only-server-keys
+sudo -u asaroton asaroton --config /etc/asaroton/asaroton.toml import-synapse \
+    --from "postgres://asaroton@%2Fvar%2Frun%2Fpostgresql/synapse" --only-server-keys
 ```
 
-It adds the keys asaroton does not hold yet and changes nothing else; the server can stay up,
-and running it twice does no harm. The Synapse database has to be kept until this has been done.
+(As the `asaroton` user, like the import itself: it reads the configuration file and, through
+the `pg_read_all_data` grant made for the import, the Synapse database.) It adds the keys
+asaroton does not hold yet and changes nothing else; the server can stay up, and running it
+twice does no harm. The Synapse database has to be kept until this has been done.
+
+Done on cluephone.org on 2026-11-06: 3785 keys added, 244 already held. Of the 593 keys that
+sign events in its database it held 108 before and holds 592 now.
 
 ## Rooms that were left out, after the fact
 
@@ -327,8 +332,8 @@ SELECT room_id, substring(state_key FROM position(':' IN state_key) + 1) AS serv
 ```
 
 Take the rows whose room is not in asaroton's `rooms` table, write them as
-`room_id<TAB>user_id<TAB>server,server,...` and give the file to `scripts/leave-unrecorded.py`
-on the host (`--dry-run` and `--limit` first). Every line becomes a leave event in somebody
+`room_id<TAB>user_id<TAB>server,server,...`, copy that file and `scripts/leave-unrecorded.py`
+to the host and run the script there as root (`--dry-run` and `--limit` first). Every line becomes a leave event in somebody
 else's room, signed by this server.
 
 ## Open questions
