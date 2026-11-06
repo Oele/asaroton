@@ -137,6 +137,16 @@ def main():
     if bodies != ["said after"] or update.get("initial") or update.get("limited") or update.get("expanded_timeline") or update.get("num_live") != 1:
         failures.append(f"a new message should arrive as a plain update (got {bodies}, {sorted(update)})")
 
+    # A room without a name is listed by its other members ("heroes"), with the field names
+    # of a profile: displayname and avatar_url.
+    unnamed = call("POST", "/_matrix/client/v3/createRoom", {"invite": [bob_id], "is_direct": True}, alice)["room_id"]
+    call("POST", f"/_matrix/client/v3/rooms/{urllib.parse.quote(unnamed)}/join", {}, bob)
+    r, took = sync(bob, None)
+    heroes = r.get("rooms", {}).get(unnamed, {}).get("heroes", [])
+    print(f"unnamed room: heroes={heroes}")
+    if len(heroes) != 1 or not heroes[0].get("displayname") or set(heroes[0]) - {"user_id", "displayname", "avatar_url"}:
+        failures.append(f"heroes of an unnamed room should carry user_id, displayname and avatar_url (got {heroes})")
+
     for f in failures:
         print("FAIL:", f)
     sys.exit(1 if failures else 0)

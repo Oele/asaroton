@@ -96,12 +96,15 @@ async fn room_json(services: &AppState, user: &ruma::UserId, r: &RoomResult) -> 
             .heroes
             .iter()
             .map(|h| {
+                // MSC4186 names these as profiles do. (`name` and `avatar` were the old
+                // sliding sync proxy's names; clients built on the Rust SDK do not read them
+                // and then call a direct chat "2 people".)
                 let mut o = json!({ "user_id": h.user_id });
                 if let Some(n) = &h.name {
-                    o["name"] = json!(n);
+                    o["displayname"] = json!(n);
                 }
                 if let Some(a) = &h.avatar {
-                    o["avatar"] = json!(a);
+                    o["avatar_url"] = json!(a);
                 }
                 o
             })
