@@ -283,8 +283,12 @@ pub async fn create_filter(
     if sender.user_id != req.body.user_id {
         return Err(Error::forbidden("Cannot create filters for another user."));
     }
-    let json =
-        serde_json::to_value(&req.body.filter).map_err(|e| Error::bad_json(e.to_string()))?;
+    // Stored as the client sent it: the typed form drops fields it does not know, such as
+    // the profile fields a sync should report (MSC4429).
+    let json = match &req.json {
+        Some(raw) if raw.is_object() => raw.clone(),
+        _ => serde_json::to_value(&req.body.filter).map_err(|e| Error::bad_json(e.to_string()))?,
+    };
     let id = services.store.create_filter(&sender.user_id, &json).await?;
     Ok(create_filter::v3::Response::new(id.to_string()))
 }

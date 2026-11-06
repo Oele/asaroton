@@ -250,6 +250,45 @@ impl UserStore for PostgresStore {
         Ok(())
     }
 
+    async fn record_profile_update(&self, user_id: &UserId, field: &str) -> Result<i64> {
+        let row = sqlx::query(
+            "INSERT INTO profile_updates (user_id, field_id, stream_id)
+             VALUES ($1, $2, nextval('profile_updates_seq'))
+             ON CONFLICT (user_id, field_id) DO UPDATE SET stream_id = EXCLUDED.stream_id
+             RETURNING stream_id",
+        )
+        .bind(user_id.as_str())
+        .bind(field)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.get(0))
+    }
+
+    async fn profile_updates_between(
+        &self,
+        since: i64,
+        until: i64,
+        fields: &[String],
+    ) -> Result<Vec<(OwnedUserId, String)>> {
+        let rows = sqlx::query(
+            "SELECT user_id, field_id FROM profile_updates
+             WHERE stream_id > $1 AND stream_id <= $2 AND field_id = ANY($3)
+             ORDER BY stream_id",
+        )
+        .bind(since)
+        .bind(until)
+        .bind(fields)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|r| {
+                let user = OwnedUserId::try_from(r.get::<String, _>("user_id"))
+                    .map_err(|e| Error::Corrupt(format!("profile_updates.user_id: {e}")))?;
+                Ok((user, r.get("field_id")))
+            })
+            .collect()
+    }
+
     async fn set_profile(
         &self,
         user_id: &UserId,

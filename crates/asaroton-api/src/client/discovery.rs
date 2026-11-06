@@ -33,6 +33,8 @@ pub async fn versions(
         ("org.matrix.msc4155".to_owned(), true),
         // Delayed events.
         ("org.matrix.msc4140".to_owned(), true),
+        // Profile updates in /sync.
+        ("org.matrix.msc4429".to_owned(), true),
         // MatrixRTC transports, when a LiveKit SFU is configured.
         ("org.matrix.msc4143".to_owned(), services.has_rtc()),
         // Thread subscriptions and their sliding sync extension.

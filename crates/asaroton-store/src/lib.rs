@@ -47,6 +47,17 @@ pub trait UserStore: Send + Sync {
         key: &str,
         value: Option<&serde_json::Value>,
     ) -> Result<()>;
+    /// Note that a profile field of a local user changed (was set or cleared), for syncs
+    /// that follow profile updates. Returns the new position.
+    async fn record_profile_update(&self, user_id: &UserId, field: &str) -> Result<i64>;
+    /// The profile fields, among `fields`, that changed after `since` and up to `until`:
+    /// user and field, each pair once.
+    async fn profile_updates_between(
+        &self,
+        since: i64,
+        until: i64,
+        fields: &[String],
+    ) -> Result<Vec<(OwnedUserId, String)>>;
     async fn set_deactivated(&self, user_id: &UserId, deactivated: bool) -> Result<()>;
     async fn set_admin(&self, user_id: &UserId, admin: bool) -> Result<()>;
     /// A page of users (admin listing) and the total matching count.

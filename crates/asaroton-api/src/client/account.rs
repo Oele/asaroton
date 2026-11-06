@@ -557,6 +557,15 @@ async fn set_profile_field_inner(
     let Some(value) = parsed.get(key).cloned() else {
         return Err(Error::bad_json(format!("Body must contain `{key}`.")));
     };
+    // Setting a field to null clears it, like DELETE does. Stored as a literal null it would
+    // read back as a field that exists.
+    if value.is_null() {
+        return match key {
+            "displayname" => Ok(services.set_display_name(&user, None).await?),
+            "avatar_url" => Ok(services.set_avatar_url(&user, None).await?),
+            _ => Ok(services.set_profile_field(&user, key, None).await?),
+        };
+    }
     match key {
         "displayname" => {
             let name = value
@@ -584,10 +593,7 @@ async fn set_profile_field_inner(
                     "Profile too large.",
                 ));
             }
-            services
-                .store
-                .set_profile_field(&user, key, Some(&value))
-                .await?;
+            services.set_profile_field(&user, key, Some(&value)).await?;
         }
     }
     Ok(())
@@ -609,10 +615,7 @@ pub async fn delete_profile_field(
         "avatar_url" => services.set_avatar_url(&sender.user_id, None).await?,
         k => {
             check_profile_key(k)?;
-            services
-                .store
-                .set_profile_field(&sender.user_id, k, None)
-                .await?;
+            services.set_profile_field(&sender.user_id, k, None).await?;
         }
     }
     let mut resp = axum::Json(serde_json::json!({})).into_response();

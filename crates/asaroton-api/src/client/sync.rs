@@ -14,6 +14,36 @@ use serde_json::{Map, Value, json};
 
 use crate::{AppState, Error, Result, Ruma, client::rooms::client_event};
 
+/// The `filter` query parameter when it is a filter definition written out as JSON.
+fn inline_filter(query: &str) -> Option<Value> {
+    let raw = query.split('&').find_map(|kv| kv.strip_prefix("filter="))?;
+    // Form encoding: `+` is a space.
+    let decoded = percent_encoding::percent_decode_str(&raw.replace('+', " "))
+        .decode_utf8_lossy()
+        .into_owned();
+    serde_json::from_str::<Value>(&decoded)
+        .ok()
+        .filter(Value::is_object)
+}
+
+/// The profile fields a filter asks updates for (MSC4429): `profile_fields.ids`, under its
+/// stable name or the proposal's unstable one. Nothing is the default: a client has to ask.
+pub fn profile_field_ids(filter: &Value) -> Vec<String> {
+    let mut ids: Vec<String> = Vec::new();
+    for key in ["profile_fields", "org.matrix.msc4429.profile_fields"] {
+        let listed = filter
+            .get(key)
+            .and_then(|f| f.get("ids"))
+            .and_then(Value::as_array);
+        for id in listed.into_iter().flatten().filter_map(Value::as_str) {
+            if !ids.iter().any(|known| known == id) {
+                ids.push(id.to_owned());
+            }
+        }
+    }
+    ids
+}
+
 /// Turn a ruma filter into the subset we apply.
 pub fn sync_filter(f: &FilterDefinition) -> SyncFilter {
     let mut out = SyncFilter::default();
@@ -152,23 +182,32 @@ pub async fn sync(
         ),
     };
 
+    // The filter as JSON as well as typed: the typed form drops what it does not know, and
+    // the profile fields a client wants updates for (MSC4429) are not in it.
+    let mut filter_json: Option<Value> = None;
     let filter: Option<FilterDefinition> = match &req.body.filter {
-        Some(Filter::FilterDefinition(f)) => Some(f.clone()),
+        Some(Filter::FilterDefinition(f)) => {
+            filter_json = req.query.as_deref().and_then(inline_filter);
+            Some(f.clone())
+        }
         Some(Filter::FilterId(id)) => {
             let id: i64 = id
                 .parse()
                 .map_err(|_| Error::invalid_param("Invalid filter ID."))?;
-            services
-                .store
-                .get_filter(&sender.user_id, id)
-                .await?
+            filter_json = services.store.get_filter(&sender.user_id, id).await?;
+            filter_json
+                .clone()
                 .map(serde_json::from_value)
                 .transpose()
                 .map_err(|e| Error::internal(e.to_string()))?
         }
         _ => None,
     };
-    let filter = filter.as_ref().map(sync_filter).unwrap_or_default();
+    let mut filter = filter.as_ref().map(sync_filter).unwrap_or_default();
+    filter.profile_fields = filter_json
+        .as_ref()
+        .map(profile_field_ids)
+        .unwrap_or_default();
 
     let result = services
         .sync(SyncRequest {
@@ -233,7 +272,7 @@ pub async fn sync(
             rooms.insert(key.to_owned(), Value::Object(map));
         }
     }
-    let body = json!({
+    let mut body = json!({
         "next_batch": result.next_batch.to_string(),
         "rooms": rooms,
         "presence": { "events": result.presence },
@@ -244,7 +283,54 @@ pub async fn sync(
         "device_unused_fallback_key_types": result.unused_fallback_key_types,
         "org.matrix.msc2732.device_unused_fallback_key_types": result.unused_fallback_key_types,
     });
+    // Profile updates (MSC4429), under the proposal's unstable name while it is unstable.
+    if !result.profile_updates.is_empty() {
+        let users: Map<String, Value> = result
+            .profile_updates
+            .iter()
+            .map(|(user, fields)| (user.to_string(), json!({ "profile_updates": fields })))
+            .collect();
+        body["org.matrix.msc4429.users"] = Value::Object(users);
+    }
     let mut resp = Json(body).into_response();
     crate::extract::add_cors(resp.headers_mut());
     Ok(resp)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn profile_fields_have_to_be_asked_for() {
+        let none: Vec<String> = Vec::new();
+        assert_eq!(profile_field_ids(&json!({})), none);
+        assert_eq!(
+            profile_field_ids(&json!({ "room": { "timeline": { "limit": 5 } } })),
+            none
+        );
+        assert_eq!(profile_field_ids(&json!({ "profile_fields": {} })), none);
+        assert_eq!(
+            profile_field_ids(&json!({ "profile_fields": { "ids": ["m.status", "displayname"] } })),
+            ["m.status", "displayname"]
+        );
+        // The proposal's unstable name counts too; a client may send both.
+        assert_eq!(
+            profile_field_ids(&json!({
+                "profile_fields": { "ids": ["m.status"] },
+                "org.matrix.msc4429.profile_fields": { "ids": ["m.status", "m.tz", 7] },
+            })),
+            ["m.status", "m.tz"]
+        );
+    }
+
+    #[test]
+    fn a_filter_written_out_in_the_query_is_read_as_json() {
+        let query = "timeout=0&filter=%7B%22profile_fields%22%3A%7B%22ids%22%3A%5B%22m.status%22%5D%7D%7D&since=s1";
+        let filter = inline_filter(query).unwrap_or_default();
+        assert_eq!(profile_field_ids(&filter), ["m.status"]);
+        // A filter ID is not JSON.
+        assert_eq!(inline_filter("filter=12&timeout=0"), None);
+        assert_eq!(inline_filter("timeout=0"), None);
+    }
 }

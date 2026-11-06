@@ -24,6 +24,8 @@ pub enum Notification {
     DeviceLists { user_id: OwnedUserId },
     /// A user's presence changed.
     Presence { user_id: OwnedUserId },
+    /// A field of a user's profile changed.
+    Profile { user_id: OwnedUserId },
 }
 
 /// Broadcast hub.

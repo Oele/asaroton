@@ -30,14 +30,17 @@ pub struct SyncToken {
     pub device_lists: i64,
     pub presence: i64,
     pub thread_subscriptions: i64,
+    /// Profile updates (MSC4429).
+    pub profile: i64,
 }
 
 impl SyncToken {
     pub fn parse(s: &str) -> Option<Self> {
         let rest = s.strip_prefix('s')?;
-        // Tokens have at most eight parts; longer ones come from another implementation
-        // (Synapse's have ten) and must not be read positionally.
-        if rest.split('_').count() > 8 {
+        // Tokens have at most nine parts (eight before profile updates were added); longer
+        // ones come from another implementation (Synapse's have ten) and must not be read
+        // positionally.
+        if rest.split('_').count() > 9 {
             return None;
         }
         let mut it = rest.split('_').map(|p| p.parse::<i64>().ok());
@@ -52,6 +55,7 @@ impl SyncToken {
             device_lists: next(),
             presence: next(),
             thread_subscriptions: next(),
+            profile: next(),
         })
     }
 }
@@ -66,7 +70,7 @@ impl SyncToken {
     pub fn from_synapse(s: &str, now: &SyncToken) -> Option<Self> {
         let rest = s.strip_prefix('s')?;
         let parts: Vec<&str> = rest.split('_').collect();
-        if parts.len() <= 8 {
+        if parts.len() <= 9 {
             return None;
         }
         let events = parts[0].parse::<i64>().ok()?;
@@ -79,6 +83,7 @@ impl SyncToken {
             device_lists: now.device_lists,
             presence: 0,
             thread_subscriptions: 0,
+            profile: now.profile,
         })
     }
 }
@@ -87,7 +92,7 @@ impl std::fmt::Display for SyncToken {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "s{}_{}_{}_{}_{}_{}_{}_{}",
+            "s{}_{}_{}_{}_{}_{}_{}_{}_{}",
             self.events,
             self.account_data,
             self.receipts,
@@ -95,7 +100,8 @@ impl std::fmt::Display for SyncToken {
             self.to_device,
             self.device_lists,
             self.presence,
-            self.thread_subscriptions
+            self.thread_subscriptions,
+            self.profile
         )
     }
 }
@@ -117,6 +123,8 @@ pub struct SyncFilter {
     pub rooms: Option<Vec<OwnedRoomId>>,
     pub not_rooms: Vec<OwnedRoomId>,
     pub presence_enabled: bool,
+    /// Profile fields whose updates the client wants (MSC4429); none by default.
+    pub profile_fields: Vec<String>,
 }
 
 impl Default for SyncFilter {
@@ -135,6 +143,7 @@ impl Default for SyncFilter {
             unread_thread_notifications: false,
             rooms: None,
             not_rooms: Vec::new(),
+            profile_fields: Vec::new(),
             presence_enabled: true,
         }
     }
@@ -249,6 +258,9 @@ pub struct SyncResult {
     pub device_lists_left: Vec<OwnedUserId>,
     pub one_time_key_counts: BTreeMap<String, u64>,
     pub unused_fallback_key_types: Vec<String>,
+    /// Profile updates per user (MSC4429): the fields that changed, with `null` for one that
+    /// was cleared; `None` for a user whose profile the client can stop tracking.
+    pub profile_updates: BTreeMap<OwnedUserId, Option<BTreeMap<String, Value>>>,
 }
 
 impl SyncResult {
@@ -260,6 +272,7 @@ impl SyncResult {
             && self.presence.is_empty()
             && self.to_device.is_empty()
             && self.device_lists_changed.is_empty()
+            && self.profile_updates.is_empty()
     }
 }
 
@@ -296,6 +309,7 @@ impl Services {
                 Notification::User { user_id: u } => *u == user_id,
                 // Cheap to re-check; the sync itself filters to relevant users.
                 Notification::DeviceLists { .. } | Notification::Presence { .. } => true,
+                Notification::Profile { .. } => !req.filter.profile_fields.is_empty(),
             })
             .await;
             if woke {
@@ -326,6 +340,7 @@ impl Services {
             device_lists: p.device_lists,
             presence: self.presence.position(),
             thread_subscriptions: p.thread_subscriptions,
+            profile: p.profile_updates,
         })
     }
 
@@ -534,7 +549,95 @@ impl Services {
             out.device_lists_changed = changed;
             out.device_lists_left = left;
         }
+        if !req.filter.profile_fields.is_empty() {
+            out.profile_updates = self
+                .profile_updates(
+                    user,
+                    since,
+                    now,
+                    &req.filter.profile_fields,
+                    &out.device_lists_left,
+                )
+                .await?;
+        }
 
+        Ok(out)
+    }
+
+    /// Profile updates for a sync that asked for them (MSC4429): the requested fields of the
+    /// local users who share a room with `user`, and of `user` (for their other devices).
+    /// Without a token that is every such field that is set; with one, the fields that
+    /// changed since, each with its current value or `null` when it was cleared. A user who
+    /// stopped sharing a room in the window is reported as `None`: nothing more will come.
+    async fn profile_updates(
+        &self,
+        user: &UserId,
+        since: Option<SyncToken>,
+        now: SyncToken,
+        fields: &[String],
+        no_longer_shared: &[OwnedUserId],
+    ) -> Result<BTreeMap<OwnedUserId, Option<BTreeMap<String, Value>>>> {
+        let mut sharing: HashSet<OwnedUserId> = self
+            .store
+            .users_sharing_rooms_with(user)
+            .await?
+            .into_iter()
+            .filter(|u| self.is_local(u))
+            .collect();
+        sharing.insert(user.to_owned());
+        let value_of = |profile: &asaroton_store::User, field: &str| -> Option<Value> {
+            match field {
+                "displayname" => profile.display_name.clone().map(Value::String),
+                "avatar_url" => profile.avatar_url.clone().map(Value::String),
+                other => profile.profile_fields.get(other).cloned(),
+            }
+        };
+        let mut out: BTreeMap<OwnedUserId, Option<BTreeMap<String, Value>>> = BTreeMap::new();
+        match since {
+            None => {
+                for who in sharing {
+                    let Some(profile) = self.store.get_user(&who).await? else {
+                        continue;
+                    };
+                    let set: BTreeMap<String, Value> = fields
+                        .iter()
+                        .filter_map(|f| value_of(&profile, f).map(|v| (f.clone(), v)))
+                        .collect();
+                    if !set.is_empty() {
+                        out.insert(who, Some(set));
+                    }
+                }
+            }
+            Some(s) => {
+                let changed = self
+                    .store
+                    .profile_updates_between(s.profile, now.profile, fields)
+                    .await?;
+                let mut profiles: HashMap<OwnedUserId, Option<asaroton_store::User>> =
+                    HashMap::new();
+                for (who, field) in changed {
+                    if !sharing.contains(&who) {
+                        continue;
+                    }
+                    if !profiles.contains_key(&who) {
+                        profiles.insert(who.clone(), self.store.get_user(&who).await?);
+                    }
+                    let value = profiles
+                        .get(&who)
+                        .and_then(Option::as_ref)
+                        .and_then(|p| value_of(p, &field))
+                        .unwrap_or(Value::Null);
+                    if let Some(entry) = out.entry(who).or_insert_with(|| Some(BTreeMap::new())) {
+                        entry.insert(field, value);
+                    }
+                }
+                for who in no_longer_shared {
+                    if self.is_local(who) && who != user {
+                        out.insert(who.clone(), None);
+                    }
+                }
+            }
+        }
         Ok(out)
     }
 
@@ -1208,5 +1311,28 @@ impl Services {
             }
         }
         Ok((changed, left))
+    }
+}
+
+#[cfg(test)]
+mod token_tests {
+    use super::SyncToken;
+
+    #[test]
+    fn tokens_from_before_profile_updates_still_parse() {
+        let old = SyncToken::parse("s10_2_3_4_5_6_7_8").unwrap_or_else(|| panic!("old token"));
+        assert_eq!(
+            (old.events, old.thread_subscriptions, old.profile),
+            (10, 8, 0)
+        );
+        let now = SyncToken::parse("s10_2_3_4_5_6_7_8_9").unwrap_or_else(|| panic!("new token"));
+        assert_eq!(now.profile, 9);
+        assert_eq!(now.to_string(), "s10_2_3_4_5_6_7_8_9");
+        // Synapse's tokens have ten parts and are not ours to read position by position.
+        assert!(SyncToken::parse("s10_2_3_4_5_6_7_8_9_10").is_none());
+        let mapped = SyncToken::from_synapse("s10_2_3_4_5_6_7_8_9_10", &now)
+            .unwrap_or_else(|| panic!("synapse token"));
+        assert_eq!((mapped.events, mapped.profile), (10, 9));
+        assert!(SyncToken::from_synapse("s10_2_3_4_5_6_7_8_9", &now).is_none());
     }
 }

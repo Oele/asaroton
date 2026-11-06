@@ -457,6 +457,8 @@ impl Services {
                     | Notification::RoomEphemeral { room_id } => rooms.contains(room_id),
                     Notification::User { user_id: u } => *u == user_id,
                     Notification::DeviceLists { .. } | Notification::Presence { .. } => true,
+                    // Profile updates are a feature of classic sync (MSC4429).
+                    Notification::Profile { .. } => false,
                 })
                 .await;
                 if !woke {

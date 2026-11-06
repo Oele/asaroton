@@ -284,7 +284,8 @@ impl EventStore for PostgresStore {
                     (SELECT COALESCE(MAX(stream_id), 0) FROM receipts) AS receipts,
                     (SELECT COALESCE(MAX(stream_id), 0) FROM to_device_messages) AS to_device,
                     (SELECT COALESCE(MAX(stream_id), 0) FROM device_list_changes) AS device_lists,
-                    (SELECT COALESCE(MAX(stream_id), 0) FROM thread_subscriptions) AS thread_subscriptions",
+                    (SELECT COALESCE(MAX(stream_id), 0) FROM thread_subscriptions) AS thread_subscriptions,
+                    (SELECT COALESCE(MAX(stream_id), 0) FROM profile_updates) AS profile_updates",
         )
         .fetch_one(&self.pool)
         .await?;
@@ -295,6 +296,7 @@ impl EventStore for PostgresStore {
             to_device: row.get("to_device"),
             device_lists: row.get("device_lists"),
             thread_subscriptions: row.get("thread_subscriptions"),
+            profile_updates: row.get("profile_updates"),
         })
     }
 

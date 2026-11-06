@@ -256,6 +256,7 @@ pub struct StreamPositions {
     pub to_device: i64,
     pub device_lists: i64,
     pub thread_subscriptions: i64,
+    pub profile_updates: i64,
 }
 
 // ------------------------------------------------------------------ thread subscriptions
