@@ -470,6 +470,30 @@ impl EventStore for PostgresStore {
         rows.into_iter().map(StoredEvent::try_from).collect()
     }
 
+    async fn clear_rejected(&self, event_ids: &[OwnedEventId]) -> Result<u64> {
+        if event_ids.is_empty() {
+            return Ok(0);
+        }
+        let done =
+            sqlx::query("UPDATE events SET rejected = FALSE WHERE event_id = ANY($1) AND rejected")
+                .bind(strings(event_ids))
+                .execute(&self.pool)
+                .await?;
+        Ok(done.rows_affected())
+    }
+
+    async fn rejected_timeline_events(&self, room_id: &RoomId) -> Result<Vec<StoredEvent>> {
+        let rows: Vec<EventRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT {EVENT_COLUMNS} FROM events e JOIN rooms r ON r.room_id = e.room_id
+             WHERE e.room_id = $1 AND e.rejected AND NOT e.outlier
+             ORDER BY e.stream_ordering LIMIT 10000"
+        )))
+        .bind(room_id.as_str())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(StoredEvent::try_from).collect()
+    }
+
     async fn have_events(&self, event_ids: &[OwnedEventId]) -> Result<Vec<OwnedEventId>> {
         let rows = sqlx::query("SELECT event_id FROM events WHERE event_id = ANY($1)")
             .bind(strings(event_ids))

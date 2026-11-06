@@ -69,6 +69,8 @@ pub struct Federation {
         ruma::OwnedEventId,
         (asaroton_core::state::StateMap, Vec<ruma::OwnedEventId>),
     >,
+    /// Signing keys that could not be obtained, and when that was last tried.
+    key_misses: dashmap::DashMap<(ruma::OwnedServerName, String), std::time::Instant>,
     /// Weak handle to ourselves, for code paths that need an `Arc<Federation>`.
     weak_self: std::sync::OnceLock<std::sync::Weak<Federation>>,
 }
@@ -97,6 +99,7 @@ impl Federation {
             sender,
             event_cache: dashmap::DashMap::new(),
             state_at_cache: dashmap::DashMap::new(),
+            key_misses: dashmap::DashMap::new(),
             weak_self: std::sync::OnceLock::new(),
         });
         let _ = fed.weak_self.set(Arc::downgrade(&fed));

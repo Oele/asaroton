@@ -65,6 +65,8 @@ class Peer:
         self.lock = threading.Lock()
         # Extra GET routes: (compiled regex on the path, function(handler, match)).
         self.routes = []
+        # Extra PUT/POST routes: (compiled regex on the path, function(handler, match, body)).
+        self.put_routes = []
         peer = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -94,6 +96,10 @@ class Peer:
 
             def do_PUT(self):
                 raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                for pattern, serve in peer.put_routes:
+                    m = pattern.match(self.path)
+                    if m:
+                        return serve(self, m, json.loads(raw or b"{}"))
                 m = re.match(r"/_matrix/federation/v1/send/([^/?]+)", self.path)
                 if not m:
                     return self.answer(404, {"errcode": "M_UNRECOGNIZED", "error": "mock"})

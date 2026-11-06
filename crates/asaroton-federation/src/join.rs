@@ -153,16 +153,18 @@ impl Federation {
         // Parse and verify everything we were given.
         let mut auth_chain: Vec<Pdu> = Vec::new();
         for raw in &room_state.auth_chain {
-            if let Ok(obj) = asaroton_core::canonical::from_str(raw.get())
-                && let Ok(p) = self.parse_and_verify(server, obj, &rules).await
+            if let Some(p) = self
+                .join_response_event(server, room_id, raw.get(), &rules)
+                .await
             {
                 auth_chain.push(p);
             }
         }
         let mut state_events: Vec<Pdu> = Vec::new();
         for raw in &room_state.state {
-            if let Ok(obj) = asaroton_core::canonical::from_str(raw.get())
-                && let Ok(p) = self.parse_and_verify(server, obj, &rules).await
+            if let Some(p) = self
+                .join_response_event(server, room_id, raw.get(), &rules)
+                .await
             {
                 state_events.push(p);
             }
@@ -185,8 +187,16 @@ impl Federation {
 
         let _guard = services.lock_room(room_id).await;
         let join_event_id = join.event_id().to_owned();
-        self.persist_joined_room(room_id, &version, &rules, auth_chain, state_events, join)
-            .await?;
+        self.persist_joined_room(
+            room_id,
+            &version,
+            &rules,
+            auth_chain,
+            state_events,
+            join,
+            server,
+        )
+        .await?;
         // We tell the other servers about our join ourselves (the resident server does not
         // forward events from other servers).
         let servers: Vec<OwnedServerName> = services
@@ -202,8 +212,49 @@ impl Federation {
         Ok(())
     }
 
+    /// One event of a `send_join` response, parsed and verified. An event that does not check
+    /// out is left out, and that is said in the log: whatever depends on it cannot be checked
+    /// either, and a silent gap here is very hard to find afterwards.
+    async fn join_response_event(
+        &self,
+        server: &ServerName,
+        room_id: &RoomId,
+        raw: &str,
+        rules: &RoomVersionRules,
+    ) -> Option<Pdu> {
+        let obj = match asaroton_core::canonical::from_str(raw) {
+            Ok(obj) => obj,
+            Err(e) => {
+                tracing::warn!(%room_id, %server, error = %e, "leaving out a malformed event of the join response");
+                return None;
+            }
+        };
+        let described = Pdu::from_canonical(obj.clone(), rules)
+            .ok()
+            .map(|p| format!("{} ({} from {})", p.event_id(), p.event_type(), p.sender()));
+        match self.parse_and_verify(server, obj, rules).await {
+            Ok(pdu) => Some(pdu),
+            Err(e) => {
+                tracing::warn!(
+                    %room_id, %server,
+                    event = described.as_deref().unwrap_or("unparseable"),
+                    error = %e,
+                    "leaving out an event of the join response that could not be verified"
+                );
+                None
+            }
+        }
+    }
+
     /// Store the auth chain and state from a join (or an invite's resolved state), compute the
     /// state group, check every event against its auth events, and make the join current.
+    ///
+    /// An event is rejected only when it was checked and failed. One whose auth events cannot
+    /// all be had (not in the response, not stored, not obtainable from `via`, or left out
+    /// above because its signature could not be verified) is not stored at all: that we
+    /// cannot check it today does not make it invalid, and a stored rejection is passed on to
+    /// everything that cites the event later.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     async fn persist_joined_room(
         &self,
         room_id: &RoomId,
@@ -212,6 +263,7 @@ impl Federation {
         auth_chain: Vec<Pdu>,
         state_events: Vec<Pdu>,
         join: Pdu,
+        via: &ServerName,
     ) -> Result<()> {
         let services = &self.services;
         services
@@ -228,23 +280,90 @@ impl Federation {
             })
             .await?;
 
-        // Everything in dependency order: auth chain (sorted by depth), then state events.
+        // What is to be checked and stored: the response's events...
         let mut all: HashMap<OwnedEventId, Pdu> = HashMap::new();
         for p in auth_chain.iter().chain(state_events.iter()) {
             all.insert(p.event_id().to_owned(), p.clone());
-            self.event_cache.insert(p.event_id().to_owned(), p.clone());
         }
-        let mut ordered: Vec<Pdu> = all.values().cloned().collect();
+        let mut to_check: HashSet<OwnedEventId> = all.keys().cloned().collect();
+        // ...plus the auth events they cite that the response does not carry. Those may be
+        // stored already (then their stored verdict stands), or the server we join through
+        // can hand them over one by one.
+        let missing_from = |all: &HashMap<OwnedEventId, Pdu>| -> Vec<OwnedEventId> {
+            let mut ids: Vec<OwnedEventId> = all
+                .values()
+                .flat_map(|p| p.auth_events().iter().cloned())
+                .filter(|id| !all.contains_key(id))
+                .collect();
+            ids.sort_unstable();
+            ids.dedup();
+            ids
+        };
+        let mut unobtainable: HashSet<OwnedEventId> = HashSet::new();
+        for _ in 0..8 {
+            let mut wanted = missing_from(&all);
+            wanted.retain(|id| !unobtainable.contains(id));
+            if wanted.is_empty() {
+                break;
+            }
+            for stored in services.store.get_events(&wanted).await? {
+                if stored.pdu.room_id() == room_id {
+                    all.insert(stored.pdu.event_id().to_owned(), stored.pdu);
+                }
+            }
+            for id in wanted {
+                if all.contains_key(&id) {
+                    continue;
+                }
+                match self.fetch_event(via, &id, rules).await {
+                    Ok(p) if p.room_id() == room_id => {
+                        to_check.insert(id.clone());
+                        all.insert(id, p);
+                    }
+                    Ok(_) => {
+                        unobtainable.insert(id);
+                    }
+                    Err(e) => {
+                        tracing::warn!(%room_id, event_id = %id, %via, error = %e, "an auth event that the join response lacks could not be obtained");
+                        unobtainable.insert(id);
+                    }
+                }
+            }
+        }
+
+        // Everything in dependency order.
+        let mut ordered: Vec<Pdu> = to_check
+            .iter()
+            .filter_map(|id| all.get(id).cloned())
+            .collect();
         ordered.sort_by_key(|p| u64::from(p.depth()));
 
         let mut rejected: HashSet<OwnedEventId> = HashSet::new();
+        let mut unchecked: HashSet<OwnedEventId> = HashSet::new();
+        let mut accepted: Vec<OwnedEventId> = Vec::new();
         let mut batch: Vec<PersistEvent> = Vec::new();
         for p in &ordered {
+            if let Some(lacking) = p
+                .auth_events()
+                .iter()
+                .find(|a| !all.contains_key(*a) || unchecked.contains(*a))
+            {
+                tracing::warn!(
+                    %room_id, event_id = %p.event_id(), sender = %p.sender(), auth_event = %lacking,
+                    "not storing an event of the join response: an auth event it cites is unavailable, so it cannot be checked"
+                );
+                unchecked.insert(p.event_id().to_owned());
+                continue;
+            }
             let ok = auth::check_against_auth_events(p, rules, |id| all.get(id).cloned()).is_ok()
                 && p.auth_events().iter().all(|a| !rejected.contains(a));
-            if !ok {
+            if ok {
+                accepted.push(p.event_id().to_owned());
+            } else {
                 rejected.insert(p.event_id().to_owned());
             }
+            self.event_cache
+                .insert(p.event_id().to_owned(), p.with_rejected(!ok));
             batch.push(PersistEvent {
                 pdu: p.with_rejected(!ok),
                 state: EventState::Outlier,
@@ -256,6 +375,13 @@ impl Federation {
             });
         }
         services.store.persist_events(batch).await?;
+        // An event stored earlier keeps its row. If it had been rejected then for want of
+        // something that is available now, the fresh verdict replaces the old one.
+        let restored = services.store.clear_rejected(&accepted).await?;
+        if restored > 0 {
+            tracing::info!(%room_id, restored, "events rejected on an earlier join pass their checks now");
+        }
+        rejected.extend(unchecked);
 
         // The state before the join: the state events we were given, minus rejected ones.
         let state_pdus: Vec<&Pdu> = state_events
@@ -310,6 +436,69 @@ impl Federation {
         self.event_cache
             .insert(join.event_id().to_owned(), join.clone());
         services.notify_room_event(&join, persisted.stream_ordering);
+        if let Err(e) = self.reauthorise_rejected(room_id, rules).await {
+            tracing::warn!(%room_id, error = %e, "could not look again at rejected events");
+        }
+        Ok(())
+    }
+
+    /// Look again at the timeline events of a room that are stored as rejected. Where the
+    /// rejection came from an auth event that was itself wrongly rejected (because what it
+    /// depends on could not be obtained or verified at the time), it no longer holds once
+    /// that event is accepted. An event is restored when it passes against the auth events it
+    /// cites and against the room's current state. Only events without a state key are
+    /// restored: taking back the rejection of a state event would mean recomputing the state
+    /// of everything after it, and state is repaired by the join itself.
+    async fn reauthorise_rejected(&self, room_id: &RoomId, rules: &RoomVersionRules) -> Result<()> {
+        let services = &self.services;
+        let candidates = services.store.rejected_timeline_events(room_id).await?;
+        if candidates.is_empty() {
+            return Ok(());
+        }
+        let current: HashMap<(StateEventType, String), Pdu> = services
+            .store
+            .current_state_pdus(room_id)
+            .await?
+            .into_iter()
+            .filter_map(|e| {
+                let key = e.pdu.state_tuple().map(|(t, k)| (t, k.to_owned()))?;
+                Some((key, e.pdu))
+            })
+            .collect();
+        let mut restored: Vec<OwnedEventId> = Vec::new();
+        let mut kept = 0usize;
+        for ev in candidates {
+            let p = &ev.pdu;
+            if p.is_state() {
+                kept += 1;
+                continue;
+            }
+            let cited: HashMap<OwnedEventId, Pdu> = services
+                .store
+                .get_events(p.auth_events())
+                .await?
+                .into_iter()
+                .map(|e| (e.pdu.event_id().to_owned(), e.pdu))
+                .collect();
+            let lookup = |id: &ruma::EventId| {
+                cited
+                    .get(id)
+                    .cloned()
+                    .or_else(|| current.values().find(|c| c.event_id() == id).cloned())
+            };
+            if auth::check_against_auth_events(p, rules, lookup).is_ok()
+                && auth::check_against_state(p, rules, &current).is_ok()
+            {
+                restored.push(p.event_id().to_owned());
+            } else {
+                kept += 1;
+            }
+        }
+        let cleared = services.store.clear_rejected(&restored).await?;
+        for id in &restored {
+            self.event_cache.remove(id);
+        }
+        tracing::info!(%room_id, restored = cleared, still_rejected = kept, "looked again at the room's rejected events");
         Ok(())
     }
 

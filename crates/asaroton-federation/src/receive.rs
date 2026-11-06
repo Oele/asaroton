@@ -296,8 +296,23 @@ impl Federation {
         let min_valid = i64::try_from(u64::from(pdu.origin_server_ts().0)).unwrap_or(0);
         let mut keys = ruma::signatures::PublicKeyMap::new();
         for server in servers {
+            // The keys this event names for the server. Servers change keys; an event from
+            // before the change can only be checked with the key of its day.
+            let key_ids: Vec<ruma::OwnedServerSigningKeyId> = match pdu
+                .raw()
+                .get("signatures")
+                .and_then(|s| s.as_object())
+                .and_then(|s| s.get(server.as_str()))
+                .and_then(|s| s.as_object())
+            {
+                Some(by_key) => by_key
+                    .keys()
+                    .filter_map(|id| id.as_str().try_into().ok())
+                    .collect(),
+                None => Vec::new(),
+            };
             let set = self
-                .public_keys_for(&server, &[], min_valid)
+                .public_keys_for(&server, &key_ids, min_valid)
                 .await
                 .map_err(|e| {
                     Error::Rejected(format!(

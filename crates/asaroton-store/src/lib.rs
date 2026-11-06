@@ -239,6 +239,12 @@ pub trait EventStore: Send + Sync {
     async fn room_event_count_in_range(&self, room_id: &RoomId, from: i64, to: i64) -> Result<i64>;
     async fn get_event(&self, event_id: &EventId) -> Result<Option<StoredEvent>>;
     async fn get_events(&self, event_ids: &[OwnedEventId]) -> Result<Vec<StoredEvent>>;
+    /// Take back the rejection of events that turn out to pass their checks after all: they
+    /// had been rejected because something they depend on could not be obtained or verified
+    /// at the time. Returns how many rows changed.
+    async fn clear_rejected(&self, event_ids: &[OwnedEventId]) -> Result<u64>;
+    /// The rejected events in a room's timeline (outliers are not part of it), oldest first.
+    async fn rejected_timeline_events(&self, room_id: &RoomId) -> Result<Vec<StoredEvent>>;
     async fn have_events(&self, event_ids: &[OwnedEventId]) -> Result<Vec<OwnedEventId>>;
     /// Replace the stored JSON with its redacted form (keeps the original in `redacted_json`).
     async fn redact_event(&self, event_id: &EventId, redacted: &Pdu) -> Result<()>;

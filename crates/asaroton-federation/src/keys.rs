@@ -16,6 +16,9 @@ use ruma::{
 
 use crate::{Error, Federation, Result};
 
+/// How long a key that could not be found is not looked for again.
+const KEY_MISS_TTL: Duration = Duration::from_mins(10);
+
 /// How long our published keys are valid for. Spec recommends at most a week.
 fn our_key_validity() -> Duration {
     Duration::from_hours(24 * 7)
@@ -56,8 +59,14 @@ impl Federation {
         Ok(obj)
     }
 
-    /// Public keys for `server_name` that are valid at `at_ts` (or the latest we have), fetching
-    /// from the server or a notary when the cache cannot satisfy the request.
+    /// Public keys of `server_name` for checking a signature made at `min_valid_until`.
+    ///
+    /// `key_ids` names the keys the signature at hand was made with. A server changes keys
+    /// over time, and an old event is signed with the key of its day: asking only for "the
+    /// server's keys" finds the current one and leaves the old event unverifiable. When a
+    /// named key is not cached, the server itself is asked first and then the notaries,
+    /// which keep the keys they have seen, also of servers that no longer publish them or
+    /// no longer exist. A key that had expired before `min_valid_until` is not returned.
     pub async fn public_keys_for(
         &self,
         server_name: &ServerName,
@@ -73,14 +82,7 @@ impl Federation {
             return Ok(set);
         }
         let wanted: Vec<String> = key_ids.iter().map(ToString::to_string).collect();
-        let mut cached = if wanted.is_empty() {
-            self.services.store.remote_verify_keys(server_name).await?
-        } else {
-            self.services
-                .store
-                .remote_verify_keys_for(server_name, &wanted)
-                .await?
-        };
+        let mut cached = self.cached_keys(server_name, &wanted).await?;
         let satisfied = |keys: &[RemoteVerifyKey]| {
             !keys.is_empty()
                 && wanted
@@ -90,17 +92,30 @@ impl Federation {
                     .iter()
                     .all(|k| k.valid_until_ts >= min_valid_until || k.expired_ts.is_some())
         };
-        if !satisfied(&cached) {
-            self.fetch_server_keys(server_name, min_valid_until).await?;
-            cached = if wanted.is_empty() {
-                self.services.store.remote_verify_keys(server_name).await?
-            } else {
-                self.services
-                    .store
-                    .remote_verify_keys_for(server_name, &wanted)
-                    .await?
-            };
+        if !satisfied(&cached) && !self.gave_up_recently(server_name, &wanted, &cached) {
+            let fetched = self
+                .fetch_server_keys(server_name, &wanted, min_valid_until)
+                .await;
+            cached = self.cached_keys(server_name, &wanted).await?;
+            for id in &wanted {
+                let key = (server_name.to_owned(), id.clone());
+                if cached.iter().any(|k| k.key_id.as_str() == id) {
+                    self.key_misses.remove(&key);
+                } else if fetched.is_ok() {
+                    // Somebody answered and the key was not among what they have. (When
+                    // nobody could be reached the next event simply tries again.)
+                    self.key_misses.insert(key, std::time::Instant::now());
+                }
+            }
+            if cached.is_empty() {
+                fetched?;
+            }
         }
+        // A retired key only vouches for what was signed while it was in use.
+        cached.retain(|k| {
+            k.expired_ts
+                .is_none_or(|expired| expired >= min_valid_until)
+        });
         if cached.is_empty() {
             return Err(Error::NoKeys(server_name.to_owned()));
         }
@@ -111,6 +126,42 @@ impl Federation {
             }
         }
         Ok(set)
+    }
+
+    async fn cached_keys(
+        &self,
+        server_name: &ServerName,
+        wanted: &[String],
+    ) -> Result<Vec<RemoteVerifyKey>> {
+        Ok(if wanted.is_empty() {
+            self.services.store.remote_verify_keys(server_name).await?
+        } else {
+            self.services
+                .store
+                .remote_verify_keys_for(server_name, wanted)
+                .await?
+        })
+    }
+
+    /// Whether the keys still missing were all looked for a moment ago without success.
+    /// Without this every event signed with an unobtainable key would start a round of
+    /// requests to its server and the notaries.
+    fn gave_up_recently(
+        &self,
+        server_name: &ServerName,
+        wanted: &[String],
+        cached: &[RemoteVerifyKey],
+    ) -> bool {
+        let mut missing = wanted
+            .iter()
+            .filter(|id| !cached.iter().any(|k| k.key_id.as_str() == *id))
+            .peekable();
+        missing.peek().is_some()
+            && missing.all(|id| {
+                self.key_misses
+                    .get(&(server_name.to_owned(), id.clone()))
+                    .is_some_and(|at| at.elapsed() < KEY_MISS_TTL)
+            })
     }
 
     /// A one-server `PublicKeyMap`.
@@ -128,25 +179,30 @@ impl Federation {
         Ok(map)
     }
 
-    /// Fetch keys directly from the server, falling back to the configured notaries, verify the
-    /// response signature and cache the keys.
+    /// Fetch keys from the server itself and, when that fails or does not yield every key in
+    /// `wanted`, from the configured notaries. Each response is verified and cached.
     pub async fn fetch_server_keys(
         &self,
         server_name: &ServerName,
+        wanted: &[String],
         min_valid_until: i64,
     ) -> Result<()> {
-        let direct = self.fetch_keys_direct(server_name).await;
-        match direct {
+        let mut found_any = false;
+        let mut last_err = Error::NoKeys(server_name.to_owned());
+        match self.fetch_keys_direct(server_name).await {
             Ok(keys) => {
                 self.store_fetched_keys(server_name, server_name, keys)
                     .await?;
-                return Ok(());
+                found_any = true;
+                if self.has_keys(server_name, wanted).await? {
+                    return Ok(());
+                }
+                tracing::debug!(server = %server_name, ?wanted, "the server does not publish this key any more, asking notaries");
             }
             Err(e) => {
                 tracing::debug!(server = %server_name, error = %e, "direct key fetch failed, trying notaries");
             }
         }
-        let mut last_err = Error::NoKeys(server_name.to_owned());
         for notary in &self.services.config.trusted_key_servers {
             if notary == server_name {
                 continue;
@@ -156,15 +212,39 @@ impl Federation {
                 .await
             {
                 Ok(list) => {
+                    // A notary returns every key response it holds for the server; one that
+                    // does not check out must not cost us the others.
                     for keys in list {
-                        self.store_fetched_keys(server_name, notary, keys).await?;
+                        match self.store_fetched_keys(server_name, notary, keys).await {
+                            Ok(()) => found_any = true,
+                            Err(e) => {
+                                tracing::debug!(server = %server_name, %notary, error = %e, "ignoring a key response from the notary");
+                            }
+                        }
                     }
-                    return Ok(());
+                    if found_any && self.has_keys(server_name, wanted).await? {
+                        return Ok(());
+                    }
                 }
                 Err(e) => last_err = e,
             }
         }
-        Err(last_err)
+        if found_any { Ok(()) } else { Err(last_err) }
+    }
+
+    /// Whether every key in `wanted` is cached (trivially so when none is named).
+    async fn has_keys(&self, server_name: &ServerName, wanted: &[String]) -> Result<bool> {
+        if wanted.is_empty() {
+            return Ok(true);
+        }
+        let cached = self
+            .services
+            .store
+            .remote_verify_keys_for(server_name, wanted)
+            .await?;
+        Ok(wanted
+            .iter()
+            .all(|id| cached.iter().any(|k| k.key_id.as_str() == id)))
     }
 
     async fn fetch_keys_direct(&self, server_name: &ServerName) -> Result<CanonicalJsonObject> {
@@ -225,6 +305,16 @@ impl Federation {
         let valid_until = i64::try_from(u64::from(parsed.valid_until_ts.0)).unwrap_or(i64::MAX);
         let now = now_ts();
         let effective_valid_until = now + (valid_until - now).max(0) / 2;
+        // A response that has run out is what a notary keeps of a key the server has since
+        // replaced. It is stored with the validity it really had: enough for events signed
+        // back then, and a newer event signed with it prompts a fresh look at the server.
+        // (The store never lowers a validity it already holds, so a notary's stale copy of a
+        // key that is still current does no harm.)
+        let stored_valid_until = if valid_until <= now {
+            valid_until
+        } else {
+            effective_valid_until
+        };
         let key_json = asaroton_core::canonical::to_string(&keys);
         let mut rows = Vec::new();
         for (id, k) in &parsed.verify_keys {
@@ -232,7 +322,7 @@ impl Federation {
                 server_name: server_name.to_owned(),
                 key_id: id.clone(),
                 verify_key_b64: k.key.encode(),
-                valid_until_ts: effective_valid_until,
+                valid_until_ts: stored_valid_until,
                 expired_ts: None,
                 fetched_ts: now,
                 fetched_from: fetched_from.to_owned(),
@@ -266,7 +356,9 @@ impl Federation {
         }
         let mut cached = self.services.store.remote_verify_keys(server_name).await?;
         if cached.is_empty() || cached.iter().all(|k| k.valid_until_ts < min_valid_until) {
-            let _ = self.fetch_server_keys(server_name, min_valid_until).await;
+            let _ = self
+                .fetch_server_keys(server_name, &[], min_valid_until)
+                .await;
             cached = self.services.store.remote_verify_keys(server_name).await?;
         }
         // All rows from one fetch share the same signed response JSON; de-duplicate.
