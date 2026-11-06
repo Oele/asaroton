@@ -64,6 +64,12 @@ proxy; asaroton answers them with an error when delegation is on. Clients discov
   means it never could be checked. Leaving and rejoining a room has asaroton fetch the
   room's state afresh and looks at its set-aside and rejected messages again; that is the
   way to repair a room by hand.
+- Events for a room this server is not in are refused and counted; once an hour a line
+  "refused events for rooms this server is not in" gives the total and the busiest room. They
+  arrive as long as another server lists an account of this server as a member there. If
+  this server has no record of that membership (the room was left out of a migration),
+  `scripts/leave-unrecorded.py` sends a proper leave through a server in the room; it takes
+  a list of room, user and servers, and uses `POST /_asaroton/admin/v1/remote_leave`.
 - A signature on an event counts only while its key was valid: in room versions 5 and later
   an event dated after the validity its server states for the signing key is refused, as
   the specification requires.

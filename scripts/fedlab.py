@@ -54,6 +54,10 @@ def wait_for(cond, timeout, step=0.05):
 # ---------------------------------------------------------------- mock destinations
 
 
+# The registration shared secret of the lab's homeserver (operator tools sign with it).
+SHARED_SECRET = "fedlab-shared-secret"
+
+
 class Peer:
     """A mock homeserver. Answers /send from a script (then 200) and records what arrived."""
 
@@ -231,6 +235,7 @@ trusted_key_servers = ["{self.peers[0].name}"]
 {federation_extra}
 [registration]
 enabled = true
+shared_secret = "{SHARED_SECRET}"
 [rate_limiting]
 enabled = false
 [logging]

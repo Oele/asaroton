@@ -96,6 +96,9 @@ pub struct Federation {
     >,
     /// Auth events a server could not give us, and when that was last tried.
     auth_misses: dashmap::DashMap<(ruma::OwnedServerName, ruma::OwnedEventId), std::time::Instant>,
+    /// Events refused since the last hourly report because they were for a room this server
+    /// is not in: how many per room, and a server that sent them.
+    foreign_room_events: dashmap::DashMap<ruma::OwnedRoomId, (u64, ruma::OwnedServerName)>,
     /// Signing keys that could not be obtained, and when that was last tried.
     key_misses: dashmap::DashMap<(ruma::OwnedServerName, String), std::time::Instant>,
     /// Weak handle to ourselves, for code paths that need an `Arc<Federation>`.
@@ -127,6 +130,7 @@ impl Federation {
             event_cache: dashmap::DashMap::new(),
             state_at_cache: dashmap::DashMap::new(),
             auth_misses: dashmap::DashMap::new(),
+            foreign_room_events: dashmap::DashMap::new(),
             key_misses: dashmap::DashMap::new(),
             weak_self: std::sync::OnceLock::new(),
         });
@@ -139,8 +143,13 @@ impl Federation {
         // Keep the event cache bounded.
         let cache_owner = Arc::clone(&fed);
         tokio::spawn(async move {
+            let mut rounds = 0u32;
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+                rounds += 1;
+                if rounds.is_multiple_of(12) {
+                    cache_owner.report_events_for_foreign_rooms();
+                }
                 if cache_owner.event_cache.len() > 50_000 {
                     cache_owner.event_cache.clear();
                 }

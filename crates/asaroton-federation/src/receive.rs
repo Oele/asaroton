@@ -41,6 +41,11 @@ const MAX_AUTH_FETCH_DEPTH: u32 = 50;
 /// could not be obtained. That says nothing about the event, and it is looked at again
 /// (see `recheck`).
 pub(crate) const AUTH_UNAVAILABLE: &str = "auth events unavailable";
+/// Why an event is refused when it is for a room this server holds nothing of, or is no
+/// longer in. The sender's picture is out of date (it still lists an account of ours as a
+/// member, or has not processed our leave yet); nothing is wrong with the event.
+const UNKNOWN_ROOM: &str = "unknown room";
+const NOT_IN_ROOM: &str = "this server is not in the room";
 /// How long a server is not asked again for an auth event it could not give us, when it is
 /// an incoming event that needs it.
 pub(crate) const AUTH_MISS_TTL: std::time::Duration = std::time::Duration::from_mins(10);
@@ -178,7 +183,16 @@ impl Federation {
                         results.insert(event_id, Ok(()));
                     }
                     Err(e) => {
-                        tracing::warn!(%origin, %room_id, error = %e, "failed to process PDU");
+                        if matches!(&e, Error::Rejected(why) if why == UNKNOWN_ROOM || why == NOT_IN_ROOM)
+                        {
+                            // Counted, and reported once an hour: a server that still has
+                            // us down as a member sends every event of the room, for as
+                            // long as that lasts.
+                            tracing::debug!(%origin, %room_id, error = %e, "refusing an event for a room this server is not in");
+                            self.note_event_for_foreign_room(origin, &room_id);
+                        } else {
+                            tracing::warn!(%origin, %room_id, error = %e, "failed to process PDU");
+                        }
                         if let Some(id) = event_id_hint {
                             results.insert(id, Err(e.to_string()));
                         }
@@ -211,6 +225,49 @@ impl Federation {
         Ok(resp)
     }
 
+    fn note_event_for_foreign_room(&self, origin: &ServerName, room_id: &RoomId) {
+        // Bounded: a server could name any number of rooms.
+        if self.foreign_room_events.len() >= 10_000
+            && !self.foreign_room_events.contains_key(room_id)
+        {
+            return;
+        }
+        let mut entry = self
+            .foreign_room_events
+            .entry(room_id.to_owned())
+            .or_insert_with(|| (0, origin.to_owned()));
+        entry.0 += 1;
+    }
+
+    /// Say, in one line, how many events were refused since the last report because they were
+    /// for rooms this server is not in.
+    pub(crate) fn report_events_for_foreign_rooms(&self) {
+        let mut rooms = 0usize;
+        let mut events = 0u64;
+        let mut busiest: Option<(OwnedRoomId, u64, OwnedServerName)> = None;
+        let keys: Vec<OwnedRoomId> = self
+            .foreign_room_events
+            .iter()
+            .map(|e| e.key().clone())
+            .collect();
+        for room_id in keys {
+            let Some((_, (count, origin))) = self.foreign_room_events.remove(&room_id) else {
+                continue;
+            };
+            rooms += 1;
+            events += count;
+            if busiest.as_ref().is_none_or(|(_, most, _)| count > *most) {
+                busiest = Some((room_id, count, origin));
+            }
+        }
+        if let Some((room_id, count, origin)) = busiest {
+            tracing::info!(
+                events, rooms, busiest_room = %room_id, busiest_count = count, sent_by = %origin,
+                "refused events for rooms this server is not in (the senders still list an account of this server as a member there)"
+            );
+        }
+    }
+
     // ------------------------------------------------------------------ PDUs
 
     /// Process one PDU for a room we are in. Returns the event ID and what happened to it.
@@ -223,7 +280,7 @@ impl Federation {
     ) -> Result<(OwnedEventId, Outcome)> {
         let services = &self.services;
         let Some(room) = services.store.get_room(room_id).await? else {
-            return Err(Error::Rejected("unknown room".into()));
+            return Err(Error::Rejected(UNKNOWN_ROOM.into()));
         };
         let rules = room_version::rules(&room.room_version)?;
         if !services.server_acl_allows(room_id, origin).await? {
@@ -321,7 +378,7 @@ impl Federation {
                 None => false,
             };
         if !self.we_are_in_room(room_id).await? && !membership_change_of_known_user {
-            return Err(Error::Rejected("this server is not in the room".into()));
+            return Err(Error::Rejected(NOT_IN_ROOM.into()));
         }
 
         if let Some(existing) = services.store.get_event(pdu.event_id()).await?

@@ -306,6 +306,31 @@ sudo -u postgres asaroton --config /etc/asaroton/asaroton.toml import-synapse \
 It adds the keys asaroton does not hold yet and changes nothing else; the server can stay up,
 and running it twice does no harm. The Synapse database has to be kept until this has been done.
 
+## Rooms that were left out, after the fact
+
+The rooms that were not imported (see "Selection") had only deactivated accounts of this server
+in them. asaroton knows nothing of those rooms, but the other servers in them still list the
+accounts as members, or as invited: the rooms' events keep being sent here, where they are
+refused, and the accounts stay in other people's member lists (issue #11). Synapse never sent
+a leave for them when the accounts were deactivated, or it did not arrive.
+
+What to leave is in the Synapse database, so this too has to be done while it exists:
+
+```
+-- the memberships Synapse still holds for its own users
+SELECT m.room_id, m.user_id, m.membership, e.sender
+  FROM local_current_membership m LEFT JOIN events e ON e.event_id = m.event_id
+ WHERE m.membership IN ('join', 'invite');
+-- the servers in a room, largest first (for a room without stored state, the inviter's server)
+SELECT room_id, substring(state_key FROM position(':' IN state_key) + 1) AS server, count(*)
+  FROM current_state_events WHERE type = 'm.room.member' AND membership = 'join' GROUP BY 1, 2;
+```
+
+Take the rows whose room is not in asaroton's `rooms` table, write them as
+`room_id<TAB>user_id<TAB>server,server,...` and give the file to `scripts/leave-unrecorded.py`
+on the host (`--dry-run` and `--limit` first). Every line becomes a leave event in somebody
+else's room, signed by this server.
+
 ## Open questions
 
 None at the moment; the decisions are recorded under "Selection".

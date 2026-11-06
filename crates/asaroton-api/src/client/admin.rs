@@ -737,3 +737,86 @@ pub async fn force_join(
         .await,
     )
 }
+
+/// `POST /_asaroton/admin/v1/remote_leave`: make a local account leave a room in which other
+/// servers still list it as a member (or as invited) while this server has no record of
+/// that membership. That is the state rooms are in that were left out when the server's data
+/// was migrated: their events keep arriving and the accounts stay visible as members. The
+/// leave is made through a server that is in the room (`make_leave`, `send_leave`).
+///
+/// Body: `{"room_id": ..., "user_id": ..., "via": [server, ...]}`. The caller is a server
+/// admin (access token), or a tool on the server's host that proves it holds the registration
+/// shared secret: `nonce` from `GET /_synapse/admin/v1/register` and `mac`, the HMAC-SHA1 over
+/// nonce, `remote_leave`, room ID and user ID, joined by NUL bytes.
+pub async fn remote_leave(
+    State(services): State<AppState>,
+    headers: HeaderMap,
+    JsonBody(body): JsonBody,
+) -> axum::response::Response {
+    respond(
+        async {
+            let text = |key: &str| body.get(key).and_then(Value::as_str);
+            let (Some(room), Some(user)) = (text("room_id"), text("user_id")) else {
+                return Err(Error::bad_json("`room_id` and `user_id` are required."));
+            };
+            match (text("nonce"), text("mac")) {
+                (Some(nonce), Some(mac)) => {
+                    if !super::synapse_admin::operator_mac_is_valid(
+                        &services,
+                        nonce,
+                        &["remote_leave", room, user],
+                        mac,
+                    ) {
+                        return Err(Error::forbidden("HMAC incorrect"));
+                    }
+                }
+                _ => {
+                    require_admin(&services, &headers).await?;
+                }
+            }
+            let room_id = parse_room(room)?;
+            let user_id = parse_user(&services, user)?;
+            let via: Vec<ruma::OwnedServerName> = body
+                .get("via")
+                .and_then(Value::as_array)
+                .map(|servers| {
+                    servers
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .filter_map(|s| ruma::OwnedServerName::try_from(s).ok())
+                        .collect()
+                })
+                .unwrap_or_default();
+            if via.is_empty() {
+                return Err(Error::bad_json(
+                    "`via` must name at least one server that is in the room.",
+                ));
+            }
+            // A membership this server knows about is ended the ordinary way, which also
+            // updates what the account's clients see.
+            let known = services.store.get_membership(&room_id, &user_id).await?;
+            if known.is_some_and(|m| {
+                use ruma::events::room::member::MembershipState as M;
+                matches!(m.membership, M::Join | M::Invite | M::Knock)
+            }) {
+                return Err(Error::invalid_param(
+                    "This server has a record of that membership; use the ordinary leave.",
+                ));
+            }
+            services
+                .federation()
+                .remote_leave(&user_id, &room_id, &via)
+                .await
+                .map_err(|e| {
+                    Error::matrix(
+                        ruma::api::error::ErrorKind::Unknown,
+                        StatusCode::BAD_GATEWAY,
+                        format!("No server completed the leave: {e}"),
+                    )
+                })?;
+            tracing::info!(%room_id, %user_id, "an account left a room this server had no record of, at the operator's request");
+            Ok((StatusCode::OK, json!({})))
+        }
+        .await,
+    )
+}

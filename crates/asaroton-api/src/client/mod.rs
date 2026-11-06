@@ -365,6 +365,10 @@ pub fn routes(router: Router<AppState>) -> Router<AppState> {
         .route(
             "/_synapse/admin/v1/join/{room}",
             axum::routing::post(admin::force_join),
+        )
+        .route(
+            "/_asaroton/admin/v1/remote_leave",
+            axum::routing::post(admin::remote_leave),
         );
     let r = route::<c::config::set_global_account_data::v3::Request, _, _>(
         r,

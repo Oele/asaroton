@@ -183,3 +183,32 @@ async fn send_server_notice_inner(
         .await
         .map_err(Into::into)
 }
+
+/// Whether `mac` is the HMAC-SHA1 of `parts` (joined by NUL bytes, after the nonce) under the
+/// registration shared secret, for a nonce handed out by `/_synapse/admin/v1/register` that
+/// has not been used. This is how a tool run on the server's own host identifies itself
+/// without an account: the secret is in the configuration file, which only the operator can
+/// read. (Whoever holds it can register an admin account, so it grants nothing new here.)
+pub(crate) fn operator_mac_is_valid(
+    services: &AppState,
+    nonce: &str,
+    parts: &[&str],
+    mac: &str,
+) -> bool {
+    let Some(secret) = services.config.registration_shared_secret.as_deref() else {
+        return false;
+    };
+    if !services.take_admin_nonce(nonce) {
+        return false;
+    }
+    let Ok(mut expected) = Hmac::<Sha1>::new_from_slice(secret.as_bytes()) else {
+        return false;
+    };
+    expected.update(nonce.as_bytes());
+    for part in parts {
+        expected.update(b"\0");
+        expected.update(part.as_bytes());
+    }
+    let expected = hex::encode(expected.finalize().into_bytes());
+    constant_time_eq(expected.as_bytes(), mac.to_lowercase().as_bytes())
+}
