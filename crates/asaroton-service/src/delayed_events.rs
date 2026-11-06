@@ -12,6 +12,9 @@ use crate::{Error, Result, Services};
 
 /// The longest delay accepted: 24 hours.
 pub const MAX_DELAY_MS: i64 = 24 * 60 * 60 * 1000;
+/// How many delayed events one user may have scheduled at once. A call needs one or two per
+/// device; this leaves ample room and still bounds what one account can queue.
+pub const MAX_SCHEDULED: usize = 100;
 
 /// Scheduler state shared between the API and the worker.
 ///
@@ -65,9 +68,13 @@ impl Services {
             ));
         }
         if delay_ms > MAX_DELAY_MS {
-            return Err(Error::invalid_param(format!(
-                "The delay must not exceed {MAX_DELAY_MS} ms."
-            )));
+            // The proposal's own error code, under its unstable name while it is unstable.
+            // Clients take it as the cue to read the limit from the capabilities and retry.
+            return Err(Error::custom(
+                "ORG.MATRIX.MSC4140_DELAY_TOO_LARGE",
+                http::StatusCode::BAD_REQUEST,
+                format!("The delay must not exceed {MAX_DELAY_MS} ms."),
+            ));
         }
         if !content.is_object() {
             return Err(Error::bad_json("Event content must be an object."));
@@ -81,6 +88,25 @@ impl Services {
             return Ok(existing.delay_id);
         }
         self.require_joined(room_id, user_id).await?;
+        let scheduled = self.store.delayed_events_for_user(user_id).await?;
+        if scheduled.len() >= MAX_SCHEDULED {
+            // Room frees up when the next of the user's events is sent.
+            let next_due = scheduled
+                .iter()
+                .map(|e| e.running_since.saturating_add(e.delay_ms))
+                .min()
+                .unwrap_or_else(now_ts);
+            let wait_ms = u64::try_from(next_due - now_ts()).unwrap_or(0);
+            let mut limit = ruma::api::error::LimitExceededErrorData::new();
+            limit.retry_after = Some(ruma::api::error::RetryAfter::Delay(Duration::from_secs(
+                wait_ms.div_ceil(1000).max(1),
+            )));
+            return Err(Error::matrix(
+                ruma::api::error::ErrorKind::LimitExceeded(limit),
+                http::StatusCode::TOO_MANY_REQUESTS,
+                "The maximum number of delayed events has been reached.",
+            ));
+        }
         let ev = DelayedEvent {
             delay_id: asaroton_auth::generate_session_id(),
             user_id: user_id.to_owned(),

@@ -54,8 +54,18 @@ pub fn capabilities(
     for v in &asaroton_core::SUPPORTED_ROOM_VERSIONS {
         available.insert(v.to_string(), serde_json::json!("stable"));
     }
+    // Delayed events (MSC4140): clients read the limits here, and take the absence of the
+    // capability to mean that the server has no delayed events at all. Element Call then
+    // sends its call membership without the delayed leave that removes it when the client
+    // drops off. Advertised under the stable name and the proposal's unstable one.
+    let delayed_events = serde_json::json!({
+        "max_delay_ms": asaroton_service::delayed_events::MAX_DELAY_MS,
+        "max_scheduled": asaroton_service::delayed_events::MAX_SCHEDULED,
+    });
     let body = serde_json::json!({
         "capabilities": {
+            "m.delayed_events": delayed_events,
+            "org.matrix.msc4140.delayed_events": delayed_events,
             "m.room_versions": {
                 "default": services.config.default_room_version,
                 "available": available,
