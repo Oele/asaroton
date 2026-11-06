@@ -20,6 +20,8 @@ The rules that are checked, with Alice syncing and others acting:
   5. State the connection has is not sent again. In a room with two loose ends (events of
      two servers that did not know of each other) the server's comparison of "then" and
      "now" keeps finding the same change; an answer that repeated it would never wait.
+     And when such a room's state falls back to an earlier event, the connection is told,
+     although "then" and "now" look the same.
 
 Needs what scripts/fedlab.py needs. Takes a few seconds.
 
@@ -27,7 +29,7 @@ Usage: scripts/sslazytest.py [--keep]
 """
 import time, urllib.parse, uuid
 
-from fedlab import check, run_lab, signed_event
+from fedlab import check, query, run_lab, signed_event
 
 SLIDING = "/_matrix/client/unstable/org.matrix.simplified_msc3575/sync"
 STATE = [["m.room.create", ""], ["m.room.encryption", ""], ["m.room.member", "$LAZY"], ["m.room.member", "$ME"],
@@ -177,6 +179,23 @@ def run(hs, peers):
     got = conn.answer()
     check(timeline(got) == [("m.room.message", None, "Dave speaks")] and state_members(got) == {dave: "join"},
           f"and Dave's membership comes with his next message ({state_members(got)}; timeline {timeline(got)})")
+    # Out again, and the room gets another name before the answer that says so is made up.
+    # Then, between two answers: back in, and out once more. She was a member in between,
+    # so the room is hers as it was at that last leave, new name included.
+    st, r = hs.req("POST", f"{door}/kick", {"user_id": alice}, d)
+    assert st == 200, r
+    st, r = hs.req("PUT", f"{door}/state/m.room.name", {"name": "Revolving door"}, d)
+    assert st == 200, r
+    got = conn.answer()
+    check(got.get("name") == "Door" and state_members(got).get(alice) == "leave", f"out again: the room as it was when she went ({got.get('name')}, {state_members(got)})")
+    st, r = hs.req("POST", f"{door}/join", {}, a)
+    assert st == 200, r
+    st, r = hs.req("POST", f"{door}/kick", {"user_id": alice}, d)
+    assert st == 200, r
+    got = conn.answer()
+    names = [e["content"].get("name") for e in got.get("required_state", []) if e["type"] == "m.room.name"]
+    check(got.get("initial") is True and got.get("name") == "Revolving door" and names == ["Revolving door"],
+          f"back and out again between two answers: the room starts over, as it was at the last leave (initial: {got.get('initial')}, name {got.get('name')}, state {names})")
 
     print("-- a room with two loose ends")
     mock = peers["mock"]
@@ -220,6 +239,20 @@ def run(hs, peers):
         check([t[2] for t in timeline(got)] == ["from the other end"], f"{label}: a message that does not build on the change arrives ({timeline(got)})")
         repeats = [conn.answer() for _ in range(3)]
         check(repeats == [{}, {}, {}], f"{label}: and after that the room is not in the answers ({[state_members(r) for r in repeats]})")
+        if members == "$LAZY":
+            # The room's state falls back to the membership from before the change, as a
+            # later event can make state resolution do. (Done here by hand, in the table of
+            # current state.) The room's newest event, the message, has had that older
+            # membership in its state all along, so "then" and "now" are the same; what
+            # differs is what the connection holds.
+            changed = query(f"UPDATE current_state_events SET event_id = '{joined}' WHERE room_id = '{fork_id}' AND event_type = 'm.room.member' AND state_key = '{remote}' RETURNING 1")
+            assert changed, "the state row was not found"
+            got = conn.answer()
+            held = {e["state_key"]: e["event_id"] for e in got.get("required_state", []) if e["type"] == "m.room.member"}
+            check(held.get(remote) == joined, f"{label}: state that falls back to an earlier event is sent ({'the earlier event' if held.get(remote) == joined else held})")
+            check(conn.answer() == {}, f"{label}: once")
+            # Put back, for what follows.
+            query(f"UPDATE current_state_events SET event_id = '{renamed}' WHERE room_id = '{fork_id}' AND event_type = 'm.room.member' AND state_key = '{remote}' RETURNING 1")
         # The next answers build on a new name, so the second round starts from this one.
         joined = renamed
         hs.message(a, fork_id, f"Alice ties the ends ({label})")

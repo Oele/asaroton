@@ -43,6 +43,9 @@ const DEFAULT_TO_DEVICE_LIMIT: usize = 100;
 /// [`StateGiven`]). Past this the memberships are forgotten, except those of the people the
 /// newest timeline is about; the others are sent again when a timeline is about them.
 const MAX_STATE_REMEMBERED: usize = 1000;
+/// When there is too much to remember: how many state keys of one type other than memberships
+/// are still worth remembering.
+const MAX_STATE_PER_TYPE: usize = 100;
 
 // ------------------------------------------------------------------ requests
 
@@ -260,6 +263,16 @@ impl StateGiven {
         })
     }
 
+    /// Whether the connection has an event for this state key, and it is another one.
+    fn has_another(&self, ev: &StoredEvent) -> bool {
+        ev.pdu.state_tuple().is_some_and(|(ty, key)| {
+            self.0
+                .get(ty.to_string().as_str())
+                .and_then(|keys| keys.get(key))
+                .is_some_and(|id| id != ev.pdu.event_id())
+        })
+    }
+
     fn len(&self) -> usize {
         self.0.values().map(BTreeMap::len).sum()
     }
@@ -284,9 +297,18 @@ impl StateGiven {
                     .insert(key.to_owned(), ev.pdu.event_id().to_owned());
             }
         }
+        if next.len() > MAX_STATE_REMEMBERED {
+            // Too much to remember. First the kinds of state that a client asked for with a
+            // wildcard and that a room has no end of (the children of a space, the members
+            // of a call): they are not remembered at all, and are sent again whenever the
+            // comparison comes up with them, as everything was before this existed.
+            next.0
+                .retain(|ty, keys| ty == "m.room.member" || keys.len() <= MAX_STATE_PER_TYPE);
+        }
         if next.len() > MAX_STATE_REMEMBERED
             && let Some(members) = next.0.get_mut("m.room.member")
         {
+            // Then the memberships, except those of the people the newest timeline is about.
             let keep: HashSet<&str> = about.iter().map(|u| u.as_str()).collect();
             members.retain(|k, _| k == user.as_str() || keep.contains(k.as_str()));
         }
@@ -1039,6 +1061,17 @@ impl Services {
         let initial = track.is_none_or(|t| {
             t.membership != MembershipState::Join && m.membership == MembershipState::Join
         });
+        // The same for someone who came back and went again between two answers: the
+        // connection knows them as gone, and they are gone, but by a later event, and in
+        // between they were a member. The room is theirs as it was at this later leave.
+        let back_and_gone = !initial
+            && track.is_some_and(|t| {
+                t.membership != MembershipState::Join
+                    && matches!(m.membership, MembershipState::Leave | MembershipState::Ban)
+                    && m.stream_ordering > t.timeline_upto
+            })
+            && self.left_as_member(room_id, user).await?;
+        let initial = initial || back_and_gone;
         let mut out = RoomResult {
             membership: m.membership.clone(),
             initial,
@@ -1217,7 +1250,13 @@ impl Services {
         } else if full {
             self.store.current_state_pdus(room_id).await?
         } else if let Some(l) = lower {
-            self.state_changes_since(room_id, l).await?
+            // What changed since the last position, and what differs from what the
+            // connection holds. The second covers state that fell back to an earlier event:
+            // in a room with two loose ends the connection may have been given the outcome
+            // of one resolution, and a later event tips it back to what the room's newest
+            // event already had, so that "then" and "now" look the same.
+            self.state_changes_and(room_id, l, |e| given.is_some_and(|g| g.has_another(e)))
+                .await?
         } else {
             Vec::new()
         };
@@ -1411,6 +1450,17 @@ impl Services {
         room_id: &RoomId,
         since: i64,
     ) -> Result<Vec<StoredEvent>> {
+        self.state_changes_and(room_id, since, |_| false).await
+    }
+
+    /// Current state events that differ from the state as of stream position `since`, and
+    /// those that `also` picks.
+    async fn state_changes_and(
+        &self,
+        room_id: &RoomId,
+        since: i64,
+        also: impl Fn(&StoredEvent) -> bool,
+    ) -> Result<Vec<StoredEvent>> {
         let at = self
             .store
             .room_events_in_range(room_id, since + 1, None, Direction::Backwards, 1)
@@ -1429,10 +1479,11 @@ impl Services {
         Ok(current
             .into_iter()
             .filter(|e| {
-                e.pdu.state_tuple().is_none_or(|(t, k)| {
-                    before.get(&(t, k.to_owned())).map(String::as_str)
-                        != Some(e.pdu.event_id().as_str())
-                })
+                also(e)
+                    || e.pdu.state_tuple().is_none_or(|(t, k)| {
+                        before.get(&(t, k.to_owned())).map(String::as_str)
+                            != Some(e.pdu.event_id().as_str())
+                    })
             })
             .collect())
     }
@@ -1474,6 +1525,89 @@ impl Services {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A state event for these tests: only its type, state key and ID matter.
+    fn state_event(ty: &str, key: &str, n: u32) -> StoredEvent {
+        let rules = asaroton_core::room_version::rules(&ruma::RoomVersionId::V11).unwrap();
+        let key_pair = asaroton_core::SigningKey::generate("t").unwrap();
+        let pdu = asaroton_core::builder::PduBuilder::new(
+            OwnedUserId::try_from("@a:x.test").unwrap(),
+            TimelineEventType::from(ty),
+        )
+        .room_id(OwnedRoomId::try_from("!r:x.test").unwrap())
+        .state_key(key)
+        .content(&json!({ "n": n }))
+        .unwrap()
+        .depth(ruma::UInt::from(n))
+        .build(&rules, &key_pair, ruma::server_name!("x.test"))
+        .unwrap();
+        StoredEvent {
+            pdu,
+            stream_ordering: i64::from(n),
+            state_group: None,
+            soft_failed: false,
+            outlier: false,
+            redacted: false,
+        }
+    }
+
+    #[test]
+    fn a_connection_knows_which_event_it_holds_for_a_state_key() {
+        let user = OwnedUserId::try_from("@a:x.test").unwrap();
+        let (name, renamed) = (
+            state_event("m.room.name", "", 1),
+            state_event("m.room.name", "", 2),
+        );
+        let topic = state_event("m.room.topic", "", 3);
+        let given = StateGiven::with(None, std::slice::from_ref(&name), &HashSet::new(), &user);
+        assert!(given.has(&name) && !given.has(&renamed) && !given.has(&topic));
+        // Another event for a key it holds, as against a key it holds nothing for.
+        assert!(given.has_another(&renamed) && !given.has_another(&name));
+        assert!(!given.has_another(&topic));
+        let given = StateGiven::with(
+            Some(&given),
+            std::slice::from_ref(&renamed),
+            &HashSet::new(),
+            &user,
+        );
+        assert!(given.has(&renamed) && given.has_another(&name));
+    }
+
+    #[test]
+    fn what_a_connection_remembers_is_bounded() {
+        let user = OwnedUserId::try_from("@a:x.test").unwrap();
+        let speaker = OwnedUserId::try_from("@speaker:x.test").unwrap();
+        let about: HashSet<OwnedUserId> = [speaker.clone()].into();
+        let name = state_event("m.room.name", "", 1);
+        // A space with more children than there is room for, asked for with a wildcard.
+        let more_than_fits = u32::try_from(MAX_STATE_REMEMBERED).unwrap() + 10;
+        let children: Vec<StoredEvent> = (0..more_than_fits)
+            .map(|n| state_event("m.space.child", &format!("!child{n}:x.test"), n + 10))
+            .collect();
+        let members = [
+            state_event("m.room.member", user.as_str(), 2),
+            state_event("m.room.member", speaker.as_str(), 3),
+            state_event("m.room.member", "@quiet:x.test", 4),
+        ];
+        let mut sent = vec![name.clone()];
+        sent.extend(members.iter().cloned());
+        sent.extend(children.iter().cloned());
+        let given = StateGiven::with(None, &sent, &about, &user);
+        assert!(!given.has(&children[0]), "the children are not remembered");
+        assert!(given.has(&name), "the name is");
+        assert!(
+            members.iter().all(|m| given.has(m)),
+            "and so are the members: forgetting the children made room"
+        );
+
+        // More members than there is room for: those of the newest timeline stay.
+        let crowd: Vec<StoredEvent> = (0..more_than_fits)
+            .map(|n| state_event("m.room.member", &format!("@u{n}:x.test"), n + 10))
+            .collect();
+        let given = StateGiven::with(Some(&given), &crowd, &about, &user);
+        assert!(given.has(&members[0]) && given.has(&members[1]) && given.has(&name));
+        assert!(!given.has(&members[2]) && !given.has(&crowd[0]));
+    }
 
     #[test]
     fn only_the_newest_request_leaves_its_state_behind() {
