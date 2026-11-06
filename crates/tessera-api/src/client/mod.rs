@@ -379,6 +379,9 @@ pub fn routes(router: Router<AppState>) -> Router<AppState> {
         r,
         misc::get_room_account_data,
     );
+    let r = route::<c::tag::get_tags::v3::Request, _, _>(r, misc::get_tags);
+    let r = route::<c::tag::create_tag::v3::Request, _, _>(r, misc::create_tag);
+    let r = route::<c::tag::delete_tag::v3::Request, _, _>(r, misc::delete_tag);
     // Account data deletion (MSC3391).
     let r = r
         .route(

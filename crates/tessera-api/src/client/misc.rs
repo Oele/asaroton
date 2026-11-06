@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use ruma::{
-    MilliSecondsSinceUnixEpoch, UInt,
+    MilliSecondsSinceUnixEpoch, RoomId, UInt, UserId,
     api::client as c,
     api::client::{
         config::{
@@ -14,11 +14,12 @@ use ruma::{
         presence::{get_presence, set_presence},
         read_marker::set_read_marker,
         receipt::create_receipt,
+        tag::{create_tag, delete_tag, get_tags},
         typing::create_typing_event,
         user_directory::search_users,
         voip::get_turn_server_info,
     },
-    events::receipt::ReceiptThread,
+    events::{receipt::ReceiptThread, tag::TagName},
 };
 use serde_json::{Value, json};
 use tessera_service::Notification;
@@ -112,6 +113,91 @@ pub async fn get_room_account_data(
         .await?
         .ok_or_else(|| Error::not_found("Account data not found."))?;
     Ok(get_room_account_data::v3::Response::new(raw(&ad.content)?))
+}
+
+/// The `tags` object of the room's `m.tag` account data; empty when the room has no tags.
+async fn room_tags(
+    services: &AppState,
+    user_id: &UserId,
+    room_id: &RoomId,
+) -> Result<serde_json::Map<String, Value>> {
+    let stored = services
+        .store
+        .get_account_data(user_id, Some(room_id), "m.tag")
+        .await?;
+    Ok(stored
+        .and_then(|a| a.content.get("tags").and_then(Value::as_object).cloned())
+        .unwrap_or_default())
+}
+
+async fn store_room_tags(
+    services: &AppState,
+    user_id: &UserId,
+    room_id: &RoomId,
+    tags: serde_json::Map<String, Value>,
+) -> Result<()> {
+    services
+        .store
+        .set_account_data(user_id, Some(room_id), "m.tag", &json!({ "tags": tags }))
+        .await?;
+    services.notifier.notify(Notification::User {
+        user_id: user_id.to_owned(),
+    });
+    Ok(())
+}
+
+/// `GET /_matrix/client/v3/user/{userId}/rooms/{roomId}/tags`
+pub async fn get_tags(
+    services: AppState,
+    req: Ruma<get_tags::v3::Request>,
+) -> Result<get_tags::v3::Response> {
+    let sender = req.sender()?;
+    if sender.user_id != req.body.user_id {
+        return Err(Error::forbidden("Cannot read another user's tags."));
+    }
+    let tags = room_tags(&services, &sender.user_id, &req.body.room_id)
+        .await?
+        .into_iter()
+        .filter_map(|(name, info)| Some((TagName::from(name), serde_json::from_value(info).ok()?)))
+        .collect();
+    Ok(get_tags::v3::Response::new(tags))
+}
+
+/// `PUT /_matrix/client/v3/user/{userId}/rooms/{roomId}/tags/{tag}`: the tags live in the
+/// room's `m.tag` account data, which is how they reach the client's other devices over sync.
+pub async fn create_tag(
+    services: AppState,
+    req: Ruma<create_tag::v3::Request>,
+) -> Result<create_tag::v3::Response> {
+    let sender = req.sender()?;
+    if sender.user_id != req.body.user_id {
+        return Err(Error::forbidden("Cannot set another user's tags."));
+    }
+    if req.body.tag.len() > 255 {
+        return Err(Error::bad_json("Tag names are at most 255 bytes."));
+    }
+    let info =
+        serde_json::to_value(&req.body.tag_info).map_err(|e| Error::bad_json(e.to_string()))?;
+    let mut tags = room_tags(&services, &sender.user_id, &req.body.room_id).await?;
+    tags.insert(req.body.tag.clone(), info);
+    store_room_tags(&services, &sender.user_id, &req.body.room_id, tags).await?;
+    Ok(create_tag::v3::Response::new())
+}
+
+/// `DELETE /_matrix/client/v3/user/{userId}/rooms/{roomId}/tags/{tag}`
+pub async fn delete_tag(
+    services: AppState,
+    req: Ruma<delete_tag::v3::Request>,
+) -> Result<delete_tag::v3::Response> {
+    let sender = req.sender()?;
+    if sender.user_id != req.body.user_id {
+        return Err(Error::forbidden("Cannot remove another user's tags."));
+    }
+    let mut tags = room_tags(&services, &sender.user_id, &req.body.room_id).await?;
+    if tags.remove(&req.body.tag).is_some() {
+        store_room_tags(&services, &sender.user_id, &req.body.room_id, tags).await?;
+    }
+    Ok(delete_tag::v3::Response::new())
 }
 
 /// `DELETE /_matrix/client/unstable/org.matrix.msc3391/user/{userId}/account_data/{type}`

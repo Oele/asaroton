@@ -96,7 +96,7 @@ def journal(since_epoch):
                 edu_types[name] += 1
         elif msg.startswith("unrecognized endpoint"):
             method = re.search(r"method=(\S+)", msg)
-            path = re.search(r"path=(\S+)", msg)
+            path = re.search(r'path="?([^\s"]+)', msg)
             if method and path:
                 unrecognized[f"{method.group(1)} {normalise_path(path.group(1))}"] += 1
         if level in ("WARN", "ERROR"):
