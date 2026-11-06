@@ -6,8 +6,9 @@ members of rooms it knows nothing about. `POST /_asaroton/admin/v1/remote_leave`
 leave through a server in the room, and `scripts/leave-unrecorded.py` drives it from a list.
 Events that keep arriving for such a room are refused without a warning for each.
 
-The lab: a mock server hosts two rooms the homeserver has never heard of. In the first it
-lists the homeserver's user as a member; in the second it does not.
+The lab: a mock server hosts rooms the homeserver has never heard of. In the first it lists
+the homeserver's user as a member; in the second it does not; a third it no longer has, and a
+fourth bans the homeserver. A second mock has no such rooms, and a third server is not there.
 
 Needs what scripts/fedlab.py needs. Takes a few seconds.
 
@@ -17,7 +18,7 @@ import base64, hashlib, hmac, json, os, re, subprocess, sys, time, urllib.parse,
 
 from nacl.signing import VerifyKey
 
-from fedlab import KEPT_TOP, SERVER_NAME, SHARED_SECRET, canonical, check, run_lab, signed_event
+from fedlab import KEPT_TOP, SERVER_NAME, SHARED_SECRET, canonical, check, free_port, run_lab, signed_event
 
 
 def run(hs, peers):
@@ -25,12 +26,17 @@ def run(hs, peers):
     spam, spam_token = hs.register("spam")
     other, _ = hs.register("other")
     member_room, empty_room = f"!member:{mock.name}", f"!empty:{mock.name}"
+    gone_room, banning_room = f"!gone:{mock.name}", f"!banning:{mock.name}"
     unq = urllib.parse.unquote
     templates, leaves = [], []
 
     def make_leave(handler, m):
         room, user = unq(m.group(1)), unq(m.group(2))
         templates.append((room, user))
+        if room == gone_room:
+            return handler.answer(404, {"errcode": "M_NOT_FOUND", "error": f"Could not find room_version for {room}"})
+        if room == banning_room:
+            return handler.answer(403, {"errcode": "M_FORBIDDEN", "error": "Server is banned from room"})
         if room != member_room:
             return handler.answer(403, {"errcode": "M_FORBIDDEN", "error": "User is not in the room"})
         handler.answer(200, {"room_version": "11", "event": {
@@ -111,18 +117,63 @@ def run(hs, peers):
     work = os.path.dirname(hs.log)
     listing = os.path.join(work, "leaves.tsv")
     with open(listing, "w") as f:
-        f.write(f"# room\tuser\tservers\n{member_room}\t{other}\t{silent.name},{mock.name}\n{empty_room}\t{other}\t{mock.name}\n")
+        f.write(f"# room\tuser\tservers\n{member_room}\t{other}\t{silent.name},{mock.name}\n{empty_room}\t{other}\t{mock.name}\n"
+                f"{gone_room}\t{other}\t{mock.name}\n{banning_room}\t{other}\t{mock.name},{silent.name}\n{gone_room}\t{spam}\t{mock.name}\n")
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "leave-unrecorded.py")
-    command = [sys.executable, script, listing, "--config", os.path.join(work, "asaroton.toml"), "--pace", "0"]
+
+    def run_script(path, *extra):
+        return subprocess.run([sys.executable, script, path, "--config", os.path.join(work, "asaroton.toml"), "--pace", "0", *extra], capture_output=True, text=True)
+
+    def recorded(path):
+        with open(path + ".done") as f:
+            return [line.rstrip("\n").split("\t") for line in f]
+
     before = len(leaves)
-    dry = subprocess.run(command + ["--dry-run"], capture_output=True, text=True)
-    check(dry.returncode == 0 and dry.stdout.count("would leave") == 2 and len(leaves) == before, "a dry run lists both memberships and sends nothing")
-    ran = subprocess.run(command, capture_output=True, text=True)
-    check(ran.returncode == 0 and "left: 1, nothing to leave: 1, failed: 0" in ran.stdout, f"a run leaves the one room and notes there is nothing to leave in the other ({ran.returncode} {ran.stdout.strip().splitlines()[-1:]} {ran.stderr.strip()[-200:]})")
+    dry = run_script(listing, "--dry-run")
+    check(dry.returncode == 0 and dry.stdout.count("would leave") == 5 and len(leaves) == before, "a dry run lists the memberships and sends nothing")
+    asked = len(templates)
+    ran = run_script(listing)
+    last = ran.stdout.strip().splitlines()[-1:]
+    check(ran.returncode == 0 and "left: 1, nothing to leave: 1, room gone: 2, server banned: 1, failed: 0" in ran.stdout,
+          f"a run leaves the one room and says why there was nothing to do in the others ({ran.returncode} {last} {ran.stderr.strip()[-200:]})")
     check(len(leaves) == before + 1 and leaves[-1][2].get("sender") == other, "the leave went through the second server listed, the first not answering it")
-    again = subprocess.run(command, capture_output=True, text=True)
-    check(again.returncode == 0 and "2 done already, 0 to go" in again.stdout and len(leaves) == before + 1, "a second run finds nothing left to do")
+    rows = recorded(listing)
+    check([row[2] for row in rows] == ["left", "nothing-to-leave", "room-gone", "server-banned", "room-gone"], f"the outcomes are recorded ({[row[2] for row in rows]})")
+    check(len(rows) == 5 and silent.name + ": refused" in rows[0][4] and mock.name + ": left" in rows[0][4], "with what each server answered")
+    check(len(rows) == 5 and silent.name not in rows[3][4], "a server is not asked once another said the room bans this one")
+    check(len(rows) == 5 and "not asked" in rows[4][4] and len(templates) == asked + 4, f"nor twice about a room it said it no longer has ({len(templates) - asked} requests for 5 memberships)")
+    again = run_script(listing)
+    check(again.returncode == 0 and "5 done already, 0 to go" in again.stdout and len(leaves) == before + 1, "a second run finds nothing left to do")
     check(SHARED_SECRET not in ran.stdout + ran.stderr + dry.stdout, "the script does not print the secret")
+
+    # A server that is not there: nothing is settled, and it is not asked for ever.
+    absent = f"127.0.0.1:{free_port()}"
+    unsettled = os.path.join(work, "unsettled.tsv")
+    with open(unsettled, "w") as f:
+        f.write(f"{gone_room}\t{spam}\t{absent},{mock.name}\n" + "".join(f"!r{n}:{mock.name}\t{spam}\t{absent}\n" for n in range(3)))
+    asked = len(templates)
+    ran = run_script(unsettled)
+    rows = recorded(unsettled)
+    check(ran.returncode == 1 and "failed: 4" in ran.stdout and [row[2] for row in rows] == ["failed"] * 4, f"with a server that cannot be reached the leaves fail ({ran.returncode} {ran.stdout.strip().splitlines()[-2:]})")
+    check(len(rows) == 4 and absent + ": unreachable" in rows[0][4] and mock.name + ": room-unknown" in rows[0][4],
+          f"a room is not called gone while a server that may still have it was not heard ({rows[0][3:] if rows else None})")
+    check(len(rows) == 4 and "not asked" not in rows[2][4] and "not asked" in rows[3][4] and "could not be reached: " + absent in ran.stdout,
+          "after three tries in a row the server is no longer asked")
+    check(len(templates) == asked + 1, f"the mock was asked once in that run ({len(templates) - asked})")
+    again = run_script(unsettled, "--dry-run")
+    check("0 done already, 4 to go" in again.stdout, "and a later run tries the failed ones again")
+
+    # Several at a time.
+    many = os.path.join(work, "many.tsv")
+    with open(many, "w") as f:
+        f.write("".join(f"!e{n}:{mock.name}\t{other}\t{silent.name},{mock.name}\n" for n in range(12)))
+    started = time.time()
+    ran = run_script(many, "--parallel", "4", "--pace", "0.5")
+    took = time.time() - started
+    rows = recorded(many)
+    check(ran.returncode == 0 and "nothing to leave: 12" in ran.stdout and len({row[0] for row in rows}) == 12 and all(row[2] == "nothing-to-leave" for row in rows),
+          f"four at a time settle twelve memberships, each recorded once ({ran.returncode} {len(rows)} rows {ran.stderr.strip()[-200:]})")
+    check(took < 4.5, f"in less time than one at a time would take ({took:.1f} s; the pauses alone are 6 s in sequence)")
 
     print("-- events that still arrive for such a room")
     _, stray = signed_event(mock.name, mock.key, "ed25519:k1", {

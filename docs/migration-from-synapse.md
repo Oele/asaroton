@@ -336,6 +336,26 @@ Take the rows whose room is not in asaroton's `rooms` table, write them as
 to the host and run the script there as root (`--dry-run` and `--limit` first). Every line becomes a leave event in somebody
 else's room, signed by this server.
 
+Synapse's list of servers is as old as the room's last event that reached it, and for rooms
+that were flooded with accounts from open servers that is years. Leave the servers out that
+no longer answer (`GET /_matrix/federation/v1/version` on each tells), and put the room's own
+server first when it does: on cluephone.org 217 of the 694 servers behind the leaves that
+failed at first still answered. The script asks the servers of a membership one at a time and records
+what each of them answered, which gives one of these outcomes:
+
+| Outcome | Meaning | Tried again by a later run |
+|---|---|---|
+| `left` | a server accepted the leave | no |
+| `nothing-to-leave` | a server that has the room says the account is not a member | no |
+| `room-gone` | every server listed answered, and none has the room any more | no |
+| `server-banned` | the room bans this server | no |
+| `failed` | the servers could not be reached, or refused | yes |
+
+A membership that stays `failed` because its servers are gone needs nothing more: a server
+that is gone sends no events and shows no member list. One whose server comes back shows up in
+the log (`refused events for rooms this server is not in`, with the room and the sender), and
+can be left then.
+
 ## Open questions
 
 None at the moment; the decisions are recorded under "Selection".
