@@ -11,6 +11,7 @@ mod media;
 mod rooms;
 mod rtc;
 mod state;
+mod streams;
 mod thread_subscriptions;
 mod users;
 
@@ -35,6 +36,8 @@ pub struct PostgresStore {
     pool: PgPool,
     /// Keep the plain text of searchable events (substring search).
     search_plaintext: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Which stream positions can be handed out (see [`streams`]); set up at first use.
+    streams: std::sync::Arc<tokio::sync::OnceCell<streams::Streams>>,
 }
 
 impl PostgresStore {
@@ -48,6 +51,7 @@ impl PostgresStore {
         Ok(Self {
             pool,
             search_plaintext: std::sync::Arc::default(),
+            streams: std::sync::Arc::default(),
         })
     }
 
@@ -56,12 +60,79 @@ impl PostgresStore {
         Self {
             pool,
             search_plaintext: std::sync::Arc::default(),
+            streams: std::sync::Arc::default(),
         }
     }
 
     /// The underlying pool.
     pub fn pool(&self) -> &PgPool {
         &self.pool
+    }
+
+    /// The highest number in each stream, as the database has it right now. Not what a sync
+    /// may be told: see [`streams`].
+    async fn committed_positions(&self) -> Result<crate::StreamPositions> {
+        use sqlx::Row;
+        let row = sqlx::query(
+            "SELECT (SELECT COALESCE(MAX(stream_ordering), 0) FROM events) AS events,
+                    GREATEST((SELECT COALESCE(MAX(stream_id), 0) FROM account_data),
+                             (SELECT COALESCE(MAX(stream_id), 0) FROM push_rules)) AS account_data,
+                    (SELECT COALESCE(MAX(stream_id), 0) FROM receipts) AS receipts,
+                    (SELECT COALESCE(MAX(stream_id), 0) FROM to_device_messages) AS to_device,
+                    (SELECT COALESCE(MAX(stream_id), 0) FROM device_list_changes) AS device_lists,
+                    (SELECT COALESCE(MAX(stream_id), 0) FROM thread_subscriptions) AS thread_subscriptions,
+                    (SELECT COALESCE(MAX(stream_id), 0) FROM profile_updates) AS profile_updates",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(crate::StreamPositions {
+            events: row.get("events"),
+            account_data: row.get("account_data"),
+            receipts: row.get("receipts"),
+            to_device: row.get("to_device"),
+            device_lists: row.get("device_lists"),
+            thread_subscriptions: row.get("thread_subscriptions"),
+            profile_updates: row.get("profile_updates"),
+        })
+    }
+
+    /// The bookkeeping of writes under way, told at first use where each stream stands.
+    pub(crate) async fn streams(&self) -> Result<&streams::Streams> {
+        use streams::Stream;
+        self.streams
+            .get_or_try_init(|| async {
+                let at = self.committed_positions().await?;
+                let streams = streams::Streams::default();
+                streams.seed(Stream::Events, at.events);
+                streams.seed(Stream::AccountData, at.account_data);
+                streams.seed(Stream::Receipts, at.receipts);
+                streams.seed(Stream::ToDevice, at.to_device);
+                streams.seed(Stream::DeviceLists, at.device_lists);
+                streams.seed(Stream::ThreadSubscriptions, at.thread_subscriptions);
+                streams.seed(Stream::ProfileUpdates, at.profile_updates);
+                Ok(streams)
+            })
+            .await
+    }
+
+    /// The position in each stream that a sync can be told: the highest one below which no
+    /// write is still under way.
+    pub(crate) async fn settled_positions(&self) -> Result<crate::StreamPositions> {
+        use streams::Stream;
+        // The numbers first, the writes under way second: in that order, every row up to the
+        // answer is visible to what the caller reads next.
+        let at = self.committed_positions().await?;
+        let streams = self.streams().await?;
+        Ok(crate::StreamPositions {
+            events: streams.settled(Stream::Events, at.events),
+            account_data: streams.settled(Stream::AccountData, at.account_data),
+            receipts: streams.settled(Stream::Receipts, at.receipts),
+            to_device: streams.settled(Stream::ToDevice, at.to_device),
+            device_lists: streams.settled(Stream::DeviceLists, at.device_lists),
+            thread_subscriptions: streams
+                .settled(Stream::ThreadSubscriptions, at.thread_subscriptions),
+            profile_updates: streams.settled(Stream::ProfileUpdates, at.profile_updates),
+        })
     }
 }
 

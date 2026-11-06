@@ -3,6 +3,7 @@ use ruma::{DeviceId, OwnedDeviceId, OwnedUserId, UserId};
 use sqlx::Row;
 
 use super::PostgresStore;
+use super::streams::Stream;
 use crate::{
     AccessToken, Device, Error, NewUser, RefreshToken, Result, User, UserListQuery, UserStore,
     now_ts,
@@ -251,6 +252,7 @@ impl UserStore for PostgresStore {
     }
 
     async fn record_profile_update(&self, user_id: &UserId, field: &str) -> Result<i64> {
+        let writing = self.streams().await?.writing(Stream::ProfileUpdates);
         let row = sqlx::query(
             "INSERT INTO profile_updates (user_id, field_id, stream_id)
              VALUES ($1, $2, nextval('profile_updates_seq'))
@@ -261,7 +263,9 @@ impl UserStore for PostgresStore {
         .bind(field)
         .fetch_one(&self.pool)
         .await?;
-        Ok(row.get(0))
+        let position = row.get::<i64, _>(0);
+        writing.done(position).await;
+        Ok(position)
     }
 
     async fn profile_updates_between(

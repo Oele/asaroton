@@ -3,6 +3,7 @@ use ruma::{OwnedRoomId, RoomId, UserId};
 use sqlx::Row;
 
 use super::PostgresStore;
+use super::streams::Stream;
 use crate::{AccountData, AccountDataStore, Error, Result};
 
 #[async_trait]
@@ -14,6 +15,7 @@ impl AccountDataStore for PostgresStore {
         data_type: &str,
         content: &serde_json::Value,
     ) -> Result<i64> {
+        let writing = self.streams().await?.writing(Stream::AccountData);
         let row = sqlx::query(
             "INSERT INTO account_data (user_id, room_id, data_type, content, stream_id)
              VALUES ($1, $2, $3, $4, nextval('account_data_seq'))
@@ -26,7 +28,9 @@ impl AccountDataStore for PostgresStore {
         .bind(content)
         .fetch_one(&self.pool)
         .await?;
-        Ok(row.get::<i64, _>(0))
+        let position = row.get::<i64, _>(0);
+        writing.done(position).await;
+        Ok(position)
     }
 
     async fn get_account_data(
@@ -53,6 +57,7 @@ impl AccountDataStore for PostgresStore {
         room_id: Option<&RoomId>,
         data_type: &str,
     ) -> Result<Option<i64>> {
+        let writing = self.streams().await?.writing(Stream::AccountData);
         let row = sqlx::query(
             "UPDATE account_data SET content = '{}'::jsonb, stream_id = nextval('account_data_seq')
              WHERE user_id = $1 AND room_id = $2 AND data_type = $3 AND content <> '{}'::jsonb
@@ -63,7 +68,11 @@ impl AccountDataStore for PostgresStore {
         .bind(data_type)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.map(|r| r.get::<i64, _>(0)))
+        let position = row.map(|r| r.get::<i64, _>(0));
+        if let Some(position) = position {
+            writing.done(position).await;
+        }
+        Ok(position)
     }
 
     async fn account_data_since(&self, user_id: &UserId, since: i64) -> Result<Vec<AccountData>> {

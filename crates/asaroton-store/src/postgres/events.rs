@@ -3,12 +3,22 @@ use async_trait::async_trait;
 use ruma::{EventId, OwnedEventId, OwnedRoomId, OwnedServerName, RoomId, ServerName, UserId};
 use sqlx::{FromRow, PgConnection, Row};
 
-use super::{EVENT_COLUMNS, EventRow, PostgresStore, strings};
+use super::{EVENT_COLUMNS, EventRow, PostgresStore, streams::Stream, strings};
 use crate::{
     AwaitingAuth, Direction, Error, EventState, EventStore, PersistEvent, PersistedEvent,
     RelationRow, Result, SearchHit, SearchMode, SearchQuery, StoredEvent, StreamOrdering,
     ThreadSummary, now_ts, parse_ids, uint_to_i64,
 };
+
+/// Whether writing this event can put a row into the timelines that sync reads, at the next
+/// live position. Such a write is registered, so that no sync is moved past its position
+/// before it is done (see `streams`). The others are not: an event filed behind the room's
+/// history gets a number below zero, which no sync position reaches, and an outlier is in no
+/// timeline. The state of a room that is being joined comes as thousands of outliers in one
+/// transaction; registered, it would hold back every sync on the server until it was through.
+fn takes_a_place_in_the_stream(ev: &PersistEvent) -> bool {
+    !ev.backfilled && !matches!(ev.state, EventState::Outlier)
+}
 
 async fn persist_one(
     conn: &mut PgConnection,
@@ -339,40 +349,33 @@ fn ids_from_rows(rows: Vec<sqlx::postgres::PgRow>) -> Vec<OwnedEventId> {
 #[async_trait]
 impl EventStore for PostgresStore {
     async fn stream_positions(&self) -> Result<crate::StreamPositions> {
-        let row = sqlx::query(
-            "SELECT (SELECT COALESCE(MAX(stream_ordering), 0) FROM events) AS events,
-                    GREATEST((SELECT COALESCE(MAX(stream_id), 0) FROM account_data),
-                             (SELECT COALESCE(MAX(stream_id), 0) FROM push_rules)) AS account_data,
-                    (SELECT COALESCE(MAX(stream_id), 0) FROM receipts) AS receipts,
-                    (SELECT COALESCE(MAX(stream_id), 0) FROM to_device_messages) AS to_device,
-                    (SELECT COALESCE(MAX(stream_id), 0) FROM device_list_changes) AS device_lists,
-                    (SELECT COALESCE(MAX(stream_id), 0) FROM thread_subscriptions) AS thread_subscriptions,
-                    (SELECT COALESCE(MAX(stream_id), 0) FROM profile_updates) AS profile_updates",
-        )
-        .fetch_one(&self.pool)
-        .await?;
-        Ok(crate::StreamPositions {
-            events: row.get("events"),
-            account_data: row.get("account_data"),
-            receipts: row.get("receipts"),
-            to_device: row.get("to_device"),
-            device_lists: row.get("device_lists"),
-            thread_subscriptions: row.get("thread_subscriptions"),
-            profile_updates: row.get("profile_updates"),
-        })
+        self.settled_positions().await
     }
 
     async fn persist_event(&self, event: PersistEvent) -> Result<PersistedEvent> {
+        let writing = if takes_a_place_in_the_stream(&event) {
+            Some(self.streams().await?.writing(Stream::Events))
+        } else {
+            None
+        };
         let mut tx = self.pool.begin().await?;
         let keep = self
             .search_plaintext
             .load(std::sync::atomic::Ordering::Relaxed);
         let out = persist_one(&mut tx, event, keep).await?;
         tx.commit().await?;
+        if let Some(writing) = writing {
+            writing.done(out.stream_ordering).await;
+        }
         Ok(out)
     }
 
     async fn persist_events(&self, events: Vec<PersistEvent>) -> Result<Vec<PersistedEvent>> {
+        let writing = if events.iter().any(takes_a_place_in_the_stream) {
+            Some(self.streams().await?.writing(Stream::Events))
+        } else {
+            None
+        };
         let mut tx = self.pool.begin().await?;
         let keep = self
             .search_plaintext
@@ -382,6 +385,10 @@ impl EventStore for PostgresStore {
             out.push(persist_one(&mut tx, ev, keep).await?);
         }
         tx.commit().await?;
+        if let Some(writing) = writing {
+            let newest = out.iter().map(|e| e.stream_ordering).max().unwrap_or(0);
+            writing.done(newest).await;
+        }
         Ok(out)
     }
 
@@ -412,14 +419,23 @@ impl EventStore for PostgresStore {
     }
 
     async fn events_after(&self, after: StreamOrdering, limit: usize) -> Result<Vec<StoredEvent>> {
+        // Whoever reads this way continues after the last event it was given, so it is not
+        // given an event while one with a lower number is still being written.
+        let committed: i64 = sqlx::query("SELECT COALESCE(MAX(stream_ordering), 0) FROM events")
+            .fetch_one(&self.pool)
+            .await?
+            .get(0);
+        let settled = self.streams().await?.settled(Stream::Events, committed);
         let sql = format!(
             "SELECT {EVENT_COLUMNS} FROM events e JOIN rooms r ON r.room_id = e.room_id
-              WHERE e.stream_ordering > $1 AND NOT e.outlier AND NOT e.rejected AND NOT e.soft_failed
+              WHERE e.stream_ordering > $1 AND e.stream_ordering <= $3
+                AND NOT e.outlier AND NOT e.rejected AND NOT e.soft_failed
               ORDER BY e.stream_ordering ASC LIMIT $2"
         );
         let rows: Vec<EventRow> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
             .bind(after.max(0))
             .bind(i64::try_from(limit).unwrap_or(i64::MAX))
+            .bind(settled)
             .fetch_all(&self.pool)
             .await?;
         rows.into_iter().map(StoredEvent::try_from).collect()

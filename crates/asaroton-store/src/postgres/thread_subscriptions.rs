@@ -3,6 +3,7 @@ use ruma::{EventId, RoomId, UserId};
 use sqlx::Row;
 
 use super::PostgresStore;
+use super::streams::Stream;
 use crate::{Error, Result, ThreadSubscription, ThreadSubscriptionStore};
 
 const COLUMNS: &str = "room_id, thread_root, subscribed, automatic, stream_id, unsubscribed_at";
@@ -47,6 +48,7 @@ impl ThreadSubscriptionStore for PostgresStore {
         thread_root: &EventId,
         automatic: bool,
     ) -> Result<i64> {
+        let writing = self.streams().await?.writing(Stream::ThreadSubscriptions);
         let row = sqlx::query(
             "INSERT INTO thread_subscriptions (user_id, room_id, thread_root, subscribed, automatic, stream_id, unsubscribed_at)
              VALUES ($1, $2, $3, TRUE, $4, nextval('thread_subscriptions_seq'), NULL)
@@ -60,7 +62,9 @@ impl ThreadSubscriptionStore for PostgresStore {
         .bind(automatic)
         .fetch_one(&self.pool)
         .await?;
-        Ok(row.get::<i64, _>(0))
+        let position = row.get::<i64, _>(0);
+        writing.done(position).await;
+        Ok(position)
     }
 
     async fn unsubscribe_thread(
@@ -70,6 +74,7 @@ impl ThreadSubscriptionStore for PostgresStore {
         thread_root: &EventId,
         at: i64,
     ) -> Result<i64> {
+        let writing = self.streams().await?.writing(Stream::ThreadSubscriptions);
         let row = sqlx::query(
             "INSERT INTO thread_subscriptions (user_id, room_id, thread_root, subscribed, automatic, stream_id, unsubscribed_at)
              VALUES ($1, $2, $3, FALSE, FALSE, nextval('thread_subscriptions_seq'), $4)
@@ -83,7 +88,9 @@ impl ThreadSubscriptionStore for PostgresStore {
         .bind(at)
         .fetch_one(&self.pool)
         .await?;
-        Ok(row.get::<i64, _>(0))
+        let position = row.get::<i64, _>(0);
+        writing.done(position).await;
+        Ok(position)
     }
 
     async fn thread_subscription_changes(
