@@ -64,7 +64,7 @@ ssh = "root@cluephone.org"    # reached with the restricted key ~/.config/asarot
 database = true
 
 [hosts.local]
-local = true                  # this machine, tessera.oele.net
+local = true                  # this machine, asaroton.oele.net
 
 [matrix]
 homeserver = "https://cluephone.org"
