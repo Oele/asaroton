@@ -40,6 +40,15 @@ proxy; tessera answers them with an error when delegation is on. Clients discove
   `m.room.retention` `max_lifetime` (or the configured default).
 - Logs go to standard output; `RUST_LOG` selects the level (`info` by default,
   `tessera_federation=debug` is useful when debugging federation).
+- `deploy/systemd/` holds a watchdog that runs beside tessera as its own service and stops
+  it when it sends more than 1000 federation transactions in a minute, queues more than 5000
+  outbox rows, or stays above 60% CPU. A homeserver that misbehaves bothers every server it
+  federates with, so it errs on the side of stopping; it logs the reason to
+  `/var/log/tessera-watchdog.log` and syslog and mails root. Install it with
+  `deploy/systemd/install-watchdog.sh [UNIT [DBNAME]]` as root; it is enabled at boot and
+  never starts tessera again by itself. It counts transactions in tessera's log, so it needs
+  `RUST_LOG` to include `tessera_federation=debug`. Thresholds go in
+  `/etc/default/tessera-watchdog`.
 - `scripts/loadtest.py` is a synthetic client swarm for capacity checks and
   `scripts/fuzz.sh` runs the fuzz targets under `fuzz/` (needs the nightly toolchain).
 
