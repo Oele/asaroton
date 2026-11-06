@@ -30,7 +30,8 @@ it. What comes of it is one of:
 
 Outcomes are appended to the `--done` file (default: LIST + ".done") with what each server
 answered. Only a `failed` membership is tried again by a later run, so a run can be
-interrupted and repeated. Within a run, a server that could not be reached or that refused
+interrupted and repeated; an interrupted run first waits for the leaves that are under way,
+so that they are on record. Within a run, a server that could not be reached or that refused
 three times in a row is not asked again, and neither is a server about a room it said it no
 longer has.
 
@@ -241,15 +242,34 @@ def main():
                     break
             if any(kind in FINAL for kind, _ in answers.values()):
                 break
-        time.sleep(args.pace)
+        if stop.is_set() and not any(kind in FINAL for kind, _ in answers.values()):
+            return None
+        if not stop.is_set():
+            time.sleep(args.pace)
         return [(server, *answers[server]) for server in via if server in answers]
 
     counts = collections.Counter()
     fatal = None
     with open(done_path, "a") as record, concurrent.futures.ThreadPoolExecutor(max(1, args.parallel)) as pool:
         futures = {pool.submit(settle, membership): membership for membership in todo}
-        try:
-            for future in concurrent.futures.as_completed(futures):
+        waiting = set(futures)
+        while waiting:
+            try:
+                finished, waiting = concurrent.futures.wait(waiting, return_when=concurrent.futures.FIRST_COMPLETED)
+            except KeyboardInterrupt:
+                if stop.is_set():
+                    raise
+                # A leave that is under way still reaches the other server: wait for it, so
+                # that it is on record. Nothing new is started.
+                stop.set()
+                fatal = "interrupted"
+                for future in waiting:
+                    future.cancel()
+                print("interrupted: waiting for the leaves that are under way", flush=True)
+                continue
+            for future in finished:
+                if future.cancelled():
+                    continue
                 room, user, _ = futures[future]
                 try:
                     answers = future.result()
@@ -268,11 +288,6 @@ def main():
                 record.flush()
                 through = "  through " + next(server for server, kind, _ in answers if kind == "left") if outcome == "left" else f"  ({summary})"
                 print(f"{outcome:17} {room} {user}{through}", flush=True)
-        except KeyboardInterrupt:
-            stop.set()
-            for future in futures:
-                future.cancel()
-            fatal = "interrupted"
     print(f"left: {counts['left']}, nothing to leave: {counts['nothing-to-leave']}, room gone: {counts['room-gone']}, "
           f"server banned: {counts['server-banned']}, failed: {counts['failed']}; what each server answered is in {done_path}")
     gone = sorted(server for server, times in unreachable.items() if times >= GIVE_UP_AFTER)

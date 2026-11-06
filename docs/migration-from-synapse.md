@@ -351,6 +351,10 @@ what each of them answered, which gives one of these outcomes:
 | `server-banned` | the room bans this server | no |
 | `failed` | the servers could not be reached, or refused | yes |
 
+As run on cluephone.org on 2026-11-06, in two passes (the second with live servers only):
+of 669 memberships 586 left, 16 had nothing to leave, 34 were invites to rooms that the
+inviting server no longer had, and 33 failed because the only servers known for them were down.
+
 A membership that stays `failed` because its servers are gone needs nothing more: a server
 that is gone sends no events and shows no member list. One whose server comes back shows up in
 the log (`refused events for rooms this server is not in`, with the room and the sender), and

@@ -14,7 +14,7 @@ Needs what scripts/fedlab.py needs. Takes a few seconds.
 
 Usage: scripts/remoteleavetest.py [--keep]
 """
-import base64, collections, hashlib, hmac, json, os, re, subprocess, sys, threading, time, urllib.parse, urllib.request, uuid
+import base64, collections, hashlib, hmac, json, os, re, signal, subprocess, sys, threading, time, urllib.parse, urllib.request, uuid
 
 from nacl.signing import VerifyKey
 
@@ -214,6 +214,27 @@ def run(hs, peers):
     check(ran.returncode == 0 and "left: 8," in ran.stdout, f"eight accounts leave a room that two servers are in ({ran.returncode} {ran.stdout.strip().splitlines()[-1:]} {ran.stderr.strip()[-200:]})")
     check(most_at_work[mock.name] == 1 and most_at_work[silent.name] == 1, f"neither server is asked for two leaves at once ({dict(most_at_work)})")
     check(taken[mock.name] >= 2 and taken[silent.name] >= 2 and sum(taken.values()) == 8, f"and both take their share ({dict(taken)})")
+
+    # Interrupted: what is under way is finished and recorded, the rest is left for later.
+    users = [hs.register(f"late{n}")[0] for n in range(12)]
+    cut = os.path.join(work, "cut.tsv")
+    with open(cut, "w") as f:
+        f.write("".join(f"{big_room}\t{user}\t{mock.name},{silent.name}\n" for user in users))
+    already = sum(taken.values())
+    running = subprocess.Popen([sys.executable, script, cut, "--config", os.path.join(work, "asaroton.toml"), "--pace", "0", "--parallel", "4"],
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    while sum(taken.values()) < already + 2 and running.poll() is None:
+        time.sleep(0.02)
+    running.send_signal(signal.SIGINT)
+    out, err = running.communicate(timeout=60)
+    time.sleep(0.5)
+    sent = sum(taken.values()) - already
+    rows = recorded(cut)
+    check(running.returncode != 0 and "interrupted" in err and 2 <= sent < 12, f"an interrupted run stops before the end ({running.returncode}, {sent} of 12 leaves sent, {err.strip()[-80:]})")
+    check(len(rows) == sent and all(row[2] == "left" for row in rows), f"and every leave that was sent is on record ({len(rows)} recorded, {sent} sent)")
+    resumed = run_script(cut, "--parallel", "4")
+    check(resumed.returncode == 0 and f"{sent} done already, {12 - sent} to go" in resumed.stdout and f"left: {12 - sent}," in resumed.stdout,
+          f"so that the next run does the rest and no more ({resumed.stdout.strip().splitlines()[:1]} {resumed.stdout.strip().splitlines()[-1:]})")
 
     print("-- events that still arrive for such a room")
     _, stray = signed_event(mock.name, mock.key, "ed25519:k1", {
