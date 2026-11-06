@@ -6,6 +6,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    hash::{DefaultHasher, Hash, Hasher},
     time::Duration,
 };
 
@@ -211,6 +212,19 @@ struct RoomTrack {
     membership: MembershipState,
     notification_count: u64,
     highlight_count: u64,
+    /// Fingerprint of the stripped state last sent for an invite, so the invite is sent again
+    /// only when it changes. Without this an invited room was part of every response and the
+    /// request never long-polled.
+    invite: Option<u64>,
+}
+
+/// An order-independent fingerprint of an invite's stripped state.
+fn invite_fingerprint(stripped: &[Value]) -> u64 {
+    let mut events: Vec<String> = stripped.iter().map(Value::to_string).collect();
+    events.sort_unstable();
+    let mut hasher = DefaultHasher::new();
+    events.hash(&mut hasher);
+    hasher.finish()
 }
 
 #[derive(Clone, Debug)]
@@ -603,11 +617,12 @@ impl Services {
                     bump,
                 )
                 .await?;
+            let invite = r.invite_state.as_deref().map(invite_fingerprint);
             let unchanged = track.is_some_and(|t| {
                 !r.initial
                     && r.timeline.is_empty()
                     && r.required_state.is_empty()
-                    && r.invite_state.is_none()
+                    && t.invite == invite
                     && t.membership == sel.membership.membership
                     && t.notification_count == r.notification_count
                     && t.highlight_count == r.highlight_count
@@ -621,6 +636,7 @@ impl Services {
                     membership: sel.membership.membership.clone(),
                     notification_count: r.notification_count,
                     highlight_count: r.highlight_count,
+                    invite,
                 },
             );
             if !unchanged {
@@ -1107,5 +1123,25 @@ impl Services {
             encrypted,
             room_type,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invite_fingerprint_ignores_order_and_sees_changes() {
+        let name = json!({ "type": "m.room.name", "state_key": "", "content": { "name": "a" } });
+        let create = json!({ "type": "m.room.create", "state_key": "", "content": {} });
+        let renamed = json!({ "type": "m.room.name", "state_key": "", "content": { "name": "b" } });
+        assert_eq!(
+            invite_fingerprint(&[name.clone(), create.clone()]),
+            invite_fingerprint(&[create.clone(), name])
+        );
+        assert_ne!(
+            invite_fingerprint(&[create.clone(), renamed]),
+            invite_fingerprint(&[create])
+        );
     }
 }
