@@ -7,6 +7,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     hash::{DefaultHasher, Hash, Hasher},
+    sync::Arc,
     time::Duration,
 };
 
@@ -38,6 +39,10 @@ const BUMP_EVENT_TYPES: &[&str] = &[
 ];
 const MAX_TIMELINE_LIMIT: usize = 1000;
 const DEFAULT_TO_DEVICE_LIMIT: usize = 100;
+/// How many members of one room a connection is remembered to have been given (see
+/// `RoomTrack::members_given`). Past this the list starts over with the people of the newest
+/// timeline; the others are sent again when a timeline is about them.
+const MAX_MEMBERS_REMEMBERED: usize = 500;
 
 // ------------------------------------------------------------------ requests
 
@@ -139,6 +144,9 @@ pub struct RoomResult {
     pub notification_count: u64,
     pub highlight_count: u64,
     pub txn_ids: HashMap<OwnedEventId, String>,
+    /// Whose membership the connection has been given once this answer arrives, when members
+    /// are loaded lazily. Kept with the connection, not sent.
+    pub(crate) members_given: Arc<BTreeSet<OwnedUserId>>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -218,6 +226,10 @@ struct RoomTrack {
     /// only when it changes. Without this an invited room was part of every response and the
     /// request never long-polled.
     invite: Option<u64>,
+    /// With lazily loaded members (`$LAZY`): whose membership this connection has been
+    /// given. Someone not in here gets their membership sent along when a timeline is about
+    /// them, and a change to someone in here is sent whether the timeline shows it or not.
+    members_given: Arc<BTreeSet<OwnedUserId>>,
 }
 
 /// An order-independent fingerprint of an invite's stripped state.
@@ -384,12 +396,13 @@ fn select(
 }
 
 /// Whether a state event is wanted by a `required_state` list (`*`, `$ME` and `$LAZY`
-/// wildcards included).
+/// wildcards included). `lazy_member` says whose membership `$LAZY` stands for, beside the
+/// user's own.
 fn required_state_matches(
     patterns: &BTreeSet<(String, String)>,
     ev: &StoredEvent,
     user: &UserId,
-    senders: &HashSet<OwnedUserId>,
+    lazy_member: impl Fn(&UserId) -> bool,
 ) -> bool {
     let Some((ty, key)) = ev.pdu.state_tuple() else {
         return false;
@@ -402,11 +415,39 @@ fn required_state_matches(
                 "$ME" => key == user.as_str(),
                 "$LAZY" => {
                     ty == "m.room.member"
-                        && (key == user.as_str() || senders.iter().any(|s| s.as_str() == key))
+                        && (key == user.as_str()
+                            || <&UserId>::try_from(key).is_ok_and(&lazy_member))
                 }
                 other => other == key,
             }
     })
+}
+
+/// Whether a `required_state` list asks for members to be loaded lazily: `$LAZY` for
+/// memberships, and no pattern that asks for every membership anyway.
+fn loads_members_lazily(patterns: &BTreeSet<(String, String)>) -> bool {
+    let about_members = |pt: &str| pt == "*" || pt == "m.room.member";
+    patterns
+        .iter()
+        .any(|(pt, pk)| about_members(pt) && pk == "$LAZY")
+        && !patterns
+            .iter()
+            .any(|(pt, pk)| about_members(pt) && pk == "*")
+}
+
+/// Whom a timeline is about: whoever sent one of its events, and whoever one of its
+/// membership events is about (the person invited, removed or banned).
+fn timeline_members(events: &[StoredEvent]) -> HashSet<OwnedUserId> {
+    let mut members: HashSet<OwnedUserId> =
+        events.iter().map(|e| e.pdu.sender().to_owned()).collect();
+    members.extend(
+        events
+            .iter()
+            .filter(|e| e.pdu.event_type() == &TimelineEventType::RoomMember)
+            .filter_map(|e| e.pdu.state_key())
+            .filter_map(|key| OwnedUserId::try_from(key).ok()),
+    );
+    members
 }
 
 // ------------------------------------------------------------------ the sync
@@ -648,6 +689,7 @@ impl Services {
                     notification_count: r.notification_count,
                     highlight_count: r.highlight_count,
                     invite,
+                    members_given: Arc::clone(&r.members_given),
                 },
             );
             if !unchanged {
@@ -918,6 +960,7 @@ impl Services {
             notification_count: 0,
             highlight_count: 0,
             txn_ids: HashMap::new(),
+            members_given: Arc::default(),
         };
         // An invite or a pending knock shows the room's stripped state and nothing else: the
         // user is not in the room, so its timeline and state are not theirs to read. (A knock
@@ -1032,8 +1075,15 @@ impl Services {
         // and ignores state events in the timeline.
         let expanded = track.is_some_and(|t| !sel.required_state.is_subset(&t.required_state));
         let full = initial || expanded;
-        let senders: HashSet<OwnedUserId> =
-            events.iter().map(|e| e.pdu.sender().to_owned()).collect();
+        // Lazily loaded members: the people this timeline is about, and the people the
+        // connection was given before, whose changes it gets from then on.
+        let about = timeline_members(&events);
+        let lazy = loads_members_lazily(&sel.required_state);
+        let given = track
+            .filter(|_| lazy && !full)
+            .map(|t| Arc::clone(&t.members_given));
+        let lazy_member =
+            |u: &UserId| about.contains(u) || given.as_ref().is_some_and(|g| g.contains(u));
         // The state group right after the leave, for someone who left as a member. After a
         // declined invite or a withdrawn knock the user was never in the room and there is no
         // state to show.
@@ -1074,8 +1124,43 @@ impl Services {
         };
         out.required_state = pool
             .into_iter()
-            .filter(|e| required_state_matches(&sel.required_state, e, user, &senders))
+            .filter(|e| required_state_matches(&sel.required_state, e, user, lazy_member))
             .collect();
+        if lazy {
+            // Someone the timeline is about whose membership the connection does not have
+            // gets it sent along, also when it did not change: a person who speaks for the
+            // first time, or the people of older events when the timeline got longer. (In a
+            // full answer the filter above has seen to that. A room the user is out of is
+            // not read past their leave.)
+            if !full && !left {
+                let have: HashSet<&str> = out
+                    .required_state
+                    .iter()
+                    .filter(|e| e.pdu.event_type() == &TimelineEventType::RoomMember)
+                    .filter_map(|e| e.pdu.state_key())
+                    .collect();
+                let wanted: Vec<(StateEventType, String)> = about
+                    .iter()
+                    .filter(|u| {
+                        *u != user
+                            && !given.as_ref().is_some_and(|g| g.contains(*u))
+                            && !have.contains(u.as_str())
+                    })
+                    .map(|u| (StateEventType::RoomMember, u.to_string()))
+                    .collect();
+                if !wanted.is_empty() {
+                    let found = self.store.current_state_pdus_for(room_id, &wanted).await?;
+                    out.required_state.extend(found);
+                }
+            }
+            out.members_given = match given {
+                Some(g) if about.iter().all(|u| g.contains(u)) => g,
+                Some(g) if g.len() + about.len() <= MAX_MEMBERS_REMEMBERED => {
+                    Arc::new(g.iter().chain(&about).cloned().collect())
+                }
+                _ => Arc::new(about.iter().cloned().collect()),
+            };
+        }
 
         // Name, avatar, counts and heroes. A former member gets the name and avatar as they
         // were when they left; who is in the room now is none of their business.
