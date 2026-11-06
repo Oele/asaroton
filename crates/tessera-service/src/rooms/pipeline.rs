@@ -104,6 +104,25 @@ impl RoomContext {
 }
 
 impl Services {
+    /// Tells waiting syncs about a newly stored event. A membership event for one of our own
+    /// users also wakes that user directly: a waiting sync watches the rooms its user was in
+    /// when the wait began, and an invitation, or a room created or joined on another device,
+    /// concerns a room that was not among them yet.
+    pub fn notify_room_event(&self, pdu: &Pdu, stream_ordering: i64) {
+        self.notifier.notify(Notification::RoomEvent {
+            room_id: pdu.room_id().to_owned(),
+            stream_ordering,
+        });
+        if pdu.event_type() == &TimelineEventType::RoomMember
+            && let Some(user) = pdu.state_key().and_then(|k| OwnedUserId::try_from(k).ok())
+            && self.is_local(&user)
+        {
+            self.notifier.notify(Notification::User { user_id: user });
+        }
+    }
+}
+
+impl Services {
     /// Per-room lock serialising local sends, so forward extremities and state groups advance
     /// linearly.
     pub async fn lock_room(&self, room_id: &RoomId) -> OwnedMutexGuard<()> {
@@ -399,10 +418,7 @@ impl Services {
         } else {
             self.cache_room_context(ctx);
         }
-        self.notifier.notify(Notification::RoomEvent {
-            room_id: ctx.room_id.clone(),
-            stream_ordering: persisted.stream_ordering,
-        });
+        self.notify_room_event(&pdu, persisted.stream_ordering);
         self.rtc_on_event(&pdu);
         // Fan out to the other servers in the room.
         let hooks = self.federation();

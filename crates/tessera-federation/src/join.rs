@@ -309,12 +309,7 @@ impl Federation {
             .await?;
         self.event_cache
             .insert(join.event_id().to_owned(), join.clone());
-        services
-            .notifier
-            .notify(tessera_service::Notification::RoomEvent {
-                room_id: room_id.to_owned(),
-                stream_ordering: persisted.stream_ordering,
-            });
+        services.notify_room_event(&join, persisted.stream_ordering);
         Ok(())
     }
 

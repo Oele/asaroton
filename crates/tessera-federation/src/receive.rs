@@ -600,10 +600,7 @@ impl Federation {
             tracing::info!(event_id = %pdu.event_id(), state_key = ?pdu.state_key(), soft_failed, delta = delta_applied, "membership event for local user stored");
         }
         if !soft_failed {
-            services.notifier.notify(Notification::RoomEvent {
-                room_id: room_id.clone(),
-                stream_ordering: persisted.stream_ordering,
-            });
+            services.notify_room_event(&pdu, persisted.stream_ordering);
             services.rtc_on_event(&pdu);
         }
         Ok(if soft_failed {

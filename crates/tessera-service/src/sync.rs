@@ -637,6 +637,10 @@ impl Services {
             events.retain(|e| e.stream_ordering >= g);
             limited = true;
         }
+        // History visibility: under `invited` or `joined` a member does not see what was said
+        // before they were invited or joined. Done before the timeline's start is taken, so
+        // state carried by a hidden event still reaches the client through the state block.
+        let mut events = self.filter_visible(room_id, user, events).await?;
         let timeline_start = events.first().map(|e| e.stream_ordering);
         room.limited = limited || newly_joined;
         if let Some(oldest) = events.iter().map(|e| e.stream_ordering).min() {
@@ -677,34 +681,33 @@ impl Services {
         }
         room.timeline = events;
 
-        // State.
-        let mut state: Vec<StoredEvent> = if full_state {
-            let mut s = match leave_at {
-                // A room we left: the state as of the leave event (which it includes).
-                Some(leave_stream) => {
-                    let leave = self
+        // State. A room the user is no longer in is frozen at the event that took them out,
+        // and only someone who left as a member gets its state at all: after a declined
+        // invite or a withdrawn knock the user was never in the room, and `leave_group` stays
+        // empty.
+        let leave_group = match leave_at {
+            Some(leave_stream) if self.left_as_member(room_id, user).await? => self
+                .store
+                .room_events_in_range(room_id, leave_stream + 1, None, Direction::Backwards, 1)
+                .await?
+                .first()
+                .and_then(|e| e.state_group),
+            _ => None,
+        };
+        let mut state: Vec<StoredEvent> = if leave_at.is_some() && leave_group.is_none() {
+            Vec::new()
+        } else if full_state {
+            let mut s = match leave_group {
+                // The state as of the leave event (which it includes).
+                Some(g) => {
+                    let ids: Vec<OwnedEventId> = self
                         .store
-                        .room_events_in_range(
-                            room_id,
-                            leave_stream + 1,
-                            None,
-                            Direction::Backwards,
-                            1,
-                        )
-                        .await?;
-                    match leave.first().and_then(|e| e.state_group) {
-                        Some(g) => {
-                            let ids: Vec<OwnedEventId> = self
-                                .store
-                                .state_at_group(g)
-                                .await?
-                                .into_iter()
-                                .map(|e| e.event_id)
-                                .collect();
-                            self.store.get_events(&ids).await?
-                        }
-                        None => self.store.current_state_pdus(room_id).await?,
-                    }
+                        .state_at_group(g)
+                        .await?
+                        .into_iter()
+                        .map(|e| e.event_id)
+                        .collect();
+                    self.store.get_events(&ids).await?
                 }
                 None => self.store.current_state_pdus(room_id).await?,
             };
@@ -735,6 +738,17 @@ impl Services {
                         s
                     }
                     None => self.store.current_state_pdus(room_id).await?,
+                }
+            } else if leave_at.is_some() {
+                // What changed up to the leave, never what the room did afterwards.
+                match (since, leave_group) {
+                    (Some(s), Some(g)) => self.state_changes_until(room_id, s.events, g).await?,
+                    _ => room
+                        .timeline
+                        .iter()
+                        .filter(|e| e.pdu.is_state())
+                        .cloned()
+                        .collect(),
                 }
             } else if let Some(s) = since {
                 self.state_changes_since(room_id, s.events).await?

@@ -555,7 +555,13 @@ impl Services {
         group: tessera_store::StateGroupId,
         user: &UserId,
     ) -> Result<VisibilityContext> {
-        let entries = self.store.state_at_group(group).await?;
+        // Only two state events decide visibility. Sync asks this for every response with new
+        // events, so the room's whole state (every member of a large room) is not loaded.
+        let keys = [
+            (StateEventType::RoomHistoryVisibility, String::new()),
+            (StateEventType::RoomMember, user.to_string()),
+        ];
+        let entries = self.store.state_at_group_filtered(group, &keys).await?;
         let mut hv = "shared".to_owned();
         let mut membership = None;
         for e in entries {
@@ -780,6 +786,23 @@ impl Services {
             .map_or_else(|| "leave".to_owned(), |m| m.to_string());
         cache.insert(group, m.clone());
         Ok(m)
+    }
+
+    /// Whether `user` was joined to the room right before their current membership event:
+    /// true for someone who left or was removed as a member, false after a declined invite or
+    /// a withdrawn or refused knock. Decides whether the room's state at that point is theirs
+    /// to see.
+    pub(crate) async fn left_as_member(&self, room_id: &RoomId, user: &UserId) -> Result<bool> {
+        let Some(m) = self.store.get_membership(room_id, user).await? else {
+            return Ok(false);
+        };
+        let Some(ev) = self.store.get_event(&m.event_id).await? else {
+            return Ok(false);
+        };
+        let before = self
+            .membership_before(user, &ev, &mut HashMap::new())
+            .await?;
+        Ok(before == "join")
     }
 
     /// Room state as of a stream token (`/members?at=`), with the same visibility rules as

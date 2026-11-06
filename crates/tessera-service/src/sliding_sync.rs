@@ -17,7 +17,7 @@ use ruma::{
     presence::PresenceState,
 };
 use serde_json::{Value, json};
-use tessera_store::{Direction, Membership, StoredEvent};
+use tessera_store::{Direction, Membership, StateGroupId, StoredEvent};
 
 use crate::{
     Error, Result, Services,
@@ -898,11 +898,21 @@ impl Services {
             highlight_count: 0,
             txn_ids: HashMap::new(),
         };
-        if m.membership == MembershipState::Invite {
+        // An invite or a pending knock shows the room's stripped state and nothing else: the
+        // user is not in the room, so its timeline and state are not theirs to read. (A knock
+        // used to fall through to the joined path below, which let anyone who could knock on
+        // a room read it through a room subscription.)
+        if matches!(
+            m.membership,
+            MembershipState::Invite | MembershipState::Knock
+        ) {
             out.invite_state = Some(self.stripped_state(room_id, Some(user)).await?);
             return Ok(out);
         }
-        let left = matches!(m.membership, MembershipState::Leave | MembershipState::Ban);
+        // Anything but `join` from here on is a room the user is no longer in (left, kicked or
+        // banned). Such a room is frozen at the membership event that took them out: the
+        // timeline ends there, and so do its state, name and avatar.
+        let left = m.membership != MembershipState::Join;
         let upper = if left { m.stream_ordering } else { now.events };
         let lower = if initial {
             None
@@ -944,6 +954,9 @@ impl Services {
                 events.retain(|e| e.stream_ordering >= g);
                 more = true;
             }
+            // History visibility: under `invited` or `joined` a member does not see what was
+            // said before they were invited or joined.
+            events = self.filter_visible(room_id, user, events).await?;
             // A leave stored as an outlier is not in the timeline query's result.
             if left
                 && !events.iter().any(|e| {
@@ -991,8 +1004,37 @@ impl Services {
         let full = initial || expanded;
         let senders: HashSet<OwnedUserId> =
             events.iter().map(|e| e.pdu.sender().to_owned()).collect();
+        // The state group right after the leave, for someone who left as a member. After a
+        // declined invite or a withdrawn knock the user was never in the room and there is no
+        // state to show.
+        let leave_state = if left && self.left_as_member(room_id, user).await? {
+            self.store
+                .room_events_in_range(room_id, upper + 1, None, Direction::Backwards, 1)
+                .await?
+                .first()
+                .and_then(|e| e.state_group)
+        } else {
+            None
+        };
         let pool: Vec<StoredEvent> = if sel.required_state.is_empty() {
             Vec::new()
+        } else if left {
+            match (leave_state, lower) {
+                (Some(group), _) if full => self.state_events_at(group).await?,
+                (Some(group), Some(l)) if l < upper => {
+                    self.state_changes_until(room_id, l, group).await?
+                }
+                // Never a member: no room state, but the user's own membership event is
+                // always theirs. Clients built on the Rust SDK learn that an invite was
+                // declined from this event in `required_state`, not from the timeline.
+                (None, _) if full || lower.is_some_and(|l| l < upper) => self
+                    .store
+                    .get_event(&m.event_id)
+                    .await?
+                    .into_iter()
+                    .collect(),
+                _ => Vec::new(),
+            }
         } else if full {
             self.store.current_state_pdus(room_id).await?
         } else if let Some(l) = lower {
@@ -1005,7 +1047,23 @@ impl Services {
             .filter(|e| required_state_matches(&sel.required_state, e, user, &senders))
             .collect();
 
-        // Name, avatar, counts and heroes.
+        // Name, avatar, counts and heroes. A former member gets the name and avatar as they
+        // were when they left; who is in the room now is none of their business.
+        if left {
+            if let Some(group) = leave_state {
+                out.name = self
+                    .state_content_at(group, StateEventType::RoomName)
+                    .await?
+                    .and_then(|c| c.get("name").and_then(Value::as_str).map(str::to_owned))
+                    .filter(|n| !n.is_empty());
+                out.avatar = self
+                    .state_content_at(group, StateEventType::RoomAvatar)
+                    .await?
+                    .and_then(|c| c.get("url").and_then(Value::as_str).map(str::to_owned));
+            }
+            out.timeline = events;
+            return Ok(out);
+        }
         out.name = self
             .state_content(room_id, &StateEventType::RoomName, "")
             .await?
@@ -1047,17 +1105,88 @@ impl Services {
                 })
                 .collect();
         }
-        if !left {
-            match self.unread_counts(room_id, user, upper).await {
-                Ok(c) => {
-                    out.notification_count = c.total.notification_count;
-                    out.highlight_count = c.total.highlight_count;
-                }
-                Err(e) => tracing::warn!(%room_id, error = %e, "unread counts failed"),
+        match self.unread_counts(room_id, user, upper).await {
+            Ok(c) => {
+                out.notification_count = c.total.notification_count;
+                out.highlight_count = c.total.highlight_count;
             }
+            Err(e) => tracing::warn!(%room_id, error = %e, "unread counts failed"),
         }
         out.timeline = events;
         Ok(out)
+    }
+
+    /// The full state at a state group, as events.
+    async fn state_events_at(&self, group: StateGroupId) -> Result<Vec<StoredEvent>> {
+        let ids: Vec<OwnedEventId> = self
+            .store
+            .state_at_group(group)
+            .await?
+            .into_iter()
+            .map(|e| e.event_id)
+            .collect();
+        Ok(self.store.get_events(&ids).await?)
+    }
+
+    /// The content of the state event `(ty, "")` at a state group.
+    async fn state_content_at(
+        &self,
+        group: StateGroupId,
+        ty: StateEventType,
+    ) -> Result<Option<Value>> {
+        let key = [(ty, String::new())];
+        let Some(entry) = self
+            .store
+            .state_at_group_filtered(group, &key)
+            .await?
+            .into_iter()
+            .next()
+        else {
+            return Ok(None);
+        };
+        Ok(self
+            .store
+            .get_event(&entry.event_id)
+            .await?
+            .and_then(|ev| serde_json::from_str(ev.pdu.content().get()).ok()))
+    }
+
+    /// State events that differ between the state at stream position `since` and the state
+    /// group `until`: the changes a room saw up to a fixed point, where
+    /// [`Services::state_changes_since`] compares with the current state.
+    pub(crate) async fn state_changes_until(
+        &self,
+        room_id: &RoomId,
+        since: i64,
+        until: StateGroupId,
+    ) -> Result<Vec<StoredEvent>> {
+        let at = self
+            .store
+            .room_events_in_range(room_id, since + 1, None, Direction::Backwards, 1)
+            .await?;
+        let before: HashMap<(StateEventType, String), OwnedEventId> =
+            match at.first().and_then(|e| e.state_group) {
+                Some(group) if group == until => return Ok(Vec::new()),
+                Some(group) => self
+                    .store
+                    .state_at_group(group)
+                    .await?
+                    .into_iter()
+                    .map(|e| ((e.event_type, e.state_key), e.event_id))
+                    .collect(),
+                None => HashMap::new(),
+            };
+        let changed: Vec<OwnedEventId> = self
+            .store
+            .state_at_group(until)
+            .await?
+            .into_iter()
+            .filter(|e| {
+                before.get(&(e.event_type.clone(), e.state_key.clone())) != Some(&e.event_id)
+            })
+            .map(|e| e.event_id)
+            .collect();
+        Ok(self.store.get_events(&changed).await?)
     }
 
     /// Current state events that differ from the state as of stream position `since`.

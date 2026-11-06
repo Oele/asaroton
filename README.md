@@ -35,6 +35,8 @@ scripts/loadtest.py --users 50  # synthetic client swarm against a running serve
 scripts/emulab/                 # Element X in an Android emulator + headless Element Web, see its README
 scripts/fedpresencetest.py LAB   # presence fan-out over federation stays bounded (two-server lab)
 scripts/ssinvitetest.py URL      # a pending invite does not stop sliding sync from long-polling (test server with open registration)
+scripts/syncaccesstest.py URL    # sync shows a user only what they may read: knocks, bans, declined invites, history visibility
+scripts/syncwaketest.py URL      # a waiting sync wakes for an invitation or a room created on another device
 watch/                          # weekly watch job: spec, Synapse, tests and server logs become issues, see its README
 ```
 
