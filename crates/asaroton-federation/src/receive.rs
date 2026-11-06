@@ -1273,7 +1273,10 @@ impl Federation {
                             &t.room_id,
                             &t.user_id,
                             t.typing,
-                            std::time::Duration::from_secs(30),
+                            // A safety net for a server that never says its user stopped.
+                            // Servers refresh a notice while typing goes on (Synapse every
+                            // 40 seconds), so this has to be longer than that.
+                            std::time::Duration::from_secs(60),
                         )
                         .await;
                 }

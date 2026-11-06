@@ -217,6 +217,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     };
     asaroton_service::delayed_events::start_worker(Arc::clone(&services));
     asaroton_service::presence::start_worker(Arc::clone(&services));
+    asaroton_service::typing::start_worker(Arc::clone(&services));
     asaroton_service::rtc::delegation::start_worker(Arc::clone(&services));
     if config.retention.enabled {
         asaroton_service::admin::start_retention(

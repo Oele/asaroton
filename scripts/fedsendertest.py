@@ -17,7 +17,7 @@ Needs what scripts/fedlab.py needs. Takes about a minute.
 
 Usage: scripts/fedsendertest.py [--keep]     (--keep leaves the work directory and database)
 """
-import threading, time, uuid
+import threading, time, urllib.parse, uuid
 
 from fedlab import check, run_lab, wait_for
 
@@ -37,6 +37,16 @@ def edu_only(req):
 
 def typing_states(reqs):
     return [e["content"]["typing"] for r in reqs for e in r["body"].get("edus", []) if e.get("edu_type") == "m.typing"]
+
+
+def typing_by_user(reqs):
+    """The last typing state the destination heard per user."""
+    last = {}
+    for r in reqs:
+        for e in r["body"].get("edus", []):
+            if e.get("edu_type") == "m.typing":
+                last[e["content"]["user_id"]] = e["content"]["typing"]
+    return last
 
 
 def typing_storm(hs, token, room_id, user_id, seconds, every):
@@ -170,6 +180,32 @@ def run(hs, peers):
     states = typing_states(r)
     check(bool(states) and states[-1] is False, "the last typing state the destination hears is the final one")
 
+    # A client that never says it stopped (the app went away): when its notice runs out, the
+    # destination has to be told, as a typing notice carries no timeout over federation.
+    start = room.count()
+    st, r = hs.req("PUT", f"/_matrix/client/v3/rooms/{urllib.parse.quote(room_id)}/typing/{urllib.parse.quote(alice)}", {"typing": True, "timeout": 2000}, token)
+    assert st == 200, r
+    wait_for(lambda: typing_by_user(room.requests(start)).get(alice) is False, 8)
+    states = typing_states(room.requests(start))
+    check(states == [True, False], f"a typing notice that runs out is ended for the destination too ({states})")
+
+    # One user stops and another starts in the same instant: the destination hears both.
+    carol, carol_token = hs.register("carol")
+    st, r = hs.req("POST", f"/_matrix/client/v3/rooms/{urllib.parse.quote(room_id)}/join", {}, carol_token)
+    assert st == 200, r
+    time.sleep(1.5)
+    for round_ in range(3):
+        start = room.count()
+        hs.typing(token, room_id, alice, True)
+        time.sleep(1.4)
+        hs.typing(token, room_id, alice, False)
+        hs.typing(carol_token, room_id, carol, True)
+        time.sleep(2.6)
+        heard = typing_by_user(room.requests(start))
+        check(heard.get(alice) is False and heard.get(carol) is True, f"round {round_ + 1}: one user stopping while another starts reaches the destination as both ({heard})")
+        hs.typing(carol_token, room_id, carol, False)
+        time.sleep(1.3)
+
     # Events and to-device messages are not held back, even in the middle of a burst.
     start = room.count()
     storm = threading.Thread(target=typing_storm, args=(hs, token, room_id, alice, 3.0, 0.1))
@@ -199,11 +235,16 @@ def run(hs, peers):
     only = [x for x in room.requests(start) if edu_only(x)]
     check(3 <= len(only) <= 5, f"under a ceiling of 6 a minute, {flips} typing changes in 12 s make {len(only)} transactions")
     start = room.count()
-    sent = [hs.message(token, room_id, f"ceiling {i}") for i in range(4)]
-    wait_for(lambda: sum(len(x["body"].get("pdus", [])) for x in room.requests(start)) >= 4, 5)
+    # Spaced out, so that each message is a transaction of its own and the minute's total
+    # passes the ceiling whatever the batching.
+    sent = []
+    for i in range(5):
+        sent.append(hs.message(token, room_id, f"ceiling {i}"))
+        time.sleep(0.3)
+    wait_for(lambda: sum(len(x["body"].get("pdus", [])) for x in room.requests(start)) >= 5, 5)
     r = room.requests(start)
     delivered = sum(len(x["body"].get("pdus", [])) for x in r)
-    check(delivered == 4 and r[-1]["t"] - sent[0] < 2, "events are not subject to the ceiling")
+    check(delivered == 5 and r[-1]["t"] - sent[-1] < 1, "events are not subject to the ceiling")
     alarms = hs.log_lines("outbound federation is unusually busy")
     check(len(alarms) == 1 and " ERROR " in alarms[0], f"passing the ceiling is logged as an error, once ({len(alarms)} lines)")
 

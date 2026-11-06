@@ -951,3 +951,46 @@ async fn a_room_with_an_unreadable_creator_still_loads(pool: PgPool) {
         assert_eq!(info.creator, expected, "{room}");
     }
 }
+
+/// A queued typing notice is replaced only by a newer one about the same user in the same
+/// room. Replacing per room dropped one user's "stopped typing" when another user in the room
+/// started, and the other servers kept showing the first one as typing.
+#[sqlx::test(migrations = "./migrations")]
+async fn queued_typing_notices_are_replaced_per_user_and_room(pool: PgPool) {
+    use asaroton_store::{FederationStore, OutboxKind};
+    let store = PostgresStore::from_pool(pool);
+    let dest = [server_name!("remote.example.org").to_owned()];
+    let typing = |room: &str, user: &str, typing: bool| json!({"edu_type": "m.typing", "content": {"room_id": room, "user_id": user, "typing": typing}});
+    for edu in [
+        typing("!r:example.org", "@a:example.org", true),
+        typing("!r:example.org", "@a:example.org", false), // replaces the line above
+        typing("!r:example.org", "@b:example.org", true),  // another user: both stay
+        typing("!other:example.org", "@a:example.org", true), // another room: stays
+        typing("!r:example.org", "@b:example.org", false), // replaces b's "typing"
+    ] {
+        store.enqueue_edu(&dest, &edu).await.unwrap();
+    }
+    let queued: Vec<(String, String, bool)> = store
+        .outbox_for(&dest[0], 100, 100, &[])
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|item| match item.kind {
+            OutboxKind::Edu(e) => (
+                e["content"]["room_id"].as_str().unwrap().to_owned(),
+                e["content"]["user_id"].as_str().unwrap().to_owned(),
+                e["content"]["typing"].as_bool().unwrap(),
+            ),
+            OutboxKind::Pdu(_) => panic!("no events were queued"),
+        })
+        .collect();
+    let row = |room: &str, user: &str, typing: bool| (room.to_owned(), user.to_owned(), typing);
+    assert_eq!(
+        queued,
+        vec![
+            row("!r:example.org", "@a:example.org", false),
+            row("!other:example.org", "@a:example.org", true),
+            row("!r:example.org", "@b:example.org", false),
+        ]
+    );
+}
