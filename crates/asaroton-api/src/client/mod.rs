@@ -34,6 +34,11 @@ pub fn routes(router: Router<AppState>) -> Router<AppState> {
         "/_matrix/client/v3/capabilities",
         axum::routing::get(capabilities_handler),
     );
+    // Clients that still speak `r0` ask there, as they do for the other endpoints.
+    let r = r.route(
+        "/_matrix/client/r0/capabilities",
+        axum::routing::get(capabilities_handler),
+    );
     let r = r.route(
         "/.well-known/matrix/client",
         axum::routing::get(discovery::well_known_client),
@@ -53,6 +58,7 @@ pub fn routes(router: Router<AppState>) -> Router<AppState> {
     let r =
         route::<c::account::get_username_availability::v3::Request, _, _>(r, account::available);
     let r = route::<c::account::whoami::v3::Request, _, _>(r, account::whoami);
+    let r = route::<c::account::get_3pids::v3::Request, _, _>(r, account::get_3pids);
     let r = route::<c::account::change_password::v3::Request, _, _>(r, account::change_password);
     let r = route::<c::account::deactivate::v3::Request, _, _>(r, account::deactivate);
     // devices

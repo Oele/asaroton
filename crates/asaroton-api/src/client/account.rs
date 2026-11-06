@@ -9,7 +9,7 @@ use ruma::{
     MilliSecondsSinceUnixEpoch, OwnedDeviceId, OwnedUserId, UInt,
     api::client::{
         account::{
-            change_password, deactivate, get_username_availability,
+            change_password, deactivate, get_3pids, get_username_availability,
             register::{self, RegistrationKind},
             whoami,
         },
@@ -279,6 +279,17 @@ pub async fn whoami(
     let mut resp = whoami::v3::Response::new(s.user_id.clone(), s.is_guest);
     resp.device_id.clone_from(&s.device_id);
     Ok(resp)
+}
+
+/// The e-mail addresses and phone numbers of the account: none. This server keeps no
+/// third-party identifiers (`m.3pid_changes` is off in the capabilities), but clients ask for
+/// the list when they show the account's settings, and the answer to that is an empty list.
+pub async fn get_3pids(
+    _services: AppState,
+    req: Ruma<get_3pids::v3::Request>,
+) -> Result<get_3pids::v3::Response> {
+    req.sender()?;
+    Ok(get_3pids::v3::Response::new(Vec::new()))
 }
 
 pub async fn change_password(

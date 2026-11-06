@@ -1347,6 +1347,48 @@ impl Services {
         }
         Ok((changed, left))
     }
+
+    /// `GET /keys/changes`: whose device lists `user` has to fetch again, and whose they can
+    /// forget, for the time between two sync tokens. The same answer as a sync over that
+    /// time gives in `device_lists`: besides the users whose devices changed, whoever came
+    /// to share a room with `user` (their list was not followed until then, so it may be out
+    /// of date) and whoever stopped sharing one.
+    pub async fn key_changes(
+        &self,
+        user: &UserId,
+        from: SyncToken,
+        to: SyncToken,
+    ) -> Result<(Vec<OwnedUserId>, Vec<OwnedUserId>)> {
+        let memberships = self.store.memberships_for_user(user).await?;
+        let all_my_rooms: Vec<OwnedRoomId> = memberships
+            .iter()
+            .filter(|m| m.membership == MembershipState::Join)
+            .map(|m| m.room_id.clone())
+            .collect();
+        let newly_joined: Vec<OwnedRoomId> = memberships
+            .iter()
+            .filter(|m| {
+                m.membership == MembershipState::Join
+                    && m.stream_ordering > from.events
+                    && m.stream_ordering <= to.events
+            })
+            .map(|m| m.room_id.clone())
+            .collect();
+        let changed_in_my_rooms = self
+            .store
+            .memberships_changed_in_rooms(&all_my_rooms, from.events)
+            .await?;
+        self.device_list_updates(
+            user,
+            from,
+            to,
+            &memberships,
+            &newly_joined,
+            &all_my_rooms,
+            &changed_in_my_rooms,
+        )
+        .await
+    }
 }
 
 #[cfg(test)]

@@ -251,9 +251,7 @@ pub async fn changes(
         .ok_or_else(|| Error::invalid_param("Invalid from token."))?;
     let to =
         SyncToken::parse(&req.body.to).ok_or_else(|| Error::invalid_param("Invalid to token."))?;
-    let (changed, left) = services
-        .device_list_changes_for(&sender.user_id, from.device_lists, to.device_lists)
-        .await?;
+    let (changed, left) = services.key_changes(&sender.user_id, from, to).await?;
     Ok(get_key_changes::v3::Response::new(changed, left))
 }
 

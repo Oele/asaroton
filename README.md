@@ -43,6 +43,7 @@ scripts/syncaccesstest.py URL    # sync shows a user only what they may read: kn
 scripts/syncwaketest.py URL      # a waiting sync wakes for an invitation or a room created on another device
 scripts/sslazytest.py            # sliding sync with lazily loaded members hands out the memberships a timeline is about (starts its own server)
 scripts/createroomtest.py        # createRoom under pressure: several rooms at once, and a sync that shows a new room whole or not yet (starts its own server)
+scripts/clientendpointstest.py   # small client endpoints: capabilities under r0, the empty 3pid list, /keys/changes (starts its own server)
 scripts/deploy.sh [status]      # check, build and deploy: this machine first, then the remote host (see docs/deployment.md)
 watch/                          # weekly watch job: spec, Synapse, tests and server logs become issues, see its README
 ```
