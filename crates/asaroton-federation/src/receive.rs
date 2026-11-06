@@ -193,11 +193,23 @@ impl Federation {
                 "sender's server is denied by the room's server ACL".into(),
             ));
         }
-        // Only servers that are in the room may send us events for it; the sender's server must
-        // be the origin unless the event is a join authorised by someone on our side.
-        if pdu.sender().server_name() != origin && !is_join_via(&pdu, origin) {
+        // What makes an event authentic is its signatures, checked above, not who delivers it.
+        // A server that is in the room passes on events of users from other servers: the join,
+        // leave or knock of someone who came in through it, which that user's own server does
+        // not send to the rest of the room. Refusing those left us without the new member, and
+        // their next events then cited one we had thrown away. So the deliverer has to be the
+        // sender's server or a server in the room.
+        if pdu.sender().server_name() != origin
+            && !is_join_via(&pdu, origin)
+            && !services
+                .store
+                .servers_in_room(room_id)
+                .await?
+                .iter()
+                .any(|s| s == origin)
+        {
             return Err(Error::Rejected(format!(
-                "sender {} is not on origin {origin}",
+                "sender {} is not on origin {origin}, and {origin} is not in the room",
                 pdu.sender()
             )));
         }

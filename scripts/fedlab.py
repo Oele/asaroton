@@ -166,8 +166,9 @@ class Peer:
         except urllib.error.HTTPError as e:
             return e.code, json.loads(e.read() or b"{}")
 
-    def join(self, hs_fed, room_id, localpart):
-        """Join a public room (version 11) as a user of this mock server."""
+    def make_join_event(self, hs_fed, room_id, localpart):
+        """Ask the homeserver for a join template (room version 11) and sign it as a user of
+        this mock server. Returns (user_id, event_id, event); nothing is sent yet."""
         user = f"@{localpart}:{self.name}"
         q = urllib.parse.quote
         st, r = self.fed(hs_fed, "GET", f"/_matrix/federation/v1/make_join/{q(room_id, safe='')}/{q(user, safe='')}?ver=11")
@@ -182,6 +183,12 @@ class Peer:
         redacted["content"] = {k: v for k, v in ev["content"].items() if k in ("membership", "join_authorised_via_users_server")}
         ev["signatures"] = {self.name: {"ed25519:k1": self.sign(redacted)}}
         event_id = "$" + b64(hashlib.sha256(canonical(redacted)).digest(), urlsafe=True)
+        return user, event_id, ev
+
+    def join(self, hs_fed, room_id, localpart):
+        """Join a public room (version 11) as a user of this mock server."""
+        user, event_id, ev = self.make_join_event(hs_fed, room_id, localpart)
+        q = urllib.parse.quote
         st, r = self.fed(hs_fed, "PUT", f"/_matrix/federation/v2/send_join/{q(room_id, safe='')}/{q(event_id, safe='')}", ev)
         assert st == 200, (st, r)
         return user
