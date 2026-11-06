@@ -81,7 +81,11 @@ proxy; asaroton answers them with an error when delegation is on. Clients discov
   address needs its range listed in `federation.allowed_internal_ranges`. Application
   services are configured by the operator and are not affected, and neither is federation
   itself.
-- `deploy/systemd/` holds a watchdog that runs beside asaroton as its own service and stops
+- `deploy/systemd/asaroton.service` is the unit the server runs under. It restarts the server
+  when it dies, and gives up after ten failed starts within five minutes, so that a start
+  that cannot succeed is not tried every three seconds for ever. A unit that gave up has to
+  be cleared with `systemctl reset-failed asaroton` before it starts again.
+- `deploy/systemd/` also holds a watchdog that runs beside asaroton as its own service and stops
   it when it sends more than 1000 federation transactions in a minute, queues more than 5000
   outbox rows, or stays above 60% CPU. A homeserver that misbehaves bothers every server it
   federates with, so it errs on the side of stopping; it logs the reason to
@@ -93,7 +97,10 @@ proxy; asaroton answers them with an error when delegation is on. Clients discov
 - `deploy/systemd/asaroton-deploy.sh` installs a new binary on a host: it compares the
   checksum with the one announced, runs `--version` as the service user, restarts, waits for
   the client API to answer and puts the previous binary back when it does not (unless the new
-  build changed the database schema, which needs a person). `install-deploy.sh` sets it up and
+  build changed the database schema, which needs a person). It clears the unit's failed state
+  before each restart: a binary that fails at once runs into the unit's start limit within the
+  minute the tool waits, and the restart with the old binary would otherwise be refused.
+  `install-deploy.sh` sets it up and
   can admit an ssh key that is allowed to run only this tool. `scripts/deploy.sh` drives it:
   it deploys what is on `origin/main` after `scripts/check.sh` passes, the building machine
   first and the remote host half a minute later.

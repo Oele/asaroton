@@ -30,6 +30,7 @@ INCOMING=/var/lib/asaroton-deploy
 LOG=/var/log/asaroton-deploy.log
 MAX_BYTES=1073741824
 RESTART_CMD='systemctl restart "$UNIT"'
+RESET_CMD='systemctl reset-failed "$UNIT"'
 ACTIVE_CMD='systemctl is-active --quiet "$UNIT"'
 SCHEMA_CMD='runuser -u postgres -- psql -AtX "$DB" -c "select coalesce(max(version),0) from _sqlx_migrations"'
 # shellcheck disable=SC1090
@@ -66,6 +67,10 @@ status() {
 swap_in() {   # swap_in FILE: install FILE as the binary and restart
   install -m 0755 "$1" "$BIN.new" && mv -f "$BIN.new" "$BIN" || return 1
   [ "$(id -u)" = 0 ] && chown root:root "$BIN"
+  # A unit that ran into its start limit refuses every start until that is cleared, and a
+  # binary that fails at once gets there within the time this script waits for it to become
+  # healthy. Without this the restart that puts the working binary back would be refused.
+  eval "$RESET_CMD" >/dev/null 2>&1
   # The lock stays with this script: a service started here must not inherit it and block
   # every later deploy for as long as it runs.
   eval "$RESTART_CMD" 8>&-
