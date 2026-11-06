@@ -1168,17 +1168,17 @@ impl Federation {
             .signing_key
             .sign_event(&services.config.server_name, &mut signed, &rules)?;
         let pdu = Pdu::from_canonical(signed.clone(), &rules)?;
-        match services.invite_decision(&invitee, pdu.sender()).await? {
-            asaroton_service::invite_filter::InviteDecision::Allow => {}
-            asaroton_service::invite_filter::InviteDecision::Block => {
-                return Err(Error::RemoteError {
-                    server: origin.to_owned(),
-                    status: http::StatusCode::FORBIDDEN,
-                    body: json!({ "errcode": "ORG.MATRIX.MSC4155.M_INVITE_BLOCKED", "error": "The invitee does not accept invites from you." }).to_string(),
-                });
-            }
-            // The inviter sees success; the invitee never sees the invite.
-            asaroton_service::invite_filter::InviteDecision::Ignore => return Ok(signed),
+        let decision = services.invite_decision(&invitee, pdu.sender()).await?;
+        if let Some(errcode) = decision.errcode() {
+            return Err(Error::RemoteError {
+                server: origin.to_owned(),
+                status: http::StatusCode::FORBIDDEN,
+                body: json!({ "errcode": errcode, "error": "The invitee does not accept invites from you." }).to_string(),
+            });
+        }
+        // The inviter sees success; the invitee never sees the invite.
+        if decision == asaroton_service::invite_filter::InviteDecision::Ignore {
+            return Ok(signed);
         }
         if services.store.get_room(room_id).await?.is_none() {
             services

@@ -480,12 +480,15 @@ impl Services {
         let now = self.current_token().await?;
         let since = base.map(|b| b.token);
         let user = &req.user_id;
+        // Invites are hidden while the user refuses all invites.
+        let invites_blocked = self.invites_blocked(user).await?;
         let memberships: Vec<Membership> = self
             .store
             .memberships_for_user(user)
             .await?
             .into_iter()
             .filter(|m| !m.forgotten)
+            .filter(|m| !(invites_blocked && m.membership == MembershipState::Invite))
             .collect();
         let ignored = self.ignored_users(user).await?;
         let direct = self.direct_rooms(user).await?;

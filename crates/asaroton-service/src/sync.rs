@@ -365,10 +365,13 @@ impl Services {
             None => Vec::new(),
         };
         // Forgotten rooms are hidden, except that a leave inside the window is still reported.
+        // Invites are hidden while the user refuses all invites.
+        let invites_blocked = self.invites_blocked(user).await?;
         let memberships: Vec<Membership> = all_memberships
             .into_iter()
             .filter(|m| !m.forgotten || since.is_some_and(|s| m.stream_ordering > s.events))
             .filter(|m| filter.room_allowed(&m.room_id))
+            .filter(|m| !(invites_blocked && m.membership == MembershipState::Invite))
             .collect();
 
         let ignored = self.ignored_users(user).await?;

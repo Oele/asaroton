@@ -299,16 +299,16 @@ impl Services {
             return Err(Error::forbidden("You are not in the room."));
         }
         if self.is_local(invitee) {
-            match self.invite_decision(invitee, inviter).await? {
-                crate::invite_filter::InviteDecision::Allow => {}
-                crate::invite_filter::InviteDecision::Block => {
-                    return Err(Error::custom(
-                        "ORG.MATRIX.MSC4155.M_INVITE_BLOCKED",
-                        http::StatusCode::FORBIDDEN,
-                        "The invitee does not accept invites from you.",
-                    ));
-                }
-                crate::invite_filter::InviteDecision::Ignore => return Err(Error::InviteIgnored),
+            let decision = self.invite_decision(invitee, inviter).await?;
+            if let Some(errcode) = decision.errcode() {
+                return Err(Error::custom(
+                    errcode,
+                    http::StatusCode::FORBIDDEN,
+                    "The invitee does not accept invites from you.",
+                ));
+            }
+            if decision == crate::invite_filter::InviteDecision::Ignore {
+                return Err(Error::InviteIgnored);
             }
         }
         let mut content = self.member_content_for(invitee, "invite", reason).await?;
