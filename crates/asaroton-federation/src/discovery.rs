@@ -20,24 +20,33 @@ use crate::{Error, FederationConfig, Result};
 /// Where to send requests for a server name.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Resolved {
-    /// Host to connect to (IP literal or DNS name).
+    /// Host to connect to (IP literal or DNS name). The target of an SRV record, where the
+    /// server has one; otherwise the same as `tls_name`.
     pub host: String,
     pub port: u16,
     /// Value of the `Host` header.
     pub host_header: String,
-    /// Name the certificate must match (SNI).
+    /// Name the certificate must match, and the name asked for in the TLS handshake (SNI):
+    /// the server name, or the name it delegates to. Never the target of an SRV record, which
+    /// is unauthenticated DNS data: a certificate for the target proves nothing about the
+    /// server.
     pub tls_name: String,
     /// Plain HTTP (test-only servers).
     pub insecure: bool,
 }
 
 impl Resolved {
+    /// The URL that requests go to. It names `tls_name`, because the HTTP client takes both
+    /// the name for the TLS handshake and the name to check the certificate against from the
+    /// URL. Where the host to connect to is another one, the client's DNS hook is told its
+    /// addresses under this name (`Discovery::overrides`), and the port here is the port
+    /// there.
     pub fn base_url(&self) -> String {
         let scheme = if self.insecure { "http" } else { "https" };
-        let host = if self.host.contains(':') && !self.host.starts_with('[') {
-            format!("[{}]", self.host)
+        let host = if self.tls_name.contains(':') && !self.tls_name.starts_with('[') {
+            format!("[{}]", self.tls_name)
         } else {
-            self.host.clone()
+            self.tls_name.clone()
         };
         format!("{scheme}://{host}:{}", self.port)
     }
@@ -51,8 +60,8 @@ pub struct Discovery {
     http: reqwest::Client,
     cache: Arc<DashMap<OwnedServerName, (Resolved, i64)>>,
     insecure: Vec<OwnedServerName>,
-    /// Host name -> addresses, consulted by the federation HTTP client's DNS hook so that
-    /// SRV targets are honoured while SNI/Host stay on the delegated name.
+    /// Host name (lower case) -> addresses, consulted by the federation HTTP client's DNS
+    /// hook so that SRV targets are honoured while SNI/Host stay on the delegated name.
     pub(crate) overrides: Arc<DashMap<String, Vec<SocketAddr>>>,
 }
 
@@ -116,12 +125,13 @@ impl Discovery {
                 tls_name: db.tls_name,
                 insecure: self.insecure.iter().any(|s| s == server_name),
             };
+            self.install_override(server_name, &r).await?;
             self.cache
                 .insert(server_name.to_owned(), (r.clone(), db.expires_ts));
-            self.install_override(&r).await;
             return Ok(r);
         }
         let (resolved, ttl) = self.resolve_uncached(server_name).await?;
+        self.install_override(server_name, &resolved).await?;
         let expires = now + i64::try_from(ttl.as_millis()).unwrap_or(i64::MAX);
         self.cache
             .insert(server_name.to_owned(), (resolved.clone(), expires));
@@ -137,7 +147,6 @@ impl Discovery {
                 expires_ts: expires,
             })
             .await;
-        self.install_override(&resolved).await;
         Ok(resolved)
     }
 
@@ -146,12 +155,19 @@ impl Discovery {
         self.cache.remove(server_name);
     }
 
-    /// When the connect host differs from the TLS name, register an override so the HTTP
-    /// client dials the connect host while using the TLS name in the URL.
-    async fn install_override(&self, r: &Resolved) {
+    /// When the host to connect to differs from the name in the URL (it is the target of an
+    /// SRV record), tell the HTTP client's DNS hook where to find that name: at the target's
+    /// addresses. Without that the client would look the name up itself and go wherever its
+    /// own address records point, so a target that has no address is an error.
+    ///
+    /// The hook knows names only, not ports. A name that is reached both directly on a port
+    /// of its own and through an SRV record would get the one entry for both; nobody is known
+    /// to run a server that way.
+    async fn install_override(&self, server_name: &ServerName, r: &Resolved) -> Result<()> {
+        let name = r.tls_name.to_ascii_lowercase();
         if r.host == r.tls_name {
-            self.overrides.remove(&r.tls_name);
-            return;
+            self.overrides.remove(&name);
+            return Ok(());
         }
         let addrs: Vec<SocketAddr> = match r.host.parse::<IpAddr>() {
             Ok(ip) => vec![SocketAddr::new(ip, r.port)],
@@ -160,9 +176,15 @@ impl Discovery {
                 Err(_) => Vec::new(),
             },
         };
-        if !addrs.is_empty() {
-            self.overrides.insert(r.tls_name.clone(), addrs);
+        if addrs.is_empty() {
+            self.overrides.remove(&name);
+            return Err(Error::Discovery(
+                server_name.to_owned(),
+                format!("no address for {}, the target of its SRV record", r.host),
+            ));
         }
+        self.overrides.insert(name, addrs);
+        Ok(())
     }
 
     async fn resolve_uncached(&self, server_name: &ServerName) -> Result<(Resolved, Duration)> {
@@ -355,5 +377,42 @@ impl Discovery {
             return Some((target.trim_end_matches('.').to_owned(), port));
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn resolved(host: &str, tls_name: &str, port: u16) -> Resolved {
+        Resolved {
+            host: host.to_owned(),
+            port,
+            host_header: tls_name.to_owned(),
+            tls_name: tls_name.to_owned(),
+            insecure: false,
+        }
+    }
+
+    #[test]
+    fn the_url_names_the_host_the_certificate_is_for() {
+        // A server behind an SRV record: connect to the target, ask for the delegated name.
+        assert_eq!(
+            resolved("meow.host.example", "federation.example", 443).base_url(),
+            "https://federation.example:443"
+        );
+        assert_eq!(
+            resolved("matrix.example", "matrix.example", 8448).base_url(),
+            "https://matrix.example:8448"
+        );
+        assert_eq!(
+            resolved("2001:db8::1", "2001:db8::1", 8448).base_url(),
+            "https://[2001:db8::1]:8448"
+        );
+        let lab = Resolved {
+            insecure: true,
+            ..resolved("127.0.0.1", "127.0.0.1", 18448)
+        };
+        assert_eq!(lab.base_url(), "http://127.0.0.1:18448");
     }
 }

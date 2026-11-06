@@ -88,7 +88,7 @@ impl reqwest::dns::Resolve for OverrideResolver {
         let overrides = Arc::clone(&self.overrides);
         let fallback = Arc::clone(&self.fallback);
         Box::pin(async move {
-            let host = name.as_str().to_owned();
+            let host = name.as_str().to_ascii_lowercase();
             if let Some(addrs) = overrides.get(&host) {
                 let v = addrs.clone();
                 return Ok(Box::new(v.into_iter()) as reqwest::dns::Addrs);
@@ -142,42 +142,52 @@ fn supported_versions() -> SupportedVersions {
     }
 }
 
+/// The HTTP client for requests to other servers. It finds a host through `overrides` first
+/// (see [`Discovery`]): the name in a request's URL is the one the certificate must be valid
+/// for, which for a server behind an SRV record is not the host to connect to.
+fn http_client(
+    overrides: Arc<dashmap::DashMap<String, Vec<SocketAddr>>>,
+    config: &FederationConfig,
+) -> Result<reqwest::Client> {
+    let resolver = hickory_resolver::TokioResolver::builder_tokio()
+        .map_err(|e| Error::Protocol(format!("dns resolver: {e}")))?
+        .build()
+        .map_err(|e| Error::Protocol(format!("dns resolver: {e}")))?;
+    // HTTP/1.1 only: with HTTP/2 the explicit `Host` header (the delegated name, possibly
+    // with a port) next to `:authority` makes some servers (Synapse's own HTTP/2 stack)
+    // reset the stream with a protocol error.
+    let mut builder = reqwest::Client::builder()
+        .user_agent(concat!("asaroton/", env!("CARGO_PKG_VERSION")))
+        .http1_only()
+        .connect_timeout(Duration::from_secs(10))
+        .pool_idle_timeout(Duration::from_secs(90))
+        .redirect(reqwest::redirect::Policy::none())
+        .dns_resolver(Arc::new(OverrideResolver {
+            overrides,
+            fallback: Arc::new(resolver),
+        }));
+    for pem in &config.extra_ca_certs_pem {
+        for cert in reqwest::Certificate::from_pem_bundle(pem)
+            .map_err(|e| Error::Protocol(format!("ca cert: {e}")))?
+        {
+            builder = builder.add_root_certificate(cert);
+        }
+    }
+    if config.danger_accept_invalid_certs {
+        builder = builder.danger_accept_invalid_certs(true);
+    }
+    builder
+        .build()
+        .map_err(|e| Error::Protocol(format!("http client: {e}")))
+}
+
 impl FederationClient {
     pub fn new(
         services: Arc<Services>,
         discovery: Discovery,
         config: &FederationConfig,
     ) -> Result<Self> {
-        let resolver = hickory_resolver::TokioResolver::builder_tokio()
-            .map_err(|e| Error::Protocol(format!("dns resolver: {e}")))?
-            .build()
-            .map_err(|e| Error::Protocol(format!("dns resolver: {e}")))?;
-        // HTTP/1.1 only: with HTTP/2 the explicit `Host` header (the delegated name, possibly
-        // with a port) next to `:authority` makes some servers (Synapse's own HTTP/2 stack)
-        // reset the stream with a protocol error.
-        let mut builder = reqwest::Client::builder()
-            .user_agent(concat!("asaroton/", env!("CARGO_PKG_VERSION")))
-            .http1_only()
-            .connect_timeout(Duration::from_secs(10))
-            .pool_idle_timeout(Duration::from_secs(90))
-            .redirect(reqwest::redirect::Policy::none())
-            .dns_resolver(Arc::new(OverrideResolver {
-                overrides: Arc::clone(&discovery.overrides),
-                fallback: Arc::new(resolver),
-            }));
-        for pem in &config.extra_ca_certs_pem {
-            for cert in reqwest::Certificate::from_pem_bundle(pem)
-                .map_err(|e| Error::Protocol(format!("ca cert: {e}")))?
-            {
-                builder = builder.add_root_certificate(cert);
-            }
-        }
-        if config.danger_accept_invalid_certs {
-            builder = builder.danger_accept_invalid_certs(true);
-        }
-        let http = builder
-            .build()
-            .map_err(|e| Error::Protocol(format!("http client: {e}")))?;
+        let http = http_client(Arc::clone(&discovery.overrides), config)?;
         Ok(Self {
             services,
             discovery,
@@ -555,5 +565,149 @@ impl FederationClient {
         xm.verify_http_request(request, &self.services.config.server_name, &keys)
             .map_err(|e| Error::Unauthorized(format!("bad request signature: {e}")))?;
         Ok(xm.origin)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    use super::*;
+    use crate::discovery::Resolved;
+
+    /// A self-signed certificate for the made-up name `delegated.test` and its key, generated
+    /// for this test. Nothing trusts it except the client this test builds.
+    const CERT: &[u8] = b"\
+-----BEGIN CERTIFICATE-----
+MIIBpTCCAUugAwIBAgIUDCSRrxrAYv6ZLX3K8gcWNAlBML4wCgYIKoZIzj0EAwIw
+GTEXMBUGA1UEAwwOZGVsZWdhdGVkLnRlc3QwIBcNMjYxMTA2MTQzODU3WhgPMjEy
+NjEwMTMxNDM4NTdaMBkxFzAVBgNVBAMMDmRlbGVnYXRlZC50ZXN0MFkwEwYHKoZI
+zj0CAQYIKoZIzj0DAQcDQgAEVwDPssK5aOXnNxHOlkl+PazgEWXIJUY/yQxqRrOp
+viMKtOY+BUS6wXu+yzOIYPFbc5PVVj/Tye8XGSoZ123nxqNvMG0wDAYDVR0TAQH/
+BAIwADAZBgNVHREEEjAQgg5kZWxlZ2F0ZWQudGVzdDAOBgNVHQ8BAf8EBAMCB4Aw
+EwYDVR0lBAwwCgYIKwYBBQUHAwEwHQYDVR0OBBYEFCJZoOZIEf0zlTEICdzNWWgi
+FcR7MAoGCCqGSM49BAMCA0gAMEUCIQCSvau+oNqaisG8TPBLFOvl6Sq7+Lgs+JpO
+VaQE6p2jjwIgDOMR+3YgMIXs++5B7mcm8VLqX2ak78imznn8fByzmVg=
+-----END CERTIFICATE-----
+";
+    const KEY: &[u8] = b"\
+-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgjQtZJo7fmXku0kpt
+//hCOsgVNou59FK5Itqlb6jjuXShRANCAARXAM+ywrlo5ec3Ec6WSX49rOARZcgl
+Rj/JDGpGs6m+Iwq05j4FRLrBe77LM4hg8Vtzk9VWP9PJ7xcZKhnXbefG
+-----END PRIVATE KEY-----
+";
+
+    /// A TLS server on a local port that answers every request with 200 and notes the server
+    /// name each client asked for in the handshake.
+    async fn tls_listener() -> (u16, Arc<Mutex<Vec<Option<String>>>>) {
+        let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+        let certs = vec![CertificateDer::from_pem_slice(CERT).unwrap()];
+        let key = PrivateKeyDer::from_pem_slice(KEY).unwrap();
+        let config = rustls::ServerConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(certs, key)
+            .unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let asked: Arc<Mutex<Vec<Option<String>>>> = Arc::default();
+        let seen = Arc::clone(&asked);
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let (acceptor, seen) = (acceptor.clone(), Arc::clone(&seen));
+                tokio::spawn(async move {
+                    // A client that does not like the certificate ends the handshake.
+                    let Ok(mut tls) = acceptor.accept(stream).await else {
+                        return;
+                    };
+                    let name = tls.get_ref().1.server_name().map(str::to_owned);
+                    seen.lock().unwrap().push(name);
+                    let mut request = Vec::new();
+                    let mut buf = [0u8; 1024];
+                    while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match tls.read(&mut buf).await {
+                            Ok(n) if n > 0 => request.extend_from_slice(&buf[..n]),
+                            _ => return,
+                        }
+                    }
+                    let _ = tls
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok",
+                        )
+                        .await;
+                    let _ = tls.shutdown().await;
+                });
+            }
+        });
+        (port, asked)
+    }
+
+    fn behind_srv(name: &str, port: u16) -> Resolved {
+        Resolved {
+            // The target of the SRV record. It has no address of its own here: the test
+            // passes only if nobody looks it up.
+            host: "target.invalid".to_owned(),
+            port,
+            host_header: name.to_owned(),
+            tls_name: name.to_owned(),
+            insecure: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_server_behind_an_srv_record_is_asked_for_by_its_own_name() {
+        let (port, asked) = tls_listener().await;
+        // What discovery leaves for the DNS hook: the names, at the address of the target.
+        // The port in the URL is the one that counts.
+        let overrides: Arc<dashmap::DashMap<String, Vec<SocketAddr>>> = Arc::default();
+        let target = SocketAddr::from(([127, 0, 0, 1], port));
+        overrides.insert("delegated.test".to_owned(), vec![target]);
+        overrides.insert("other.test".to_owned(), vec![target]);
+        let config = FederationConfig {
+            extra_ca_certs_pem: vec![CERT.to_vec()],
+            ..Default::default()
+        };
+        let http = http_client(overrides, &config).unwrap();
+
+        let server = behind_srv("delegated.test", port);
+        let answer = http
+            .get(format!(
+                "{}/_matrix/federation/v1/version",
+                server.base_url()
+            ))
+            .header(http::header::HOST, &server.host_header)
+            .send()
+            .await
+            .expect("the request reaches the target");
+        assert_eq!(answer.status(), 200);
+        assert_eq!(
+            *asked.lock().unwrap(),
+            vec![Some("delegated.test".to_owned())],
+            "the handshake asks for the delegated name, not for the SRV target"
+        );
+
+        // Whoever answers at the target has to hold a certificate for the name that was
+        // asked for. The listener's is for `delegated.test` only.
+        let other = behind_srv("other.test", port);
+        let refused = http
+            .get(format!(
+                "{}/_matrix/federation/v1/version",
+                other.base_url()
+            ))
+            .header(http::header::HOST, &other.host_header)
+            .send()
+            .await
+            .expect_err("a certificate for another name is not accepted");
+        let why = error_chain(&refused);
+        assert!(
+            why.contains("certificate") && !why.contains("dns"),
+            "refused for the certificate: {why}"
+        );
     }
 }
