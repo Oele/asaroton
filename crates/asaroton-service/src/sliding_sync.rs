@@ -587,7 +587,7 @@ impl Services {
         let user = &req.user_id;
         // Invites are hidden while the user refuses all invites.
         let invites_blocked = self.invites_blocked(user).await?;
-        let memberships: Vec<Membership> = self
+        let mut memberships: Vec<Membership> = self
             .store
             .memberships_for_user(user)
             .await?
@@ -595,6 +595,11 @@ impl Services {
             .filter(|m| !m.forgotten)
             .filter(|m| !(invites_blocked && m.membership == MembershipState::Invite))
             .collect();
+        // A room that `createRoom` is still writing is not shown yet: asked after the
+        // memberships were read, as `rooms::making` explains. The room is new to the
+        // connection when it does come, and is then sent in full.
+        let unfinished = self.rooms_in_the_making.under_way(user);
+        memberships.retain(|m| !unfinished.iter().any(|u| u.room_id == m.room_id));
         let ignored = self.ignored_users(user).await?;
         let direct = self.direct_rooms(user).await?;
 

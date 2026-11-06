@@ -13,7 +13,10 @@ use serde_json::{Value, json};
 
 use crate::{
     Error, Result, Services,
-    rooms::pipeline::{LocalEvent, RoomContext},
+    rooms::{
+        making::InTheMaking,
+        pipeline::{LocalEvent, RoomContext},
+    },
 };
 
 /// Everything the client may ask for when creating a room.
@@ -150,7 +153,9 @@ impl Services {
         )
         .state_key("")
         .content(&create_content)?;
-        let room_id = self
+        // From its first event until the last of its own, the room is kept out of the
+        // creator's syncs (see `rooms::making`).
+        let (room_id, making) = self
             .create_room_row(&mut ctx, create_ev, &version, &creator)
             .await?;
         let _guard = self.lock_room(&room_id).await;
@@ -316,6 +321,8 @@ impl Services {
         }
 
         // --- invites --------------------------------------------------------------------
+        // The room is whole now. The invitations are events of a room that exists.
+        drop(making);
         for invitee in &req.invite {
             if invitee == &creator {
                 continue;
@@ -339,13 +346,15 @@ impl Services {
     }
 
     /// Build the create event, derive the room ID, create the room row, persist the event.
+    /// Also returns the mark that keeps the room out of the creator's syncs while it is
+    /// written.
     async fn create_room_row(
         &self,
         ctx: &mut RoomContext,
         create_ev: LocalEvent,
         version: &RoomVersionId,
         creator: &UserId,
-    ) -> Result<OwnedRoomId> {
+    ) -> Result<(OwnedRoomId, InTheMaking<'_>)> {
         if ctx.rules.room_id_format == RoomIdFormatVersion::V1 {
             let room_id = ctx.room_id.clone();
             self.store
@@ -357,8 +366,12 @@ impl Services {
                     created_ts: now_ts(),
                 })
                 .await?;
-            self.send_local_event_locked(ctx, create_ev).await?;
-            return Ok(room_id);
+            let making = self
+                .rooms_in_the_making
+                .begin(&self.notifier, creator, &room_id);
+            let stored = self.send_local_event_locked(ctx, create_ev).await?;
+            making.first_event_at(stored.stream_ordering);
+            return Ok((room_id, making));
         }
         // v12: build without a room_id to learn the ID, register the room, then persist.
         //
@@ -403,9 +416,13 @@ impl Services {
         let mut ev = create_ev;
         ev.room_id = room_id.clone();
         ev.origin_server_ts = Some(pdu.origin_server_ts());
+        let making = self
+            .rooms_in_the_making
+            .begin(&self.notifier, creator, &room_id);
         let stored = self.send_local_event_locked(ctx, ev).await?;
         debug_assert_eq!(stored.pdu.event_id(), pdu.event_id());
-        Ok(room_id)
+        making.first_event_at(stored.stream_ordering);
+        Ok((room_id, making))
     }
 
     pub(crate) async fn send_state_locked(

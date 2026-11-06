@@ -103,6 +103,8 @@ pub struct Services {
     pub started_at: std::time::Instant,
     /// Per-room locks for local sends (see `rooms::pipeline`).
     pub(crate) room_locks: dashmap::DashMap<ruma::OwnedRoomId, Arc<tokio::sync::Mutex<()>>>,
+    /// Rooms that `createRoom` is still writing, which sync does not show yet.
+    pub(crate) rooms_in_the_making: rooms::making::RoomsInTheMaking,
 }
 
 impl std::fmt::Debug for Services {
@@ -166,6 +168,7 @@ impl Services {
             store,
             started_at: std::time::Instant::now(),
             room_locks: dashmap::DashMap::new(),
+            rooms_in_the_making: rooms::making::RoomsInTheMaking::default(),
         }))
     }
 

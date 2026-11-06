@@ -1,25 +1,49 @@
 #!/usr/bin/env python3
-"""`POST /createRoom` under pressure: several rooms at once.
+"""`POST /createRoom` under pressure: several rooms at once, and a sync that is watching.
 
 Rooms asked for at the same moment each come into being. Since room version 12 a room's ID
 is the hash of its create event, and two create events of one user with the same content and
 the same millisecond are one and the same event. The server has to tell them apart.
 
-Needs what scripts/fedlab.py needs. Takes a few seconds.
+A room that is being created shows over sync only once all of it is written. `createRoom`
+writes a room as a row of events: the create event, the creator's membership, power levels,
+what the preset says, `initial_state`, name and topic. A sync of the same user that is
+answered between two of them would show a room without, say, its `m.room.encryption` event.
+A client built on matrix-rust-sdk then takes the room for unencrypted until a later answer
+says otherwise, and a message sent in between leaves the client in plain text. Here one
+device creates encrypted rooms as fast as it can, one after the other and four at a time,
+while another device of the same user long-polls. For every room, the first answer that
+mentions it has to hold the whole room. Both sync flavours. And a `createRoom` that fails
+halfway does not leave syncs waiting.
+
+Needs what scripts/fedlab.py needs. Takes about half a minute.
 
 Usage: scripts/createroomtest.py [--keep]
 """
+import threading, time, urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 
-from fedlab import check, run_lab
+from fedlab import check, run_lab, wait_for
 
 AT_ONCE = 8
 ROUNDS = 5
+ROOMS = 25
+SLIDING = "/_matrix/client/unstable/org.matrix.simplified_msc3575/sync"
+# What createRoom writes for an encrypted room with a name and a topic, apart from the
+# creator's membership.
+WHOLE = {"m.room.create", "m.room.power_levels", "m.room.join_rules", "m.room.history_visibility", "m.room.guest_access",
+         "m.room.encryption", "m.room.name", "m.room.topic"}
+ENCRYPTION = {"type": "m.room.encryption", "state_key": "", "content": {"algorithm": "m.megolm.v1.aes-sha2"}}
 
 
 def run(hs, peers):
     def create(token, body):
         return hs.req("POST", "/_matrix/client/v3/createRoom", body, token)
+
+    def login(user):
+        st, r = hs.req("POST", "/_matrix/client/v3/login", {"type": "m.login.password", "identifier": {"type": "m.id.user", "user": user}, "password": "pwpwpwpw"})
+        assert st == 200, r
+        return r["access_token"]
 
     print("-- rooms asked for at the same moment")
     for version in ("12", "11"):
@@ -34,6 +58,128 @@ def run(hs, peers):
         check(len(rooms) == len(answers) - len(refused), f"room version {version}: and each with a room of its own ({len(rooms)} different rooms)")
         st, joined = hs.req("GET", "/_matrix/client/v3/joined_rooms", None, token)
         check(st == 200 and set(joined.get("joined_rooms", [])) == rooms, f"room version {version}: the creator is in exactly those rooms ({len(joined.get('joined_rooms', []))})")
+
+    def encrypted(n, **extra):
+        return {"preset": "private_chat", "name": f"Room {n}", "topic": "Whole or not at all", "initial_state": [ENCRYPTION], **extra}
+
+    def timed_create(token, n):
+        started = time.monotonic()
+        st, r = create(token, encrypted(n))
+        assert st == 200, r
+        return r["room_id"], time.monotonic() - started
+
+    def watch_sliding(token, seen, stop):
+        body = {"conn_id": "watch", "lists": {"all": {"ranges": [[0, 199]], "timeline_limit": 1, "required_state": [[t, ""] for t in sorted(WHOLE)]}}}
+        pos = None
+        while not stop.is_set():
+            st, r = hs.req("POST", f"{SLIDING}?timeout=2000" + (f"&pos={pos}" if pos else ""), body, token)
+            assert st == 200, r
+            pos = r["pos"]
+            for room_id, room in r.get("rooms", {}).items():
+                seen.setdefault(room_id, {e["type"] for e in room.get("required_state", [])})
+
+    def watch_classic(token, seen, stop):
+        since = None
+        while not stop.is_set():
+            st, r = hs.req("GET", "/_matrix/client/v3/sync?timeout=2000" + (f"&since={since}" if since else ""), None, token)
+            assert st == 200, r
+            since = r["next_batch"]
+            for room_id, room in r.get("rooms", {}).get("join", {}).items():
+                events = room.get("state", {}).get("events", []) + room.get("timeline", {}).get("events", [])
+                seen.setdefault(room_id, {e["type"] for e in events})
+
+    runs = (("sliding sync", watch_sliding, 1), ("classic sync", watch_classic, 1),
+            ("sliding sync, four rooms at a time", watch_sliding, 4), ("classic sync, four rooms at a time", watch_classic, 4))
+    for number, (label, watch, at_a_time) in enumerate(runs):
+        print(f"-- a room is whole when sync first shows it: {label}")
+        user, creator = hs.register(f"creator{number}")
+        watcher = login(user)
+        seen, stop = {}, threading.Event()
+        thread = threading.Thread(target=watch, args=(watcher, seen, stop), daemon=True)
+        thread.start()
+        time.sleep(0.5)
+        with ThreadPoolExecutor(at_a_time) as pool:
+            results = list(pool.map(lambda n: timed_create(creator, n), range(ROOMS)))
+        made, slowest = [room_id for room_id, _ in results], max(took for _, took in results)
+        arrived = wait_for(lambda: all(room_id in seen for room_id in made), 15, 0.1)
+        stop.set()
+        thread.join(10)
+        check(arrived, f"the other device learns of all {ROOMS} rooms ({sum(room_id in seen for room_id in made)})")
+        partial = {room_id: sorted(WHOLE - seen[room_id]) for room_id in made if room_id in seen and not WHOLE <= seen[room_id]}
+        missing = sorted({t for types in partial.values() for t in types})
+        check(not partial, f"every room is whole in the first answer that mentions it ({len(partial)} of {ROOMS} were not; missing: {missing})")
+        check(slowest < 5, f"creating a room stays quick while a sync is waiting (slowest {slowest:.2f} s)")
+        # Nothing got lost on the way: a sync from scratch knows the same rooms.
+        if watch is watch_classic:
+            st, r = hs.req("GET", "/_matrix/client/v3/sync?timeout=0", None, watcher)
+            assert st == 200, r
+            joined = r.get("rooms", {}).get("join", {})
+            check(set(made) <= set(joined), f"a fresh sync of that device has all {ROOMS} rooms ({len(set(made) & set(joined))})")
+
+    print("-- other rooms while a room is being created (classic sync)")
+    user, creator = hs.register("busy")
+    watcher = login(user)
+    st, r = create(creator, {"preset": "private_chat", "name": "Old room"})
+    assert st == 200, r
+    old_room = r["room_id"]
+    st, r = hs.req("GET", "/_matrix/client/v3/sync?timeout=0", None, watcher)
+    assert st == 200, r
+    since, got, stop = r["next_batch"], [], threading.Event()
+
+    def chatter():
+        n = 0
+        while not stop.is_set():
+            hs.message(creator, old_room, f"message {n}")
+            n += 1
+        got.append(n)
+
+    def creating():
+        n = 0
+        while not stop.is_set():
+            st, r = create(creator, encrypted(n))
+            assert st == 200, r
+            n += 1
+
+    threads = [threading.Thread(target=chatter, daemon=True), threading.Thread(target=creating, daemon=True)]
+    for t in threads:
+        t.start()
+    bodies, ends = [], time.monotonic() + 4
+
+    def read_on():
+        nonlocal since
+        st, r = hs.req("GET", f"/_matrix/client/v3/sync?timeout=300&since={since}", None, watcher)
+        assert st == 200, r
+        since = r["next_batch"]
+        events = r.get("rooms", {}).get("join", {}).get(old_room, {}).get("timeline", {}).get("events", [])
+        bodies.extend(e["content"]["body"] for e in events if e["type"] == "m.room.message")
+
+    while time.monotonic() < ends:
+        read_on()
+    stop.set()
+    for t in threads:
+        t.join(10)
+    for _ in range(4):
+        read_on()
+    sent = got[0] if got else 0
+    check(sent > 5 and bodies == [f"message {n}" for n in range(sent)], f"the messages of another room arrive once and in order while rooms are created ({len(bodies)} of {sent}, {len(set(bodies))} different)")
+
+    print("-- a createRoom that fails halfway")
+    user, creator = hs.register("failing")
+    st, r = hs.req("GET", "/_matrix/client/v3/sync?timeout=0", None, creator)
+    assert st == 200, r
+    since = r["next_batch"]
+    # In room version 11 the creator's power comes from the power levels. Without any, the
+    # power levels event itself is still allowed, and the join rules after it are not.
+    st, r = create(creator, encrypted(0, room_version="11", power_level_content_override={"users": {}}))
+    check(st != 200, f"a room whose creator gives away all power is turned down ({st} {r.get('errcode')})")
+    started = time.monotonic()
+    st, r = hs.req("GET", f"/_matrix/client/v3/sync?timeout=0&since={since}", None, creator)
+    took = time.monotonic() - started
+    check(st == 200 and took < 2, f"and the creator's next sync is answered at once ({st}, {took:.2f} s)")
+    st, r = create(creator, encrypted(1, invite=[user.replace("failing", "creator0")]))
+    check(st == 200, f"the same user can create a room afterwards ({st})")
+    invited = hs.req("GET", f"/_matrix/client/v3/rooms/{urllib.parse.quote(r['room_id'])}/members?membership=invite", None, creator)[1]
+    check(len(invited.get("chunk", [])) == 1, "and its invitation went out")
 
 
 if __name__ == "__main__":
