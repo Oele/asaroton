@@ -20,6 +20,11 @@ bind = "0.0.0.0:8448"
 [federation]
 # Serve .well-known/matrix/server so other servers use the reverse proxy on 443 instead of 8448.
 # well_known_server = "matrix.example.org:443"
+# Ceiling on outbound transactions per minute that carry only presence, typing, receipts or
+# device lists, over all destinations; events and to-device messages are never held back.
+# The default suits a handful of active users. Passing it is logged as an error, so raise it
+# if that turns out to be ordinary traffic for your server.
+# max_edu_transactions_per_minute = 600
 
 [registration]
 enabled = false

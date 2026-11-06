@@ -383,6 +383,8 @@ pub struct OutboxItem {
     pub id: i64,
     pub destination: OwnedServerName,
     pub kind: OutboxKind,
+    /// When the item was queued.
+    pub created_ts: Ts,
 }
 
 /// What an outbox row carries.

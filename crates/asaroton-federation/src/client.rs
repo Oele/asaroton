@@ -9,17 +9,33 @@ use ruma::{
         IncomingResponseExt, MatrixVersion, OutgoingRequest, OutgoingRequestExt, SupportedVersions,
         auth_scheme::NoAuthentication,
         error::FromHttpResponseError,
-        federation::authentication::{ServerSignatures, XMatrix, XMatrixSigningInput},
+        federation::{
+            authentication::{ServerSignatures, XMatrix, XMatrixSigningInput},
+            transactions::send_transaction_message,
+        },
         path_builder::{PathBuilder, SinglePath, VersionHistory},
     },
 };
 
 use crate::{Error, FederationConfig, Result, discovery::Discovery};
 
+/// Timeout for downloads.
+const LONG_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 /// Timeout for ordinary federation requests. Joins and state fetches use a longer one.
-const LONG_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const LONG_TIMEOUT: Duration = Duration::from_secs(180);
+/// Timeout for `/send`. A busy server can take minutes over one transaction, and giving up
+/// early only means it sees the retry while it is still working on the first attempt.
+const TRANSACTION_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// What a destination answered to a transaction, whatever the status.
+#[derive(Debug)]
+pub struct TransactionReply {
+    pub status: http::StatusCode,
+    /// The `Retry-After` header, when it gives a number of seconds.
+    pub retry_after: Option<Duration>,
+    pub body: bytes::Bytes,
+}
 
 /// An error with its sources, as reqwest's top-level message hides the actual cause.
 fn error_chain(e: &reqwest::Error) -> String {
@@ -187,6 +203,31 @@ impl FederationClient {
             .await
     }
 
+    /// Send a transaction and hand back the answer as it came, so the sender can tell a
+    /// refusal that will pass from one that will not. Only failing to get an answer at all is
+    /// an error here.
+    pub async fn send_transaction(
+        &self,
+        destination: &ServerName,
+        request: send_transaction_message::v1::Request,
+    ) -> Result<TransactionReply> {
+        let resolved = self.discovery.resolve(destination).await?;
+        let http_req = self.signed(destination, &resolved, request)?;
+        let (status, headers, body) = self
+            .exchange(destination, &resolved, http_req, TRANSACTION_TIMEOUT)
+            .await?;
+        let retry_after = headers
+            .get(http::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .map(Duration::from_secs);
+        Ok(TransactionReply {
+            status,
+            retry_after,
+            body,
+        })
+    }
+
     async fn send_with_timeout<R>(
         &self,
         destination: &ServerName,
@@ -199,22 +240,35 @@ impl FederationClient {
         R::EndpointError: std::fmt::Debug,
     {
         let resolved = self.discovery.resolve(destination).await?;
-        let base = resolved.base_url();
+        let http_req = self.signed(destination, &resolved, request)?;
+        self.dispatch::<R>(destination, &resolved, http_req, timeout)
+            .await
+    }
+
+    /// Turn a ruma request into an HTTP request signed as this server.
+    fn signed<R>(
+        &self,
+        destination: &ServerName,
+        resolved: &crate::discovery::Resolved,
+        request: R,
+    ) -> Result<http::Request<Vec<u8>>>
+    where
+        R: OutgoingRequest<Authentication = ServerSignatures>,
+        R::PathBuilder: FedPath,
+    {
         let signing = XMatrixSigningInput::new(
             self.services.config.server_name.clone(),
             destination.to_owned(),
             self.services.signing_key.key_pair(),
         );
         let versions = supported_versions();
-        let http_req: http::Request<Vec<u8>> = request
+        request
             .try_into_http_request(
-                &base,
+                &resolved.base_url(),
                 signing,
                 <R::PathBuilder as FedPath>::input(&versions),
             )
-            .map_err(|e| Error::Protocol(format!("building request: {e}")))?;
-        self.dispatch::<R>(destination, &resolved, http_req, timeout)
-            .await
+            .map_err(|e| Error::Protocol(format!("building request: {e}")))
     }
 
     async fn dispatch<R>(
@@ -228,6 +282,40 @@ impl FederationClient {
         R: OutgoingRequest,
         R::EndpointError: std::fmt::Debug,
     {
+        let (status, headers, bytes) = self
+            .exchange(destination, resolved, http_req, timeout)
+            .await?;
+        if !status.is_success() {
+            return Err(Error::RemoteError {
+                server: destination.to_owned(),
+                status,
+                body: String::from_utf8_lossy(&bytes).into_owned(),
+            });
+        }
+        let mut builder = http::Response::builder().status(status);
+        for (k, v) in &headers {
+            builder = builder.header(k, v);
+        }
+        let http_resp = builder
+            .body(bytes.as_ref())
+            .map_err(|e| Error::Protocol(e.to_string()))?;
+        R::IncomingResponse::try_from_http_response(http_resp).map_err(|e| match e {
+            FromHttpResponseError::Deserialization(d) => {
+                Error::Protocol(format!("{destination}: bad response: {d}"))
+            }
+            FromHttpResponseError::Server(s) => Error::Protocol(format!("{destination}: {s:?}")),
+            other => Error::Protocol(format!("{destination}: {other}")),
+        })
+    }
+
+    /// Perform the HTTP exchange for a prepared request; any status is an answer.
+    async fn exchange(
+        &self,
+        destination: &ServerName,
+        resolved: &crate::discovery::Resolved,
+        http_req: http::Request<Vec<u8>>,
+        timeout: Duration,
+    ) -> Result<(http::StatusCode, http::HeaderMap, bytes::Bytes)> {
         let (parts, body) = http_req.into_parts();
 
         let mut req = self
@@ -247,31 +335,12 @@ impl FederationClient {
             }
         };
         let status = resp.status();
-        let mut builder = http::Response::builder().status(status);
-        for (k, v) in resp.headers() {
-            builder = builder.header(k, v);
-        }
+        let headers = resp.headers().clone();
         let bytes = resp
             .bytes()
             .await
             .map_err(|e| Error::Transport(destination.to_owned(), error_chain(&e)))?;
-        if !status.is_success() {
-            return Err(Error::RemoteError {
-                server: destination.to_owned(),
-                status,
-                body: String::from_utf8_lossy(&bytes).into_owned(),
-            });
-        }
-        let http_resp = builder
-            .body(bytes.as_ref())
-            .map_err(|e| Error::Protocol(e.to_string()))?;
-        R::IncomingResponse::try_from_http_response(http_resp).map_err(|e| match e {
-            FromHttpResponseError::Deserialization(d) => {
-                Error::Protocol(format!("{destination}: bad response: {d}"))
-            }
-            FromHttpResponseError::Server(s) => Error::Protocol(format!("{destination}: {s:?}")),
-            other => Error::Protocol(format!("{destination}: {other}")),
-        })
+        Ok((status, headers, bytes))
     }
 
     /// A signed request with a JSON body to an endpoint ruma does not model, returning the

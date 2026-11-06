@@ -749,11 +749,23 @@ pub trait FederationStore: Send + Sync {
         destinations: &[OwnedServerName],
         edu: &serde_json::Value,
     ) -> Result<()>;
-    /// Oldest pending items for a destination.
-    async fn outbox_for(&self, destination: &ServerName, limit: usize) -> Result<Vec<OutboxItem>>;
+    /// Pending items for a destination: its oldest PDUs, followed by its oldest EDUs with
+    /// those of the `first_edu_types` ahead of the rest. PDUs and EDUs are limited
+    /// separately, so that neither kind waits behind a backlog of the other.
+    async fn outbox_for(
+        &self,
+        destination: &ServerName,
+        max_pdus: usize,
+        max_edus: usize,
+        first_edu_types: &[&str],
+    ) -> Result<Vec<OutboxItem>>;
     async fn delete_outbox_items(&self, ids: &[i64]) -> Result<()>;
     /// Destinations that have anything queued.
     async fn outbox_destinations(&self) -> Result<Vec<OwnedServerName>>;
+    /// Thin out the queues of destinations that have been failing since before `failing_since`:
+    /// their EDUs go, and of their PDUs only the newest per room stays, which is enough for a
+    /// server that returns to fetch what it missed. Returns the number of rows deleted.
+    async fn prune_dead_outbox(&self, failing_since: Ts) -> Result<u64>;
     async fn destination_state(&self, destination: &ServerName) -> Result<DestinationState>;
     async fn set_destination_state(
         &self,
@@ -772,6 +784,9 @@ pub trait FederationStore: Send + Sync {
         txn_id: &str,
         response: &serde_json::Value,
     ) -> Result<()>;
+    /// Forget inbound transactions received before `before`; their stored answers only serve
+    /// to answer a retransmission. Returns the number of rows deleted.
+    async fn prune_received_transactions(&self, before: Ts) -> Result<u64>;
 
     async fn get_discovery(&self, server_name: &ServerName) -> Result<Option<DiscoveryEntry>>;
     async fn set_discovery(&self, entry: &DiscoveryEntry) -> Result<()>;

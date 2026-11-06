@@ -4,7 +4,7 @@ use sqlx::Row;
 
 use super::{PostgresStore, strings};
 use crate::{
-    DestinationState, DiscoveryEntry, Error, FederationStore, OutboxItem, OutboxKind, Result,
+    DestinationState, DiscoveryEntry, Error, FederationStore, OutboxItem, OutboxKind, Result, Ts,
     now_ts,
 };
 
@@ -79,14 +79,34 @@ impl FederationStore for PostgresStore {
         Ok(())
     }
 
-    async fn outbox_for(&self, destination: &ServerName, limit: usize) -> Result<Vec<OutboxItem>> {
-        let rows = sqlx::query(
-            "SELECT id, kind, event_id, edu_json FROM federation_outbox WHERE destination = $1 ORDER BY id LIMIT $2",
+    async fn outbox_for(
+        &self,
+        destination: &ServerName,
+        max_pdus: usize,
+        max_edus: usize,
+        first_edu_types: &[&str],
+    ) -> Result<Vec<OutboxItem>> {
+        let limit = |n: usize| i64::try_from(n).unwrap_or(i64::MAX);
+        let mut rows = sqlx::query(
+            "SELECT id, kind, event_id, edu_json, created_ts FROM federation_outbox
+             WHERE destination = $1 AND kind = 'pdu' ORDER BY id LIMIT $2",
         )
         .bind(destination.as_str())
-        .bind(i64::try_from(limit).unwrap_or(i64::MAX))
+        .bind(limit(max_pdus))
         .fetch_all(&self.pool)
         .await?;
+        rows.extend(
+            sqlx::query(
+                "SELECT id, kind, event_id, edu_json, created_ts FROM federation_outbox
+                 WHERE destination = $1 AND kind = 'edu'
+                 ORDER BY (edu_json->>'edu_type' = ANY($3)) IS NOT TRUE, id LIMIT $2",
+            )
+            .bind(destination.as_str())
+            .bind(limit(max_edus))
+            .bind(first_edu_types)
+            .fetch_all(&self.pool)
+            .await?,
+        );
         rows.into_iter()
             .map(|r| {
                 let kind: String = r.get("kind");
@@ -102,6 +122,7 @@ impl FederationStore for PostgresStore {
                     id: r.get("id"),
                     destination: destination.to_owned(),
                     kind,
+                    created_ts: r.get("created_ts"),
                 })
             })
             .collect()
@@ -125,6 +146,29 @@ impl FederationStore for PostgresStore {
         Ok(crate::parse_ids(
             rows.into_iter().map(|r| r.get::<String, _>(0)).collect(),
         ))
+    }
+
+    async fn prune_dead_outbox(&self, failing_since: Ts) -> Result<u64> {
+        let done = sqlx::query(
+            "WITH dead AS (
+                 SELECT destination FROM federation_destinations
+                 WHERE failure_ts IS NOT NULL AND failure_ts < $1
+             ), keep AS (
+                 SELECT max(o.id) AS id
+                 FROM federation_outbox o
+                 JOIN dead ON dead.destination = o.destination
+                 JOIN events e ON e.event_id = o.event_id
+                 WHERE o.kind = 'pdu'
+                 GROUP BY o.destination, e.room_id
+             )
+             DELETE FROM federation_outbox o USING dead
+             WHERE o.destination = dead.destination
+               AND NOT EXISTS (SELECT 1 FROM keep WHERE keep.id = o.id)",
+        )
+        .bind(failing_since)
+        .execute(&self.pool)
+        .await?;
+        Ok(done.rows_affected())
     }
 
     async fn destination_state(&self, destination: &ServerName) -> Result<DestinationState> {
@@ -195,6 +239,15 @@ impl FederationStore for PostgresStore {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    async fn prune_received_transactions(&self, before: Ts) -> Result<u64> {
+        let done =
+            sqlx::query("DELETE FROM federation_received_transactions WHERE received_ts < $1")
+                .bind(before)
+                .execute(&self.pool)
+                .await?;
+        Ok(done.rows_affected())
     }
 
     async fn get_discovery(&self, server_name: &ServerName) -> Result<Option<DiscoveryEntry>> {

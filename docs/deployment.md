@@ -40,6 +40,16 @@ proxy; asaroton answers them with an error when delegation is on. Clients discov
   `m.room.retention` `max_lifetime` (or the configured default).
 - Logs go to standard output; `RUST_LOG` selects the level (`info` by default,
   `asaroton_federation=debug` is useful when debugging federation).
+- Outbound federation: events and to-device messages are sent as soon as they are queued.
+  Transactions that carry only presence, typing, receipts or device lists are paced: bursts
+  share a transaction, each destination gets at most 30 at once and then one every 5 seconds,
+  and all destinations together stay under `federation.max_edu_transactions_per_minute`
+  (600 by default). A minute with more transactions than that logs an error ("outbound
+  federation is unusually busy"). A transaction that fails is retried unchanged, with the
+  same ID, backing off from 2 seconds to an hour and waiting longer when the destination
+  asks; only a `400` or `403` answer discards it. Once an hour asaroton forgets inbound
+  transactions older than a day and, for destinations that have been failing for a week,
+  drops queued EDUs and all but the newest queued event per room.
 - `deploy/systemd/` holds a watchdog that runs beside asaroton as its own service and stops
   it when it sends more than 1000 federation transactions in a minute, queues more than 5000
   outbox rows, or stays above 60% CPU. A homeserver that misbehaves bothers every server it

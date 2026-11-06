@@ -125,6 +125,12 @@ pub struct FederationConfig {
     /// Skip TLS certificate verification for federation (testing only).
     #[serde(default)]
     pub danger_accept_invalid_certs: bool,
+    /// Ceiling on outbound transactions per minute that carry only EDUs (presence, typing,
+    /// receipts, device lists), over all destinations. Events and to-device messages are
+    /// never held back. The default of 600 suits a server with a handful of active users;
+    /// passing it logs an error, so raise it when that turns out to be ordinary traffic.
+    #[serde(default)]
+    pub max_edu_transactions_per_minute: Option<u32>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]

@@ -16,6 +16,7 @@ pub mod client;
 pub mod discovery;
 mod error;
 pub mod hooks;
+mod housekeeping;
 pub mod inbound;
 pub mod join;
 pub mod keys;
@@ -39,6 +40,9 @@ pub struct FederationConfig {
     pub insecure_http_servers: Vec<ruma::OwnedServerName>,
     /// Skip TLS verification entirely (tests only).
     pub danger_accept_invalid_certs: bool,
+    /// Ceiling on transactions per minute that carry only EDUs, over all destinations. Zero
+    /// selects the default.
+    pub max_edu_transactions_per_minute: u32,
 }
 
 /// The federation subsystem handle.
@@ -75,19 +79,21 @@ impl Federation {
         let discovery = discovery::Discovery::new(Arc::clone(&services), &config)?;
         let client =
             client::FederationClient::new(Arc::clone(&services), discovery.clone(), &config)?;
+        let sender = sender::SenderHandle::new(config.max_edu_transactions_per_minute);
         let fed = Arc::new(Self {
             services,
             client,
             discovery,
             config,
             joins_in_progress: dashmap::DashMap::new(),
-            sender: sender::SenderHandle::default(),
+            sender,
             event_cache: dashmap::DashMap::new(),
             state_at_cache: dashmap::DashMap::new(),
             weak_self: std::sync::OnceLock::new(),
         });
         let _ = fed.weak_self.set(Arc::downgrade(&fed));
         sender::start(Arc::clone(&fed));
+        housekeeping::start(Arc::clone(&fed.services));
         appservice::start(&fed);
         push::start(&fed);
         // Keep the event cache bounded.

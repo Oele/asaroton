@@ -173,6 +173,10 @@ fn federation_config(config: &Config) -> FederationConfig {
         extra_ca_certs_pem: extra,
         insecure_http_servers: config.federation.insecure_http_servers.clone(),
         danger_accept_invalid_certs: config.federation.danger_accept_invalid_certs,
+        max_edu_transactions_per_minute: config
+            .federation
+            .max_edu_transactions_per_minute
+            .unwrap_or_default(),
     }
 }
 

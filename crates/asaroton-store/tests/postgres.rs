@@ -726,7 +726,7 @@ async fn queued_presence_and_typing_edus_are_replaced(pool: PgPool) {
         )
         .await
         .unwrap();
-    let items = store.outbox_for(&dest, 100).await.unwrap();
+    let items = store.outbox_for(&dest, 100, 100, &[]).await.unwrap();
     // one presence row per user (the latest), both receipts kept
     assert_eq!(items.len(), 4, "{items:?}");
     let latest_a = items
@@ -745,4 +745,184 @@ async fn queued_presence_and_typing_edus_are_replaced(pool: PgPool) {
         latest_a.pointer("/content/push/0/presence").unwrap(),
         "online"
     );
+}
+
+/// Housekeeping: old inbound transactions go, and a destination that has been failing for a
+/// long time keeps only the newest event per room.
+#[sqlx::test(migrations = "./migrations")]
+async fn prunes_federation_tables(pool: PgPool) {
+    use asaroton_store::{DestinationState, FederationStore, OutboxKind};
+
+    let store = PostgresStore::from_pool(pool.clone());
+    let now = now_ts();
+    let day = 24 * 3600 * 1000;
+
+    // Inbound transactions: one from two days ago, one from just now.
+    let origin = server_name!("remote.example").to_owned();
+    for txn in ["old", "new"] {
+        store
+            .store_received_transaction(&origin, txn, &json!({"pdus": {}}))
+            .await
+            .unwrap();
+    }
+    sqlx::query(
+        "UPDATE federation_received_transactions SET received_ts = $1 WHERE transaction_id = 'old'",
+    )
+    .bind(now - 2 * day)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        store.prune_received_transactions(now - day).await.unwrap(),
+        1
+    );
+    assert!(
+        store
+            .received_transaction(&origin, "old")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .received_transaction(&origin, "new")
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    // Two rooms with events queued for three destinations: one failing for ten days, one
+    // failing since yesterday, one healthy.
+    let room_a = build_room(&store, &RoomVersionId::V11).await;
+    let room_b = build_room(&store, &RoomVersionId::V10).await;
+    let dead = server_name!("dead.example").to_owned();
+    let flaky = server_name!("flaky.example").to_owned();
+    let fine = server_name!("fine.example").to_owned();
+    let all = [dead.clone(), flaky.clone(), fine.clone()];
+    for (dest, failing_days) in [(&dead, 10), (&flaky, 1)] {
+        store
+            .set_destination_state(
+                dest,
+                &DestinationState {
+                    failure_ts: Some(now - failing_days * day),
+                    retry_last_ts: Some(now),
+                    retry_interval_ms: 3_600_000,
+                    last_successful_ts: None,
+                },
+            )
+            .await
+            .unwrap();
+    }
+    for room in [&room_a, &room_b] {
+        for event in &room.events {
+            store.enqueue_pdu(&all, event.event_id()).await.unwrap();
+        }
+    }
+    store
+        .enqueue_edu(&all, &json!({"edu_type": "m.receipt", "content": {}}))
+        .await
+        .unwrap();
+    // A queued event that no longer exists must not survive either.
+    let gone: OwnedEventId = "$gone".try_into().unwrap();
+    store.enqueue_pdu(&all, &gone).await.unwrap();
+    let queued = room_a.events.len() + room_b.events.len() + 2;
+    assert_eq!(
+        store
+            .outbox_for(&dead, 1000, 1000, &[])
+            .await
+            .unwrap()
+            .len(),
+        queued
+    );
+
+    let expected = u64::try_from(queued - 2).unwrap();
+    assert_eq!(
+        store.prune_dead_outbox(now - 7 * day).await.unwrap(),
+        expected
+    );
+    let left: Vec<_> = store
+        .outbox_for(&dead, 1000, 1000, &[])
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|item| item.kind)
+        .collect();
+    let newest =
+        |room: &RoomDriver| OutboxKind::Pdu(room.events.last().unwrap().event_id().to_owned());
+    assert_eq!(left, vec![newest(&room_a), newest(&room_b)]);
+    // The others are untouched, and a second run finds nothing more.
+    assert_eq!(
+        store
+            .outbox_for(&flaky, 1000, 1000, &[])
+            .await
+            .unwrap()
+            .len(),
+        queued
+    );
+    assert_eq!(
+        store
+            .outbox_for(&fine, 1000, 1000, &[])
+            .await
+            .unwrap()
+            .len(),
+        queued
+    );
+    assert_eq!(store.prune_dead_outbox(now - 7 * day).await.unwrap(), 0);
+}
+
+/// The sender's view of a queue: events never wait behind EDUs, and of the EDUs the kinds
+/// that must not wait come first.
+#[sqlx::test(migrations = "./migrations")]
+async fn outbox_puts_events_and_urgent_edus_first(pool: PgPool) {
+    use asaroton_store::{FederationStore, OutboxKind};
+
+    let store = PostgresStore::from_pool(pool);
+    let room = build_room(&store, &RoomVersionId::V11).await;
+    let dest = [server_name!("remote.example").to_owned()];
+    let edu = |kind: &str, n: u32| json!({"edu_type": kind, "content": {"n": n}});
+    // A backlog of receipts, then a to-device message, a malformed EDU and two events.
+    for n in 0..5 {
+        store
+            .enqueue_edu(&dest, &edu("m.receipt", n))
+            .await
+            .unwrap();
+    }
+    store
+        .enqueue_edu(&dest, &edu("m.direct_to_device", 5))
+        .await
+        .unwrap();
+    store
+        .enqueue_edu(&dest, &json!({"content": {"n": 6}}))
+        .await
+        .unwrap();
+    store
+        .enqueue_edu(&dest, &edu("m.direct_to_device", 7))
+        .await
+        .unwrap();
+    for event in &room.events[..2] {
+        store.enqueue_pdu(&dest, event.event_id()).await.unwrap();
+    }
+
+    let order = |items: Vec<asaroton_store::OutboxItem>| -> Vec<String> {
+        items
+            .into_iter()
+            .map(|item| match item.kind {
+                OutboxKind::Pdu(_) => "pdu".to_owned(),
+                OutboxKind::Edu(e) => e["content"]["n"].to_string(),
+            })
+            .collect()
+    };
+    let first = ["m.direct_to_device"];
+    let items = store.outbox_for(&dest[0], 50, 100, &first).await.unwrap();
+    assert!(items.iter().all(|i| i.created_ts > 0));
+    assert_eq!(
+        order(items),
+        ["pdu", "pdu", "5", "7", "0", "1", "2", "3", "4", "6"]
+    );
+    // The limits apply to each kind on its own.
+    let items = store.outbox_for(&dest[0], 1, 3, &first).await.unwrap();
+    assert_eq!(order(items), ["pdu", "5", "7", "0"]);
+    // Without urgent kinds, plain queue order.
+    let items = store.outbox_for(&dest[0], 0, 3, &[]).await.unwrap();
+    assert_eq!(order(items), ["0", "1", "2"]);
 }
