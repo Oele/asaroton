@@ -353,3 +353,54 @@ fn resolves_conflicting_topics_by_power_then_timestamp() {
         assert_eq!(resolved.len(), base_state.len() + 1);
     }
 }
+
+/// A redaction names its target at the top level up to room version 10 and inside `content`
+/// from 11 on. Clients are given it in both places, whichever the room has.
+#[test]
+fn a_redaction_served_to_clients_names_its_target_in_both_places() {
+    for version in [
+        RoomVersionId::V6,
+        RoomVersionId::V10,
+        RoomVersionId::V11,
+        RoomVersionId::V12,
+    ] {
+        let room = build_room(&version);
+        let msg = room
+            .events
+            .values()
+            .find(|p| *p.event_type() == TimelineEventType::RoomMessage)
+            .unwrap();
+        let redaction = PduBuilder::new(
+            user_id!("@alice:example.org").to_owned(),
+            TimelineEventType::RoomRedaction,
+        )
+        .room_id(msg.room_id().to_owned())
+        .content(&json!({ "reason": "tidying up" }))
+        .unwrap()
+        .redacts(msg.event_id().to_owned())
+        .depth(UInt::from(50u32))
+        .build(&room.rules, &room.key, server_name!("example.org"))
+        .unwrap();
+        // As stored and as other servers get it: in the one place the room version says.
+        let in_content = room.rules.redaction.content_field_redacts;
+        assert_eq!(
+            redaction.raw().contains_key("redacts"),
+            !in_content,
+            "room version {version}"
+        );
+        // As clients get it: in both.
+        let served = redaction.to_client_json();
+        let target = json!(msg.event_id());
+        assert_eq!(
+            served["redacts"], target,
+            "room version {version}, top level"
+        );
+        assert_eq!(
+            served["content"]["redacts"], target,
+            "room version {version}, content"
+        );
+        assert_eq!(served["content"]["reason"], json!("tidying up"));
+        // Any other event is left alone.
+        assert!(msg.to_client_json().get("redacts").is_none());
+    }
+}

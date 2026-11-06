@@ -347,6 +347,19 @@ impl Pdu {
         if !self.inner.has_room_id_field {
             obj.insert("room_id".into(), self.inner.room_id.as_str().into());
         }
+        // A redaction names its target at the top level in room versions up to 10 and inside
+        // `content` from 11 on. Clients look in one place or the other (Element only at the
+        // top level, clients on the Rust SDK in `content`), so they are given both, as the
+        // specification asks of servers. Without it a deletion in a newer room is not
+        // applied by the clients that look in the old place.
+        if let Some(target) = &self.inner.redacts {
+            obj.insert("redacts".into(), target.as_str().into());
+            if let Some(CanonicalJsonValue::Object(content)) = obj.get_mut("content") {
+                content
+                    .entry("redacts".into())
+                    .or_insert_with(|| target.as_str().into());
+            }
+        }
         canonical::to_json_value(obj)
     }
 
