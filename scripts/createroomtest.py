@@ -20,7 +20,7 @@ Needs what scripts/fedlab.py needs. Takes about half a minute.
 
 Usage: scripts/createroomtest.py [--keep]
 """
-import threading, time, urllib.parse
+import json, threading, time, urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 
 from fedlab import check, run_lab, wait_for
@@ -124,7 +124,9 @@ def run(hs, peers):
     old_room = r["room_id"]
     st, r = hs.req("GET", "/_matrix/client/v3/sync?timeout=0", None, watcher)
     assert st == 200, r
-    since, got, stop = r["next_batch"], [], threading.Event()
+    since, got, created, stop = r["next_batch"], [], [], threading.Event()
+    # A timeline long enough for everything that waits behind a room in the making.
+    wide = urllib.parse.quote(json.dumps({"room": {"timeline": {"limit": 1000}}}))
 
     def chatter():
         n = 0
@@ -134,11 +136,11 @@ def run(hs, peers):
         got.append(n)
 
     def creating():
-        n = 0
         while not stop.is_set():
-            st, r = create(creator, encrypted(n))
-            assert st == 200, r
-            n += 1
+            st, r = create(creator, encrypted(len(created)))
+            if st != 200:
+                break
+            created.append(r["room_id"])
 
     threads = [threading.Thread(target=chatter, daemon=True), threading.Thread(target=creating, daemon=True)]
     for t in threads:
@@ -147,11 +149,12 @@ def run(hs, peers):
 
     def read_on():
         nonlocal since
-        st, r = hs.req("GET", f"/_matrix/client/v3/sync?timeout=300&since={since}", None, watcher)
+        st, r = hs.req("GET", f"/_matrix/client/v3/sync?timeout=300&since={since}&filter={wide}", None, watcher)
         assert st == 200, r
         since = r["next_batch"]
-        events = r.get("rooms", {}).get("join", {}).get(old_room, {}).get("timeline", {}).get("events", [])
-        bodies.extend(e["content"]["body"] for e in events if e["type"] == "m.room.message")
+        old = r.get("rooms", {}).get("join", {}).get(old_room, {}).get("timeline", {})
+        assert not old.get("limited"), "the test's timeline is too short for what waited"
+        bodies.extend(e["content"]["body"] for e in old.get("events", []) if e["type"] == "m.room.message")
 
     while time.monotonic() < ends:
         read_on()
@@ -161,7 +164,8 @@ def run(hs, peers):
     for _ in range(4):
         read_on()
     sent = got[0] if got else 0
-    check(sent > 5 and bodies == [f"message {n}" for n in range(sent)], f"the messages of another room arrive once and in order while rooms are created ({len(bodies)} of {sent}, {len(set(bodies))} different)")
+    check(len(created) > 5, f"rooms were being created all the while ({len(created)})")
+    check(sent > 5 and bodies == [f"message {n}" for n in range(sent)], f"the messages of another room arrive once and in order meanwhile ({len(bodies)} of {sent}, {len(set(bodies))} different)")
 
     print("-- a createRoom that fails halfway")
     user, creator = hs.register("failing")
@@ -172,10 +176,11 @@ def run(hs, peers):
     # power levels event itself is still allowed, and the join rules after it are not.
     st, r = create(creator, encrypted(0, room_version="11", power_level_content_override={"users": {}}))
     check(st != 200, f"a room whose creator gives away all power is turned down ({st} {r.get('errcode')})")
-    started = time.monotonic()
+    # What was written of the room is there; nothing keeps it out of sync for good. (A room
+    # that is still marked as being written would not be in the answer.)
     st, r = hs.req("GET", f"/_matrix/client/v3/sync?timeout=0&since={since}", None, creator)
-    took = time.monotonic() - started
-    check(st == 200 and took < 2, f"and the creator's next sync is answered at once ({st}, {took:.2f} s)")
+    left_behind = r.get("rooms", {}).get("join", {})
+    check(st == 200 and len(left_behind) == 1, f"and what was written of it shows in the creator's next sync ({st}, {len(left_behind)} room)")
     st, r = create(creator, encrypted(1, invite=[user.replace("failing", "creator0")]))
     check(st == 200, f"the same user can create a room afterwards ({st})")
     invited = hs.req("GET", f"/_matrix/client/v3/rooms/{urllib.parse.quote(r['room_id'])}/members?membership=invite", None, creator)[1]

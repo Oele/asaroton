@@ -317,6 +317,9 @@ struct ConnState {
 struct Connection {
     confirmed: Option<ConnState>,
     pending: Option<ConnState>,
+    /// How many requests were made on this connection. Only the newest may leave its state
+    /// behind as `pending` (see `SlidingSyncConnections::store_pending`).
+    requests: u64,
 }
 
 /// Per-connection state of every sliding sync client.
@@ -326,14 +329,18 @@ pub struct SlidingSyncConnections {
 }
 
 impl SlidingSyncConnections {
-    fn resolve(&self, key: &ConnKey, pos: Option<&str>) -> Result<Option<ConnState>> {
+    /// The state a request with position `pos` starts from, and the request's number on its
+    /// connection, to be handed back to `store_pending`.
+    fn resolve(&self, key: &ConnKey, pos: Option<&str>) -> Result<(Option<ConnState>, u64)> {
         let mut entry = self.conns.entry(key.clone()).or_default();
         let conn = &mut *entry;
+        conn.requests += 1;
+        let request = conn.requests;
         match pos {
             None => {
                 conn.confirmed = None;
                 conn.pending = None;
-                Ok(None)
+                Ok((None, request))
             }
             Some(p) => {
                 let seq: u64 = p.parse().map_err(|_| unknown_pos())?;
@@ -344,16 +351,36 @@ impl SlidingSyncConnections {
                 } else {
                     return Err(unknown_pos());
                 }
-                Ok(conn.confirmed.clone())
+                Ok((conn.confirmed.clone(), request))
             }
         }
     }
 
-    fn store_pending(&self, key: &ConnKey, state: ConnState) {
+    /// Remembers what the answer to request number `request` tells the client, unless a
+    /// newer request has been made on the connection in the meantime. A client that gives up
+    /// on a waiting request and asks again is answered by the new one; the old one may still
+    /// be running here (behind a reverse proxy it is not dropped), and when it finishes its
+    /// answer goes nowhere. Were its state kept, the client's next position would confirm
+    /// events and state that it was never sent.
+    fn store_pending(&self, key: &ConnKey, state: ConnState, request: u64) {
         if self.conns.len() > 10_000 {
             self.conns.clear();
         }
-        self.conns.entry(key.clone()).or_default().pending = Some(state);
+        match self.conns.entry(key.clone()) {
+            dashmap::Entry::Occupied(mut conn) => {
+                if conn.get().requests == request {
+                    conn.get_mut().pending = Some(state);
+                }
+            }
+            // Dropped with all the others just now: this request starts the connection anew.
+            dashmap::Entry::Vacant(slot) => {
+                slot.insert(Connection {
+                    confirmed: None,
+                    pending: Some(state),
+                    requests: request,
+                });
+            }
+        }
     }
 }
 
@@ -535,7 +562,7 @@ impl Services {
             device: req.device_id.clone(),
             conn_id: req.conn_id.clone().unwrap_or_default(),
         };
-        let base = self.sliding_sync.resolve(&key, req.pos.as_deref())?;
+        let (base, request) = self.sliding_sync.resolve(&key, req.pos.as_deref())?;
         let mut rx = self.notifier.subscribe();
         let (mut result, mut state) = self.compute_sliding_sync(&req, base.as_ref()).await?;
         if base.is_some() && result.quiet && !req.timeout.is_zero() {
@@ -573,7 +600,7 @@ impl Services {
                 }
             }
         }
-        self.sliding_sync.store_pending(&key, state);
+        self.sliding_sync.store_pending(&key, state, request);
         Ok(result)
     }
 
@@ -749,9 +776,13 @@ impl Services {
                     required_state: sel.required_state.clone(),
                     // The longest timeline the connection was given, so that dropping a
                     // subscription and taking it again does not send the same events twice.
-                    timeline_limit: sel
-                        .timeline_limit
-                        .max(track.map_or(0, |t| t.timeline_limit)),
+                    // A room that starts over has been given what it is sent now.
+                    timeline_limit: if r.initial {
+                        sel.timeline_limit
+                    } else {
+                        sel.timeline_limit
+                            .max(track.map_or(0, |t| t.timeline_limit))
+                    },
                     membership: sel.membership.membership.clone(),
                     notification_count: r.notification_count,
                     highlight_count: r.highlight_count,
@@ -909,7 +940,8 @@ impl Services {
                 if sel.membership.membership != MembershipState::Join || !scope.applies(sel) {
                     continue;
                 }
-                let initial = base.is_none_or(|b| !b.rooms.contains_key(room_id));
+                let initial = base.is_none_or(|b| !b.rooms.contains_key(room_id))
+                    || rooms.get(room_id).is_some_and(|r| r.initial);
                 let receipts: Vec<asaroton_store::Receipt> = if initial {
                     // Receipts for the events the client is being shown.
                     let ids: HashSet<OwnedEventId> = rooms
@@ -946,7 +978,8 @@ impl Services {
                 if sel.membership.membership != MembershipState::Join || !scope.applies(sel) {
                     continue;
                 }
-                let initial = base.is_none_or(|b| !b.rooms.contains_key(room_id));
+                let initial = base.is_none_or(|b| !b.rooms.contains_key(room_id))
+                    || rooms.get(room_id).is_some_and(|r| r.initial);
                 let changed =
                     initial || since.is_none_or(|s| self.typing.changed_since(room_id, s.typing));
                 if !changed {
@@ -1441,6 +1474,39 @@ impl Services {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_newest_request_leaves_its_state_behind() {
+        let state = |seq| ConnState {
+            seq,
+            token: SyncToken::default(),
+            rooms: HashMap::new(),
+            list_counts: BTreeMap::new(),
+        };
+        let conns = SlidingSyncConnections::default();
+        let key = ConnKey {
+            user: OwnedUserId::try_from("@a:x.test").unwrap(),
+            device: None,
+            conn_id: "c".to_owned(),
+        };
+        let (base, first) = conns.resolve(&key, None).unwrap();
+        assert!(base.is_none());
+        conns.store_pending(&key, state(1), first);
+
+        // A request that waits, and one that the client makes after giving up on it.
+        let (_, waiting) = conns.resolve(&key, Some("1")).unwrap();
+        let (_, newer) = conns.resolve(&key, Some("1")).unwrap();
+        conns.store_pending(&key, state(2), newer);
+        // The first one finishes late, with other content under the same number.
+        let mut late = state(2);
+        late.list_counts.insert("late".to_owned(), 1);
+        conns.store_pending(&key, late, waiting);
+        let (confirmed, _) = conns.resolve(&key, Some("2")).unwrap();
+        assert!(
+            confirmed.is_some_and(|s| s.list_counts.is_empty()),
+            "the client confirms what the newer request told it"
+        );
+    }
 
     #[test]
     fn invite_fingerprint_ignores_order_and_sees_changes() {

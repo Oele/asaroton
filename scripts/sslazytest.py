@@ -136,9 +136,13 @@ def run(hs, peers):
     check(bob not in members and alice not in members, f"and not the ones the connection has ({sorted(members)})")
     # The client asks for more state on the same connection. What it has is not sent again,
     # and the members it was given are still kept up to date.
-    narrow.body["room_subscriptions"][room_id].update(timeline_limit=1, required_state=STATE + [["m.room.topic", ""]])
+    narrow.body["room_subscriptions"][room_id]["timeline_limit"] = 1
     st, r = hs.req("PUT", f"{room}/state/m.room.topic", {"topic": "Laziness"}, a)
     assert st == 200, r
+    got = narrow.answer()
+    types = sorted(e["type"] for e in got.get("required_state", []))
+    check(types == [] and [t[0] for t in timeline(got)] == ["m.room.topic"], f"a topic nobody asked for is not sent as state ({types}; timeline {timeline(got)})")
+    narrow.body["room_subscriptions"][room_id]["required_state"] = STATE + [["m.room.topic", ""]]
     got = narrow.answer()
     types = sorted(e["type"] for e in got.get("required_state", []))
     check(types == ["m.room.topic"], f"asking for more state brings what is new to the connection and nothing else ({types})")
