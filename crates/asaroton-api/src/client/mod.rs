@@ -215,18 +215,16 @@ pub fn routes(router: Router<AppState>) -> Router<AppState> {
     .fold(r, |r, (path, handler)| {
         r.route(&format!("{}/{path}", rtc::PREFIX), handler)
     });
-    let r = r
-        .route(
-            &format!("{}/rtc", asaroton_service::rtc::signal::SIGNAL_PATH),
-            axum::routing::get(rtc_signal::websocket),
-        )
-        .route(
-            &format!(
-                "{}/rtc/validate",
-                asaroton_service::rtc::signal::SIGNAL_PATH
-            ),
-            axum::routing::get(rtc_signal::validate),
-        );
+    // The SFU's two ways to open the signalling connection, the older `/rtc` and `/rtc/v1`,
+    // each with its token check.
+    let r = ["/rtc", "/rtc/v1"].into_iter().fold(r, |r, path| {
+        let path = format!("{}{path}", asaroton_service::rtc::signal::SIGNAL_PATH);
+        r.route(&path, axum::routing::get(rtc_signal::websocket))
+            .route(
+                &format!("{path}/validate"),
+                axum::routing::get(rtc_signal::validate),
+            )
+    });
     let r =
         route::<c::account::request_openid_token::v3::Request, _, _>(r, rtc::request_openid_token);
     let r = route::<c::redact::redact_event::v3::Request, _, _>(r, rooms::redact);

@@ -2,14 +2,20 @@
 //! `GET {SIGNAL_PATH}/rtc/validate` are forwarded to the SFU's own listener, so the SFU can
 //! stay on the loopback interface and asaroton can correct the TURN port in its answers
 //! (see `asaroton_service::rtc::signal`).
+//!
+//! The same goes for `{SIGNAL_PATH}/rtc/v1` and `{SIGNAL_PATH}/rtc/v1/validate`, which
+//! clients try first since the SFU got a second way to open the connection (the join request
+//! travels in one parameter). The SFU answers both with the same messages, so the correction
+//! of the TURN port applies to both. An SFU from before `/rtc/v1` answers 404 itself, and the
+//! client falls back to `/rtc`.
 
-use asaroton_service::rtc::signal::rewrite_turn_port;
+use asaroton_service::rtc::signal::{SIGNAL_PATH, rewrite_turn_port};
 use axum::{
     extract::{
         RawQuery, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
-    http::StatusCode,
+    http::{StatusCode, Uri},
     response::{IntoResponse, Response},
 };
 use futures::{SinkExt, StreamExt};
@@ -22,14 +28,26 @@ fn upstream(app: &AppState) -> Option<(String, Option<u16>)> {
     Some((settings.api_url.clone(), settings.advertised_turn_port))
 }
 
-/// `GET .../signal/rtc/validate`: the SFU's token check, which `LiveKit` clients call to get a
-/// readable error when the WebSocket connection is refused.
-pub async fn validate(State(app): State<AppState>, RawQuery(query): RawQuery) -> Response {
+/// The SFU's path for a request to the proxy: what follows the proxy's own prefix. Only the
+/// paths registered for these handlers get here.
+fn sfu_path(uri: &Uri) -> &str {
+    uri.path().strip_prefix(SIGNAL_PATH).unwrap_or("/rtc")
+}
+
+/// `GET .../signal/rtc/validate` and `.../signal/rtc/v1/validate`: the SFU's token check,
+/// which `LiveKit` clients call to get a readable error when the WebSocket connection is
+/// refused.
+pub async fn validate(
+    State(app): State<AppState>,
+    uri: Uri,
+    RawQuery(query): RawQuery,
+) -> Response {
     let Some((api_url, _)) = upstream(&app) else {
         return StatusCode::NOT_FOUND.into_response();
     };
     let url = format!(
-        "{api_url}/rtc/validate{}",
+        "{api_url}{}{}",
+        sfu_path(&uri),
         query.map_or(String::new(), |q| format!("?{q}"))
     );
     match reqwest::Client::new().get(&url).send().await {
@@ -46,9 +64,10 @@ pub async fn validate(State(app): State<AppState>, RawQuery(query): RawQuery) ->
     }
 }
 
-/// `GET .../signal/rtc`: the signalling WebSocket, relayed to the SFU.
+/// `GET .../signal/rtc` and `.../signal/rtc/v1`: the signalling WebSocket, relayed to the SFU.
 pub async fn websocket(
     State(app): State<AppState>,
+    uri: Uri,
     RawQuery(query): RawQuery,
     ws: WebSocketUpgrade,
 ) -> Response {
@@ -65,7 +84,8 @@ pub async fn websocket(
         })
         .unwrap_or(api_url);
     let url = format!(
-        "{ws_base}/rtc{}",
+        "{ws_base}{}{}",
+        sfu_path(&uri),
         query.map_or(String::new(), |q| format!("?{q}"))
     );
     ws.on_upgrade(move |socket| relay(socket, url, turn_port))
@@ -121,5 +141,20 @@ async fn relay(client: WebSocket, upstream_url: String, turn_port: Option<u16>) 
     tokio::select! {
         () = client_to_sfu => {}
         () = sfu_to_client => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_path_for_the_sfu_is_what_follows_the_prefix() {
+        for path in ["/rtc", "/rtc/validate", "/rtc/v1", "/rtc/v1/validate"] {
+            let uri: Uri = format!("{SIGNAL_PATH}{path}?access_token=x")
+                .parse()
+                .unwrap();
+            assert_eq!(sfu_path(&uri), path);
+        }
     }
 }
