@@ -1,4 +1,4 @@
--- asaroton schema v1: identity, rooms, events, state, account data, signing keys.
+-- tessera schema v1: identity, rooms, events, state, account data, signing keys.
 -- Conventions: *_ts columns are milliseconds since the Unix epoch (Matrix convention);
 -- event JSON is stored as text exactly as signed.
 

@@ -24,6 +24,9 @@ use sqlx::{PgPool, postgres::PgPoolOptions};
 use crate::{Error, Result, StoredEvent};
 
 /// Embedded migrations, applied by [`PostgresStore::migrate`].
+/// The schema migrations. A migration that has been applied anywhere is immutable: sqlx stores
+/// a checksum of each file and refuses to start on a database where one differs, comments
+/// included. `applied_migrations_are_unchanged` below pins those checksums.
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 /// The PostgreSQL implementation of [`crate::Store`].
@@ -117,4 +120,98 @@ where
     S: AsRef<str>,
 {
     ids.into_iter().map(|s| s.as_ref().to_owned()).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fmt::Write as _;
+
+    use super::MIGRATOR;
+
+    /// Changing an applied migration, even a comment in it, makes the server refuse to start
+    /// on every existing database ("migration N was previously applied but has been
+    /// modified"). A fresh database does not notice, so no other test and no Complement run
+    /// does either: the rename from tessera rewrote a comment in two of these files and was
+    /// only caught, and rolled back, on the first live host. The old name stays in those
+    /// comments for good. Add a line here for each new migration; never change an existing one.
+    #[test]
+    fn applied_migrations_are_unchanged() {
+        let expected: &[(i64, &str)] = &[
+            (
+                1,
+                "8f594feb661cf7c470201ee22db5ef05d75e6435806679b10f7059ecc8e5b16dda8a6806cb41c70bdb500a0b8c571f25",
+            ),
+            (
+                2,
+                "3911e4aaa1d62cf182c63294541c68d135340fa8e8a82e462eeffe5e2ff040dc68a43bc726d0c83b5fa33ccbfaecca99",
+            ),
+            (
+                3,
+                "18bf7fc07aadb38028eab1217bea34297f35aa5f110b4e35741f877ea6e72a990d47ac73fd3dcf8ff2afbd4bfd06369e",
+            ),
+            (
+                4,
+                "42ebcea848cadd992b897200663b78a9c81d1e9f899d9c9df6947f1d761c1edc0b65527fce002117ab97c1ce5bfa21e9",
+            ),
+            (
+                5,
+                "f5c2906cf05daa8e38c4e339445309ebd645534a585f06adc8854610cbc4c566dc99ab5021cc00aed35e248911f0474b",
+            ),
+            (
+                6,
+                "bb9de232eec960f3aba0c926fa34fb9c4ec4b1ee921e2fa9080b18267c37b3fdb367ac1d0c579a2e2c4aca63936725f1",
+            ),
+            (
+                7,
+                "0a1c7e4fda955a93bdc6881c1628d16fc46f11e1b2e1c984f03d5d5ddf54d4b35ab5421de8159c4c942bff2055a3192b",
+            ),
+            (
+                8,
+                "8f9e133ca7eaa034bc4c59db0b50f04e3d3c4c85b7bfad9b958e017491ce06c9ee56b8d23692e93e1ecdc156a62b4d58",
+            ),
+            (
+                9,
+                "9b61ab45039609069f7322f05a6ea944a295ce395783d5a4d17b09bd77c139473babb72e30c77e22c71de5d23e839c0e",
+            ),
+            (
+                10,
+                "5cfb1cd682ae2a40e676ecc1cb92d70f1943791bddbd465dcfb1910c21eb4bd082cd12cf971cc80de3a5c8c0c5ac270a",
+            ),
+            (
+                11,
+                "0d76d2fce542f0e515ce98de5fd84c4181d4c20d92cf7bc065c0b6236633115fb35d1a80f4bbf3fd5b12426d587627cf",
+            ),
+            (
+                12,
+                "f09838405e3e2410220bbffa22fd52230ca1e3943b4476150cebae7635b3165cc1ae227422ea2524518ff1257bad9f02",
+            ),
+            (
+                13,
+                "95652d4cf1abe73fa295d4c2eddcd9869a77ae8a68213372b4830e424e62fba21903f4df4a8000e3d079ece441c80d09",
+            ),
+        ];
+        let actual: Vec<(i64, String)> = MIGRATOR
+            .iter()
+            .map(|m| {
+                let hex = m.checksum.iter().fold(String::new(), |mut s, b| {
+                    let _ = write!(s, "{b:02x}");
+                    s
+                });
+                (m.version, hex)
+            })
+            .collect();
+        for (version, checksum) in expected {
+            let found = actual.iter().find(|(v, _)| v == version);
+            assert_eq!(
+                found.map(|(_, c)| c.as_str()),
+                Some(*checksum),
+                "migration {version} differs from the one existing databases have applied"
+            );
+        }
+        assert_eq!(
+            actual.len(),
+            expected.len(),
+            "a new migration needs its checksum added to this test"
+        );
+    }
 }
