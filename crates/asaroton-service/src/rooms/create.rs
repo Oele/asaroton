@@ -160,164 +160,177 @@ impl Services {
             .await?;
         let _guard = self.lock_room(&room_id).await;
 
-        // --- creator join ---------------------------------------------------------------
-        let member_content = self.member_content_for(&creator, "join", None).await?;
-        self.send_local_event_locked(
-            &mut ctx,
-            LocalEvent::new(
-                room_id.clone(),
-                creator.clone(),
-                TimelineEventType::RoomMember,
-            )
-            .state_key(creator.as_str())
-            .content(&member_content)?,
-        )
-        .await?;
-
-        // --- power levels ---------------------------------------------------------------
-        let mut pl = default_power_levels(&creator, &rules);
-        // Like Synapse: private rooms let every member invite.
-        if matches!(
-            preset,
-            RoomPreset::PrivateChat | RoomPreset::TrustedPrivateChat
-        ) {
-            pl["invite"] = json!(0);
-        }
-        if preset == RoomPreset::TrustedPrivateChat
-            && !rules.authorization.explicitly_privilege_room_creators
-        {
-            // (With privileged creators the invitees are creators instead, see above.)
-            for u in &req.invite {
-                pl["users"][u.as_str()] = json!(100);
-            }
-        }
-        if let Some(Value::Object(over)) = &req.power_level_content_override {
-            // Each key given replaces the default wholesale, maps included (as the reference
-            // implementation does), so `"events": {}` really means no per-type levels.
-            for (k, v) in over {
-                pl[k] = v.clone();
-            }
-        }
-        self.send_local_event_locked(
-            &mut ctx,
-            LocalEvent::new(
-                room_id.clone(),
-                creator.clone(),
-                TimelineEventType::RoomPowerLevels,
-            )
-            .state_key("")
-            .content(&pl)?,
-        )
-        .await
-        .map_err(|e| match e {
-            Error::Matrix {
-                kind: ruma::api::error::ErrorKind::Forbidden,
-                ..
-            } => Error::invalid_param("Invalid power_level_content_override."),
-            other => other,
-        })?;
-
-        // --- canonical alias ------------------------------------------------------------
-        if let Some(alias) = &alias {
-            self.store
-                .create_alias(RoomAlias {
-                    alias: alias.clone(),
-                    room_id: room_id.clone(),
-                    creator: Some(creator.clone()),
-                })
-                .await
-                .map_err(|e| match e {
-                    asaroton_store::Error::AlreadyExists(_) => Error::matrix(
-                        ruma::api::error::ErrorKind::RoomInUse,
-                        http::StatusCode::BAD_REQUEST,
-                        "Room alias already taken.",
-                    ),
-                    other => other.into(),
-                })?;
-        }
-
-        // --- preset state ---------------------------------------------------------------
-        let (join_rule, history, guest) = match preset {
-            RoomPreset::PublicChat => ("public", "shared", "forbidden"),
-            RoomPreset::PrivateChat | RoomPreset::TrustedPrivateChat => {
-                ("invite", "shared", "can_join")
-            }
-            _ => ("invite", "shared", "can_join"),
-        };
-        let initial_has = |ty: &str| {
-            req.initial_state
-                .iter()
-                .any(|(t, k, _)| t == ty && k.is_empty())
-        };
-        if !initial_has("m.room.join_rules") {
-            self.send_state_locked(
+        // The room's own events. When one of them cannot be written (the creator gave away
+        // the power to send the next one, an alias that somebody took in the meantime, the
+        // database), what there is of the room is taken away again: a room exists whole or
+        // not at all, and the creator's syncs have not been shown any of it.
+        let written: Result<()> = async {
+            // --- creator join ---------------------------------------------------------------
+            let member_content = self.member_content_for(&creator, "join", None).await?;
+            self.send_local_event_locked(
                 &mut ctx,
-                &room_id,
-                &creator,
-                "m.room.join_rules",
-                "",
-                json!({ "join_rule": join_rule }),
+                LocalEvent::new(
+                    room_id.clone(),
+                    creator.clone(),
+                    TimelineEventType::RoomMember,
+                )
+                .state_key(creator.as_str())
+                .content(&member_content)?,
             )
             .await?;
-        }
-        if !initial_has("m.room.history_visibility") {
-            self.send_state_locked(
-                &mut ctx,
-                &room_id,
-                &creator,
-                "m.room.history_visibility",
-                "",
-                json!({ "history_visibility": history }),
-            )
-            .await?;
-        }
-        if guest == "can_join" && !initial_has("m.room.guest_access") {
-            self.send_state_locked(
-                &mut ctx,
-                &room_id,
-                &creator,
-                "m.room.guest_access",
-                "",
-                json!({ "guest_access": guest }),
-            )
-            .await?;
-        }
 
-        // --- initial_state, name, topic -------------------------------------------------
-        for (ty, key, content) in &req.initial_state {
-            self.send_state_locked(&mut ctx, &room_id, &creator, ty, key, content.clone())
+            // --- power levels ---------------------------------------------------------------
+            let mut pl = default_power_levels(&creator, &rules);
+            // Like Synapse: private rooms let every member invite.
+            if matches!(
+                preset,
+                RoomPreset::PrivateChat | RoomPreset::TrustedPrivateChat
+            ) {
+                pl["invite"] = json!(0);
+            }
+            if preset == RoomPreset::TrustedPrivateChat
+                && !rules.authorization.explicitly_privilege_room_creators
+            {
+                // (With privileged creators the invitees are creators instead, see above.)
+                for u in &req.invite {
+                    pl["users"][u.as_str()] = json!(100);
+                }
+            }
+            if let Some(Value::Object(over)) = &req.power_level_content_override {
+                // Each key given replaces the default wholesale, maps included (as the reference
+                // implementation does), so `"events": {}` really means no per-type levels.
+                for (k, v) in over {
+                    pl[k] = v.clone();
+                }
+            }
+            self.send_local_event_locked(
+                &mut ctx,
+                LocalEvent::new(
+                    room_id.clone(),
+                    creator.clone(),
+                    TimelineEventType::RoomPowerLevels,
+                )
+                .state_key("")
+                .content(&pl)?,
+            )
+            .await
+            .map_err(|e| match e {
+                Error::Matrix {
+                    kind: ruma::api::error::ErrorKind::Forbidden,
+                    ..
+                } => Error::invalid_param("Invalid power_level_content_override."),
+                other => other,
+            })?;
+
+            // --- canonical alias ------------------------------------------------------------
+            if let Some(alias) = &alias {
+                self.store
+                    .create_alias(RoomAlias {
+                        alias: alias.clone(),
+                        room_id: room_id.clone(),
+                        creator: Some(creator.clone()),
+                    })
+                    .await
+                    .map_err(|e| match e {
+                        asaroton_store::Error::AlreadyExists(_) => Error::matrix(
+                            ruma::api::error::ErrorKind::RoomInUse,
+                            http::StatusCode::BAD_REQUEST,
+                            "Room alias already taken.",
+                        ),
+                        other => other.into(),
+                    })?;
+            }
+
+            // --- preset state ---------------------------------------------------------------
+            let (join_rule, history, guest) = match preset {
+                RoomPreset::PublicChat => ("public", "shared", "forbidden"),
+                RoomPreset::PrivateChat | RoomPreset::TrustedPrivateChat => {
+                    ("invite", "shared", "can_join")
+                }
+                _ => ("invite", "shared", "can_join"),
+            };
+            let initial_has = |ty: &str| {
+                req.initial_state
+                    .iter()
+                    .any(|(t, k, _)| t == ty && k.is_empty())
+            };
+            if !initial_has("m.room.join_rules") {
+                self.send_state_locked(
+                    &mut ctx,
+                    &room_id,
+                    &creator,
+                    "m.room.join_rules",
+                    "",
+                    json!({ "join_rule": join_rule }),
+                )
                 .await?;
-        }
-        if let Some(name) = &req.name {
-            self.send_state_locked(
-                &mut ctx,
-                &room_id,
-                &creator,
-                "m.room.name",
-                "",
-                json!({ "name": name }),
-            )
-            .await?;
-        }
-        if let Some(topic) = &req.topic {
-            // Plain `topic` plus the extensible `m.topic` representation (spec v1.15+).
-            let content = json!({
-                "topic": topic,
-                "m.topic": { "m.text": [{ "body": topic }] },
-            });
-            self.send_state_locked(&mut ctx, &room_id, &creator, "m.room.topic", "", content)
+            }
+            if !initial_has("m.room.history_visibility") {
+                self.send_state_locked(
+                    &mut ctx,
+                    &room_id,
+                    &creator,
+                    "m.room.history_visibility",
+                    "",
+                    json!({ "history_visibility": history }),
+                )
                 .await?;
+            }
+            if guest == "can_join" && !initial_has("m.room.guest_access") {
+                self.send_state_locked(
+                    &mut ctx,
+                    &room_id,
+                    &creator,
+                    "m.room.guest_access",
+                    "",
+                    json!({ "guest_access": guest }),
+                )
+                .await?;
+            }
+
+            // --- initial_state, name, topic -------------------------------------------------
+            for (ty, key, content) in &req.initial_state {
+                self.send_state_locked(&mut ctx, &room_id, &creator, ty, key, content.clone())
+                    .await?;
+            }
+            if let Some(name) = &req.name {
+                self.send_state_locked(
+                    &mut ctx,
+                    &room_id,
+                    &creator,
+                    "m.room.name",
+                    "",
+                    json!({ "name": name }),
+                )
+                .await?;
+            }
+            if let Some(topic) = &req.topic {
+                // Plain `topic` plus the extensible `m.topic` representation (spec v1.15+).
+                let content = json!({
+                    "topic": topic,
+                    "m.topic": { "m.text": [{ "body": topic }] },
+                });
+                self.send_state_locked(&mut ctx, &room_id, &creator, "m.room.topic", "", content)
+                    .await?;
+            }
+            if let Some(alias) = &alias {
+                self.send_state_locked(
+                    &mut ctx,
+                    &room_id,
+                    &creator,
+                    "m.room.canonical_alias",
+                    "",
+                    json!({ "alias": alias }),
+                )
+                .await?;
+            }
+            Ok(())
         }
-        if let Some(alias) = &alias {
-            self.send_state_locked(
-                &mut ctx,
-                &room_id,
-                &creator,
-                "m.room.canonical_alias",
-                "",
-                json!({ "alias": alias }),
-            )
-            .await?;
+        .await;
+        if let Err(e) = written {
+            self.discard_unfinished_room(&room_id).await;
+            drop(making);
+            return Err(e);
         }
 
         // --- invites --------------------------------------------------------------------
@@ -369,7 +382,13 @@ impl Services {
             let making = self
                 .rooms_in_the_making
                 .begin(&self.notifier, creator, &room_id);
-            let stored = self.send_local_event_locked(ctx, create_ev).await?;
+            let stored = match self.send_local_event_locked(ctx, create_ev).await {
+                Ok(stored) => stored,
+                Err(e) => {
+                    self.discard_unfinished_room(&room_id).await;
+                    return Err(e);
+                }
+            };
             making.first_event_at(stored.stream_ordering);
             return Ok((room_id, making));
         }
@@ -419,10 +438,26 @@ impl Services {
         let making = self
             .rooms_in_the_making
             .begin(&self.notifier, creator, &room_id);
-        let stored = self.send_local_event_locked(ctx, ev).await?;
+        let stored = match self.send_local_event_locked(ctx, ev).await {
+            Ok(stored) => stored,
+            Err(e) => {
+                self.discard_unfinished_room(&room_id).await;
+                return Err(e);
+            }
+        };
         debug_assert_eq!(stored.pdu.event_id(), pdu.event_id());
         making.first_event_at(stored.stream_ordering);
         Ok((room_id, making))
+    }
+
+    /// Takes away what was written of a room that could not be created in full. Nobody has
+    /// seen it: it is kept out of the creator's syncs until it is whole, and nobody else is
+    /// in it.
+    async fn discard_unfinished_room(&self, room_id: &ruma::RoomId) {
+        if let Err(e) = self.store.purge_room(room_id).await {
+            tracing::warn!(%room_id, error = %e, "could not remove a room whose creation failed");
+        }
+        self.forget_room_context(room_id);
     }
 
     pub(crate) async fn send_state_locked(

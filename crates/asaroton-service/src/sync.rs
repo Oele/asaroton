@@ -453,6 +453,20 @@ impl Services {
             };
         let mut newly_joined: Vec<OwnedRoomId> = Vec::new();
         for m in &memberships {
+            // A membership that changed after this answer's position belongs to the next
+            // answer, whose window it lies in: someone invited or joined in the moment
+            // between the position being read and the memberships, or, when the answer
+            // stops short of a room that is still being created, after the point where it
+            // stops. Reported here as well, it would come twice. (Not so for a leave: the
+            // room's last events before it have to come now or never.)
+            if m.stream_ordering > now.events
+                && matches!(
+                    m.membership,
+                    MembershipState::Join | MembershipState::Invite | MembershipState::Knock
+                )
+            {
+                continue;
+            }
             let changed_in_window = since.is_none_or(|s| m.stream_ordering > s.events);
             match m.membership {
                 MembershipState::Join => {

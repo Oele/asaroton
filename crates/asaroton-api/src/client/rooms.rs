@@ -79,22 +79,27 @@ pub async fn create(
         .map(json_from_raw)
         .transpose()?;
     let initial_state = asaroton_service::rooms::create::initial_state_from_raw(&b.initial_state)?;
-    let room_id = services
-        .create_room(CreateRoomRequest {
-            creator: sender.user_id.clone(),
-            room_version: parse_room_version(b.room_version.as_ref())?,
-            visibility: Some(b.visibility.clone()),
-            preset: b.preset.clone(),
-            name: b.name.clone(),
-            topic: b.topic.clone(),
-            room_alias_name: b.room_alias_name.clone(),
-            invite: b.invite.clone(),
-            is_direct: b.is_direct,
-            creation_content,
-            power_level_content_override: pl_override,
-            initial_state,
-        })
-        .await?;
+    let request = CreateRoomRequest {
+        creator: sender.user_id.clone(),
+        room_version: parse_room_version(b.room_version.as_ref())?,
+        visibility: Some(b.visibility.clone()),
+        preset: b.preset.clone(),
+        name: b.name.clone(),
+        topic: b.topic.clone(),
+        room_alias_name: b.room_alias_name.clone(),
+        invite: b.invite.clone(),
+        is_direct: b.is_direct,
+        creation_content,
+        power_level_content_override: pl_override,
+        initial_state,
+    };
+    // A room is written as a row of events. In a task of its own that goes on to the end
+    // when the client hangs up halfway; as part of the request it would stop there, and a
+    // room without, say, its encryption event would be left behind.
+    let app = std::sync::Arc::clone(&services);
+    let room_id = tokio::spawn(async move { app.create_room(request).await })
+        .await
+        .map_err(|e| Error::internal(format!("creating a room: {e}")))??;
     Ok(create_room::v3::Response::new(room_id))
 }
 

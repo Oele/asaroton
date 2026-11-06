@@ -13,14 +13,16 @@ A client built on matrix-rust-sdk then takes the room for unencrypted until a la
 says otherwise, and a message sent in between leaves the client in plain text. Here one
 device creates encrypted rooms as fast as it can, one after the other and four at a time,
 while another device of the same user long-polls. For every room, the first answer that
-mentions it has to hold the whole room. Both sync flavours. And a `createRoom` that fails
-halfway does not leave syncs waiting.
+mentions it has to hold the whole room. Both sync flavours.
+
+A room exists whole or not at all. A `createRoom` that fails halfway takes away what it
+wrote, and one whose client hangs up halfway goes on to the end.
 
 Needs what scripts/fedlab.py needs. Takes about half a minute.
 
 Usage: scripts/createroomtest.py [--keep]
 """
-import json, threading, time, urllib.parse
+import json, socket, threading, time, urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 
 from fedlab import check, run_lab, wait_for
@@ -125,6 +127,8 @@ def run(hs, peers):
     st, r = hs.req("GET", "/_matrix/client/v3/sync?timeout=0", None, watcher)
     assert st == 200, r
     since, got, created, stop = r["next_batch"], [], [], threading.Event()
+    _, host_token = hs.register("host")
+    invited_to, invitations = [], {}
     # A timeline long enough for everything that waits behind a room in the making.
     wide = urllib.parse.quote(json.dumps({"room": {"timeline": {"limit": 1000}}}))
 
@@ -142,7 +146,15 @@ def run(hs, peers):
                 break
             created.append(r["room_id"])
 
-    threads = [threading.Thread(target=chatter, daemon=True), threading.Thread(target=creating, daemon=True)]
+    def inviting():
+        # Someone else invites the user into rooms of theirs, all the while.
+        while not stop.is_set():
+            st, r = create(host_token, {"preset": "private_chat", "invite": [user]})
+            if st != 200:
+                break
+            invited_to.append(r["room_id"])
+
+    threads = [threading.Thread(target=t, daemon=True) for t in (chatter, creating, inviting)]
     for t in threads:
         t.start()
     bodies, ends = [], time.monotonic() + 4
@@ -152,6 +164,8 @@ def run(hs, peers):
         st, r = hs.req("GET", f"/_matrix/client/v3/sync?timeout=300&since={since}&filter={wide}", None, watcher)
         assert st == 200, r
         since = r["next_batch"]
+        for room_id in r.get("rooms", {}).get("invite", {}):
+            invitations[room_id] = invitations.get(room_id, 0) + 1
         old = r.get("rooms", {}).get("join", {}).get(old_room, {}).get("timeline", {})
         assert not old.get("limited"), "the test's timeline is too short for what waited"
         bodies.extend(e["content"]["body"] for e in old.get("events", []) if e["type"] == "m.room.message")
@@ -165,6 +179,9 @@ def run(hs, peers):
         read_on()
     sent = got[0] if got else 0
     check(len(created) > 5, f"rooms were being created all the while ({len(created)})")
+    twice = sorted(n for n in invitations.values() if n != 1)
+    check(len(invited_to) > 5 and set(invitations) == set(invited_to) and not twice,
+          f"every invitation that arrived meanwhile is reported, and once ({len(invitations)} of {len(invited_to)}; reported more than once: {len(twice)})")
     check(sent > 5 and bodies == [f"message {n}" for n in range(sent)], f"the messages of another room arrive once and in order meanwhile ({len(bodies)} of {sent}, {len(set(bodies))} different)")
 
     print("-- a createRoom that fails halfway")
@@ -176,15 +193,39 @@ def run(hs, peers):
     # power levels event itself is still allowed, and the join rules after it are not.
     st, r = create(creator, encrypted(0, room_version="11", power_level_content_override={"users": {}}))
     check(st != 200, f"a room whose creator gives away all power is turned down ({st} {r.get('errcode')})")
-    # What was written of the room is there; nothing keeps it out of sync for good. (A room
-    # that is still marked as being written would not be in the answer.)
+    # The create event, the membership and the power levels had been written by then.
     st, r = hs.req("GET", f"/_matrix/client/v3/sync?timeout=0&since={since}", None, creator)
     left_behind = r.get("rooms", {}).get("join", {})
-    check(st == 200 and len(left_behind) == 1, f"and what was written of it shows in the creator's next sync ({st}, {len(left_behind)} room)")
+    st2, joined = hs.req("GET", "/_matrix/client/v3/joined_rooms", None, creator)
+    check(st == 200 and not left_behind and joined.get("joined_rooms") == [],
+          f"and nothing of it is left: not over sync, not among the creator's rooms ({len(left_behind)}, {joined.get('joined_rooms')})")
     st, r = create(creator, encrypted(1, invite=[user.replace("failing", "creator0")]))
     check(st == 200, f"the same user can create a room afterwards ({st})")
     invited = hs.req("GET", f"/_matrix/client/v3/rooms/{urllib.parse.quote(r['room_id'])}/members?membership=invite", None, creator)[1]
     check(len(invited.get("chunk", [])) == 1, "and its invitation went out")
+
+    print("-- a client that hangs up halfway")
+    user, creator = hs.register("impatient")
+    host, port = hs.url.removeprefix("http://").split(":")
+    for n in range(12):
+        body = json.dumps(encrypted(n)).encode()
+        request = (f"POST /_matrix/client/v3/createRoom HTTP/1.1\r\nHost: {host}:{port}\r\nAuthorization: Bearer {creator}\r\n"
+                   f"Content-Type: application/json\r\nContent-Length: {len(body)}\r\n\r\n").encode() + body
+        with socket.create_connection((host, int(port))) as s_:
+            s_.sendall(request)
+            # Long enough for the request to be taken up, too short for the room to be done.
+            time.sleep(0.004 * (n % 6))
+    wait_for(lambda: False, 2)
+    st, joined = hs.req("GET", "/_matrix/client/v3/joined_rooms", None, creator)
+    rooms = joined.get("joined_rooms", [])
+    partial = {}
+    for room_id in rooms:
+        st, state = hs.req("GET", f"/_matrix/client/v3/rooms/{urllib.parse.quote(room_id)}/state", None, creator)
+        missing = WHOLE - {e["type"] for e in state}
+        if missing:
+            partial[room_id] = sorted(missing)
+    check(len(rooms) >= 3, f"rooms come into being although nobody waited for the answer ({len(rooms)} of 12)")
+    check(not partial, f"and every one of them is whole ({len(partial)} are not: {sorted({t for m in partial.values() for t in m})})")
 
 
 if __name__ == "__main__":
