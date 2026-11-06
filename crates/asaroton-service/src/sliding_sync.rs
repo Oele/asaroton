@@ -39,10 +39,10 @@ const BUMP_EVENT_TYPES: &[&str] = &[
 ];
 const MAX_TIMELINE_LIMIT: usize = 1000;
 const DEFAULT_TO_DEVICE_LIMIT: usize = 100;
-/// How many members of one room a connection is remembered to have been given (see
-/// `RoomTrack::members_given`). Past this the list starts over with the people of the newest
-/// timeline; the others are sent again when a timeline is about them.
-const MAX_MEMBERS_REMEMBERED: usize = 500;
+/// How many state events of one room a connection is remembered to have been given (see
+/// [`StateGiven`]). Past this the memberships are forgotten, except those of the people the
+/// newest timeline is about; the others are sent again when a timeline is about them.
+const MAX_STATE_REMEMBERED: usize = 1000;
 
 // ------------------------------------------------------------------ requests
 
@@ -144,9 +144,9 @@ pub struct RoomResult {
     pub notification_count: u64,
     pub highlight_count: u64,
     pub txn_ids: HashMap<OwnedEventId, String>,
-    /// Whose membership the connection has been given once this answer arrives, when members
-    /// are loaded lazily. Kept with the connection, not sent.
-    pub(crate) members_given: Arc<BTreeSet<OwnedUserId>>,
+    /// The state the connection has of the room once this answer arrives. Kept with the
+    /// connection, not sent.
+    pub(crate) state_given: Arc<StateGiven>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -226,10 +226,72 @@ struct RoomTrack {
     /// only when it changes. Without this an invited room was part of every response and the
     /// request never long-polled.
     invite: Option<u64>,
-    /// With lazily loaded members (`$LAZY`): whose membership this connection has been
-    /// given. Someone not in here gets their membership sent along when a timeline is about
-    /// them, and a change to someone in here is sent whether the timeline shows it or not.
-    members_given: Arc<BTreeSet<OwnedUserId>>,
+    /// The state this connection has of the room.
+    state_given: Arc<StateGiven>,
+}
+
+/// The state a connection has of one room: for each state key, the event it was sent as
+/// required state.
+///
+/// Two things rest on it. State the connection has is not sent again, however often the
+/// comparison of the room's state then and now comes up with it: in a room with two loose
+/// ends (events of two servers that did not know of each other) that comparison keeps finding
+/// the same change until the ends are tied, and an answer that repeated it each time would
+/// never wait. And with lazily loaded members (`$LAZY`) it says whose membership the
+/// connection has: someone it lacks gets theirs sent along when a timeline is about them, and
+/// a change to someone it has is sent whether the timeline shows it or not.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct StateGiven(BTreeMap<String, BTreeMap<String, OwnedEventId>>);
+
+impl StateGiven {
+    fn has_member(&self, user: &UserId) -> bool {
+        self.0
+            .get("m.room.member")
+            .is_some_and(|members| members.contains_key(user.as_str()))
+    }
+
+    /// Whether the connection has exactly this event for its state key.
+    fn has(&self, ev: &StoredEvent) -> bool {
+        ev.pdu.state_tuple().is_some_and(|(ty, key)| {
+            self.0
+                .get(ty.to_string().as_str())
+                .and_then(|keys| keys.get(key))
+                .is_some_and(|id| id == ev.pdu.event_id())
+        })
+    }
+
+    fn len(&self) -> usize {
+        self.0.values().map(BTreeMap::len).sum()
+    }
+
+    /// What the connection has after it was sent `sent` on top of `given`. `about` and `user`
+    /// are whose memberships are kept when there is too much to remember.
+    fn with(
+        given: Option<&Arc<Self>>,
+        sent: &[StoredEvent],
+        about: &HashSet<OwnedUserId>,
+        user: &UserId,
+    ) -> Arc<Self> {
+        if sent.is_empty() {
+            return given.cloned().unwrap_or_default();
+        }
+        let mut next = given.map_or_else(Self::default, |g| (**g).clone());
+        for ev in sent {
+            if let Some((ty, key)) = ev.pdu.state_tuple() {
+                next.0
+                    .entry(ty.to_string())
+                    .or_default()
+                    .insert(key.to_owned(), ev.pdu.event_id().to_owned());
+            }
+        }
+        if next.len() > MAX_STATE_REMEMBERED
+            && let Some(members) = next.0.get_mut("m.room.member")
+        {
+            let keep: HashSet<&str> = about.iter().map(|u| u.as_str()).collect();
+            members.retain(|k, _| k == user.as_str() || keep.contains(k.as_str()));
+        }
+        Arc::new(next)
+    }
 }
 
 /// An order-independent fingerprint of an invite's stripped state.
@@ -689,7 +751,7 @@ impl Services {
                     notification_count: r.notification_count,
                     highlight_count: r.highlight_count,
                     invite,
-                    members_given: Arc::clone(&r.members_given),
+                    state_given: Arc::clone(&r.state_given),
                 },
             );
             if !unchanged {
@@ -933,12 +995,11 @@ impl Services {
         // A room this connection has only been sent as an invitation or a knock starts over
         // when the user joins: all it got was stripped state, and now there is history to
         // read. Sent as an ordinary update, the join would look like the start of the room
-        // and the client would have no token to page back with.
+        // and the client would have no token to page back with. Someone who comes back to a
+        // room they had left starts over as well: what the connection has of the room is the
+        // room as it was when they went, and what happened since is not all theirs to read.
         let initial = track.is_none_or(|t| {
-            matches!(
-                t.membership,
-                MembershipState::Invite | MembershipState::Knock
-            ) && m.membership == MembershipState::Join
+            t.membership != MembershipState::Join && m.membership == MembershipState::Join
         });
         let mut out = RoomResult {
             membership: m.membership.clone(),
@@ -960,7 +1021,7 @@ impl Services {
             notification_count: 0,
             highlight_count: 0,
             txn_ids: HashMap::new(),
-            members_given: Arc::default(),
+            state_given: Arc::default(),
         };
         // An invite or a pending knock shows the room's stripped state and nothing else: the
         // user is not in the room, so its timeline and state are not theirs to read. (A knock
@@ -1069,21 +1130,21 @@ impl Services {
             }
         }
 
-        // Required state: the whole current state for a first (or widened) request, afterwards
-        // the changes since the last position. Events the timeline also carries are included
-        // either way, as Synapse does: the Rust SDK reads room state from `required_state` only
-        // and ignores state events in the timeline.
+        // Required state: the whole current state for a first request, or for one that asks
+        // for more state than before; afterwards the changes since the last position. Events
+        // the timeline also carries are included either way, as Synapse does: the Rust SDK
+        // reads room state from `required_state` only and ignores state events in the
+        // timeline.
         let expanded = track.is_some_and(|t| !sel.required_state.is_subset(&t.required_state));
         let full = initial || expanded;
+        // What the connection has of the room's state. A room that starts over starts with
+        // nothing.
+        let given = track.filter(|_| !initial).map(|t| &t.state_given);
         // Lazily loaded members: the people this timeline is about, and the people the
         // connection was given before, whose changes it gets from then on.
         let about = timeline_members(&events);
         let lazy = loads_members_lazily(&sel.required_state);
-        let given = track
-            .filter(|_| lazy && !full)
-            .map(|t| Arc::clone(&t.members_given));
-        let lazy_member =
-            |u: &UserId| about.contains(u) || given.as_ref().is_some_and(|g| g.contains(u));
+        let lazy_member = |u: &UserId| about.contains(u) || given.is_some_and(|g| g.has_member(u));
         // The state group right after the leave, for someone who left as a member. After a
         // declined invite or a withdrawn knock the user was never in the room and there is no
         // state to show.
@@ -1122,45 +1183,47 @@ impl Services {
         } else {
             Vec::new()
         };
-        out.required_state = pool
+        let mut state: Vec<StoredEvent> = pool
             .into_iter()
             .filter(|e| required_state_matches(&sel.required_state, e, user, lazy_member))
             .collect();
-        if lazy {
+        if lazy && !full {
             // Someone the timeline is about whose membership the connection does not have
             // gets it sent along, also when it did not change: a person who speaks for the
-            // first time, or the people of older events when the timeline got longer. (In a
-            // full answer the filter above has seen to that. A room the user is out of is
-            // not read past their leave.)
-            if !full && !left {
-                let have: HashSet<&str> = out
-                    .required_state
-                    .iter()
-                    .filter(|e| e.pdu.event_type() == &TimelineEventType::RoomMember)
-                    .filter_map(|e| e.pdu.state_key())
+            // first time, whoever removed the user, or the people of older events when the
+            // timeline got longer. (In a full answer the filter above has seen to that.)
+            let have: HashSet<&str> = state
+                .iter()
+                .filter(|e| e.pdu.event_type() == &TimelineEventType::RoomMember)
+                .filter_map(|e| e.pdu.state_key())
+                .collect();
+            let wanted: Vec<(StateEventType, String)> = about
+                .iter()
+                .filter(|u| !given.is_some_and(|g| g.has_member(u)) && !have.contains(u.as_str()))
+                .map(|u| (StateEventType::RoomMember, u.to_string()))
+                .collect();
+            if wanted.is_empty() {
+            } else if !left {
+                let found = self.store.current_state_pdus_for(room_id, &wanted).await?;
+                state.extend(found);
+            } else if let Some(group) = leave_state {
+                // A room the user is out of is not read past their leave.
+                let ids: Vec<OwnedEventId> = self
+                    .store
+                    .state_at_group_filtered(group, &wanted)
+                    .await?
+                    .into_iter()
+                    .map(|e| e.event_id)
                     .collect();
-                let wanted: Vec<(StateEventType, String)> = about
-                    .iter()
-                    .filter(|u| {
-                        *u != user
-                            && !given.as_ref().is_some_and(|g| g.contains(*u))
-                            && !have.contains(u.as_str())
-                    })
-                    .map(|u| (StateEventType::RoomMember, u.to_string()))
-                    .collect();
-                if !wanted.is_empty() {
-                    let found = self.store.current_state_pdus_for(room_id, &wanted).await?;
-                    out.required_state.extend(found);
-                }
+                state.extend(self.store.get_events(&ids).await?);
             }
-            out.members_given = match given {
-                Some(g) if about.iter().all(|u| g.contains(u)) => g,
-                Some(g) if g.len() + about.len() <= MAX_MEMBERS_REMEMBERED => {
-                    Arc::new(g.iter().chain(&about).cloned().collect())
-                }
-                _ => Arc::new(about.iter().cloned().collect()),
-            };
         }
+        // State the connection has is not sent again (see `StateGiven`).
+        if let Some(g) = given {
+            state.retain(|e| !g.has(e));
+        }
+        out.state_given = StateGiven::with(given, &state, &about, user);
+        out.required_state = state;
 
         // Name, avatar, counts and heroes. A former member gets the name and avatar as they
         // were when they left; who is in the room now is none of their business.

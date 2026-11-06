@@ -7,21 +7,27 @@ about (the person invited, removed or banned). Clients built on matrix-rust-sdk 
 state from `required_state` only, so a membership that is in the timeline alone never reaches
 their list of members.
 
-Three rules are checked, with Alice syncing and others acting:
+The rules that are checked, with Alice syncing and others acting:
 
   1. The person a membership event is about comes as state, whoever sent the event.
   2. Someone who speaks for the first time on a connection comes as state too, although
      their membership did not change.
   3. A member the connection has been given stays up to date, also when the change itself
-     falls outside a short timeline. And it is still lazy: not everyone is sent.
+     falls outside a short timeline, and also after the client asked for more state. And it
+     is still lazy: not everyone is sent.
+  4. Whoever removes Alice comes as state with the removal, and when she comes back the
+     room starts over.
+  5. State the connection has is not sent again. In a room with two loose ends (events of
+     two servers that did not know of each other) the server's comparison of "then" and
+     "now" keeps finding the same change; an answer that repeated it would never wait.
 
 Needs what scripts/fedlab.py needs. Takes a few seconds.
 
 Usage: scripts/sslazytest.py [--keep]
 """
-import urllib.parse, uuid
+import time, urllib.parse, uuid
 
-from fedlab import check, run_lab
+from fedlab import check, run_lab, signed_event
 
 SLIDING = "/_matrix/client/unstable/org.matrix.simplified_msc3575/sync"
 STATE = [["m.room.create", ""], ["m.room.encryption", ""], ["m.room.member", "$LAZY"], ["m.room.member", "$ME"],
@@ -127,6 +133,93 @@ def run(hs, peers):
     got = narrow.answer()
     members = state_members(got)
     check(len(got.get("timeline", [])) > 1 and {carol, dave, erin} <= set(members), f"a longer timeline brings the members it is about ({members})")
+    check(bob not in members and alice not in members, f"and not the ones the connection has ({sorted(members)})")
+    # The client asks for more state on the same connection. What it has is not sent again,
+    # and the members it was given are still kept up to date.
+    narrow.body["room_subscriptions"][room_id].update(timeline_limit=1, required_state=STATE + [["m.room.topic", ""]])
+    st, r = hs.req("PUT", f"{room}/state/m.room.topic", {"topic": "Laziness"}, a)
+    assert st == 200, r
+    got = narrow.answer()
+    types = sorted(e["type"] for e in got.get("required_state", []))
+    check(types == ["m.room.topic"], f"asking for more state brings what is new to the connection and nothing else ({types})")
+    st, r = hs.req("PUT", f"/_matrix/client/v3/profile/{q(bob)}/displayname", {"displayname": "Bobby"}, b)
+    assert st == 200, r
+    hs.message(a, room_id, "Alice, once more")
+    got = narrow.answer()
+    names = {e["state_key"]: e["content"].get("displayname") for e in got.get("required_state", []) if e["type"] == "m.room.member"}
+    check(names.get(bob) == "Bobby", f"after that, a change to Bob still comes although the timeline does not hold it ({names})")
+
+    print("-- whoever removes Alice, and coming back")
+    st, created = hs.req("POST", "/_matrix/client/v3/createRoom", {"preset": "public_chat", "name": "Door"}, d)
+    assert st == 200, created
+    door_id = created["room_id"]
+    door = f"/_matrix/client/v3/rooms/{q(door_id)}"
+    st, r = hs.req("POST", f"{door}/join", {}, a)
+    assert st == 200, r
+    hs.message(a, door_id, "Alice is in")
+    conn = Connection(hs, a, door_id, 1)
+    first = conn.answer()
+    check(state_members(first) == {alice: "join"}, f"Alice knows only herself in the new room ({state_members(first)})")
+    st, r = hs.req("POST", f"{door}/kick", {"user_id": alice}, d)
+    assert st == 200, r
+    got = conn.answer()
+    check(state_members(got) == {alice: "leave", dave: "join"}, f"being removed brings her own membership and that of who did it ({state_members(got)}; timeline {timeline(got)})")
+    hs.message(d, door_id, "said while Alice was out")
+    st, r = hs.req("POST", f"{door}/join", {}, a)
+    assert st == 200, r
+    got = conn.answer()
+    check(got.get("initial") is True and state_members(got).get(alice) == "join", f"coming back starts the room over (initial: {got.get('initial')}, {state_members(got)})")
+    hs.message(d, door_id, "Dave speaks")
+    got = conn.answer()
+    check(timeline(got) == [("m.room.message", None, "Dave speaks")] and state_members(got) == {dave: "join"},
+          f"and Dave's membership comes with his next message ({state_members(got)}; timeline {timeline(got)})")
+
+    print("-- a room with two loose ends")
+    mock = peers["mock"]
+    st, created = hs.req("POST", "/_matrix/client/v3/createRoom", {"preset": "public_chat", "room_version": "11", "name": "Fork"}, a)
+    assert st == 200, created
+    fork_id = created["room_id"]
+    remote = mock.join(hs.fed, fork_id, "remote")
+    st, state = hs.req("GET", f"/_matrix/client/v3/rooms/{q(fork_id)}/state", None, a)
+    assert st == 200, state
+    ids = {(e["type"], e["state_key"]): e["event_id"] for e in state}
+    create, power, rules, joined = ids[("m.room.create", "")], ids[("m.room.power_levels", "")], ids[("m.room.join_rules", "")], ids[("m.room.member", remote)]
+    st, sent = hs.req("PUT", f"/_matrix/client/v3/rooms/{q(fork_id)}/send/m.room.message/{uuid.uuid4().hex}", {"msgtype": "m.text", "body": "the common past"}, a)
+    assert st == 200, sent
+    past = sent["event_id"]
+    clock = [int(time.time() * 1000)]
+
+    def remote_event(kind, content, auth, state_key=None):
+        # Both events build on the same past, as two servers do that have not heard of
+        # each other's event.
+        clock[0] += 1000
+        ev = {"type": kind, "room_id": fork_id, "sender": remote, "content": content, "auth_events": auth, "prev_events": [past],
+              "depth": 20, "origin_server_ts": clock[0]}
+        if state_key is not None:
+            ev["state_key"] = state_key
+        event_id, ev = signed_event(mock.name, mock.key, "ed25519:k1", ev)
+        st, r = mock.fed(hs.fed, "PUT", f"/_matrix/federation/v1/send/{uuid.uuid4().hex}", {"origin": mock.name, "origin_server_ts": clock[0], "pdus": [ev], "edus": []})
+        assert st == 200 and r.get("pdus", {}).get(event_id) == {}, (st, r)
+        return event_id
+
+    for label, members in (("lazily loaded members", "$LAZY"), ("all members", "*")):
+        conn = Connection(hs, a, fork_id, 20)
+        for entry in (conn.body["lists"]["all"], conn.body["room_subscriptions"][fork_id]):
+            entry["required_state"] = [["m.room.create", ""], ["m.room.member", members], ["m.room.name", ""]]
+        conn.answer()
+        renamed = remote_event("m.room.member", {"membership": "join", "displayname": f"Remote ({label})"}, [create, power, rules, joined], remote)
+        got = conn.answer()
+        names = {e["state_key"]: e["content"].get("displayname") for e in got.get("required_state", []) if e["type"] == "m.room.member"}
+        check(names.get(remote) == f"Remote ({label})", f"{label}: a name change over federation comes as state ({names})")
+        remote_event("m.room.message", {"msgtype": "m.text", "body": "from the other end"}, [create, power, joined])
+        got = conn.answer()
+        check([t[2] for t in timeline(got)] == ["from the other end"], f"{label}: a message that does not build on the change arrives ({timeline(got)})")
+        repeats = [conn.answer() for _ in range(3)]
+        check(repeats == [{}, {}, {}], f"{label}: and after that the room is not in the answers ({[state_members(r) for r in repeats]})")
+        # The next answers build on a new name, so the second round starts from this one.
+        joined = renamed
+        hs.message(a, fork_id, f"Alice ties the ends ({label})")
+        past = hs.req("GET", f"/_matrix/client/v3/rooms/{q(fork_id)}/messages?dir=b&limit=1", None, a)[1]["chunk"][0]["event_id"]
 
 
 if __name__ == "__main__":
