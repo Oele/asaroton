@@ -3,7 +3,7 @@ use ruma::{OwnedRoomId, RoomId, UserId};
 use sqlx::Row;
 
 use super::PostgresStore;
-use super::streams::Stream;
+use crate::SyncStream as Stream;
 use crate::{AccountData, AccountDataStore, Error, Result};
 
 #[async_trait]
@@ -15,22 +15,31 @@ impl AccountDataStore for PostgresStore {
         data_type: &str,
         content: &serde_json::Value,
     ) -> Result<i64> {
-        let writing = self.streams().await?.writing(Stream::AccountData);
-        let row = sqlx::query(
-            "INSERT INTO account_data (user_id, room_id, data_type, content, stream_id)
-             VALUES ($1, $2, $3, $4, nextval('account_data_seq'))
-             ON CONFLICT (user_id, room_id, data_type) DO UPDATE SET content = EXCLUDED.content, stream_id = EXCLUDED.stream_id
-             RETURNING stream_id",
-        )
-        .bind(user_id.as_str())
-        .bind(room_id.map_or("", RoomId::as_str))
-        .bind(data_type)
-        .bind(content)
-        .fetch_one(&self.pool)
-        .await?;
-        let position = row.get::<i64, _>(0);
-        writing.done(position).await;
-        Ok(position)
+        let (user, room) = (
+            user_id.to_string(),
+            room_id.map_or(String::new(), ToString::to_string),
+        );
+        let (data_type, content) = (data_type.to_owned(), content.clone());
+        let position = self
+            .write_to_stream(Stream::AccountData, move |conn| {
+                Box::pin(async move {
+                    let row = sqlx::query(
+                        "INSERT INTO account_data (user_id, room_id, data_type, content, stream_id)
+                         VALUES ($1, $2, $3, $4, nextval('account_data_seq'))
+                         ON CONFLICT (user_id, room_id, data_type) DO UPDATE SET content = EXCLUDED.content, stream_id = EXCLUDED.stream_id
+                         RETURNING stream_id",
+                    )
+                    .bind(user)
+                    .bind(room)
+                    .bind(data_type)
+                    .bind(content)
+                    .fetch_one(conn)
+                    .await?;
+                    Ok(Some(row.get::<i64, _>(0)))
+                })
+            })
+            .await?;
+        Ok(position.unwrap_or_default())
     }
 
     async fn get_account_data(
@@ -57,22 +66,27 @@ impl AccountDataStore for PostgresStore {
         room_id: Option<&RoomId>,
         data_type: &str,
     ) -> Result<Option<i64>> {
-        let writing = self.streams().await?.writing(Stream::AccountData);
-        let row = sqlx::query(
-            "UPDATE account_data SET content = '{}'::jsonb, stream_id = nextval('account_data_seq')
-             WHERE user_id = $1 AND room_id = $2 AND data_type = $3 AND content <> '{}'::jsonb
-             RETURNING stream_id",
-        )
-        .bind(user_id.as_str())
-        .bind(room_id.map_or("", RoomId::as_str))
-        .bind(data_type)
-        .fetch_optional(&self.pool)
-        .await?;
-        let position = row.map(|r| r.get::<i64, _>(0));
-        if let Some(position) = position {
-            writing.done(position).await;
-        }
-        Ok(position)
+        let (user, room) = (
+            user_id.to_string(),
+            room_id.map_or(String::new(), ToString::to_string),
+        );
+        let data_type = data_type.to_owned();
+        self.write_to_stream(Stream::AccountData, move |conn| {
+            Box::pin(async move {
+                let row = sqlx::query(
+                    "UPDATE account_data SET content = '{}'::jsonb, stream_id = nextval('account_data_seq')
+                     WHERE user_id = $1 AND room_id = $2 AND data_type = $3 AND content <> '{}'::jsonb
+                     RETURNING stream_id",
+                )
+                .bind(user)
+                .bind(room)
+                .bind(data_type)
+                .fetch_optional(conn)
+                .await?;
+                Ok(row.map(|r| r.get::<i64, _>(0)))
+            })
+        })
+        .await
     }
 
     async fn account_data_since(&self, user_id: &UserId, since: i64) -> Result<Vec<AccountData>> {

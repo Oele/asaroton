@@ -34,12 +34,20 @@ impl Services {
     /// Record a change to a profile field and wake the syncs that follow profile updates
     /// (MSC4429). A failure to record it must not fail the change itself.
     async fn profile_changed(&self, user_id: &UserId, field: &str) {
-        if let Err(e) = self.store.record_profile_update(user_id, field).await {
-            tracing::warn!(%user_id, field, error = %e, "could not record a profile update");
-        }
-        self.notifier.notify(crate::Notification::Profile {
+        let wake = vec![crate::Notification::Profile {
             user_id: user_id.to_owned(),
-        });
+        }];
+        match self.store.record_profile_update(user_id, field).await {
+            Ok(at) => {
+                self.wake_when_reportable(asaroton_store::SyncStream::ProfileUpdates, at, wake);
+            }
+            Err(e) => {
+                tracing::warn!(%user_id, field, error = %e, "could not record a profile update");
+                for n in wake {
+                    self.notifier.notify(n);
+                }
+            }
+        }
     }
 
     /// Send an updated join event in every joined room. Failures in one room (for example a

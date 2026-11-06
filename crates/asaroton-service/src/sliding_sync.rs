@@ -220,6 +220,8 @@ struct ConnKey {
 #[derive(Clone, Debug)]
 struct RoomTrack {
     timeline_upto: i64,
+    /// The position of the user's membership event that the connection was told about.
+    membership_at: i64,
     required_state: BTreeSet<(String, String)>,
     timeline_limit: usize,
     membership: MembershipState,
@@ -795,6 +797,7 @@ impl Services {
                 room_id.clone(),
                 RoomTrack {
                     timeline_upto: now.events,
+                    membership_at: sel.membership.stream_ordering,
                     required_state: sel.required_state.clone(),
                     // The longest timeline the connection was given, so that dropping a
                     // subscription and taking it again does not send the same events twice.
@@ -1062,13 +1065,14 @@ impl Services {
             t.membership != MembershipState::Join && m.membership == MembershipState::Join
         });
         // The same for someone who came back and went again between two answers: the
-        // connection knows them as gone, and they are gone, but by a later event, and in
-        // between they were a member. The room is theirs as it was at this later leave.
+        // connection knows them as gone, and they are gone, but by a later event than the
+        // one it was told about, and in between they were a member. The room is theirs as it
+        // was at this later leave.
         let back_and_gone = !initial
             && track.is_some_and(|t| {
                 t.membership != MembershipState::Join
                     && matches!(m.membership, MembershipState::Leave | MembershipState::Ban)
-                    && m.stream_ordering > t.timeline_upto
+                    && m.stream_ordering > t.membership_at
             })
             && self.left_as_member(room_id, user).await?;
         let initial = initial || back_and_gone;

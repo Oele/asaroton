@@ -363,15 +363,14 @@ impl Services {
             format!("m.local_notification_settings.{device_id}"),
             format!("org.matrix.msc3890.local_notification_settings.{device_id}"),
         ] {
-            if self
-                .store
-                .delete_account_data(user_id, None, &ty)
-                .await?
-                .is_some()
-            {
-                self.notifier.notify(crate::Notification::User {
-                    user_id: user_id.to_owned(),
-                });
+            if let Some(at) = self.store.delete_account_data(user_id, None, &ty).await? {
+                self.wake_when_reportable(
+                    asaroton_store::SyncStream::AccountData,
+                    at,
+                    vec![crate::Notification::User {
+                        user_id: user_id.to_owned(),
+                    }],
+                );
             }
         }
         self.notify_device_list_change(user_id, Some(device_id))

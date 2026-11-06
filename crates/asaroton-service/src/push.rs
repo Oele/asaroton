@@ -90,11 +90,15 @@ impl Services {
     /// Persist a modified ruleset and wake the user's syncs.
     pub async fn save_push_rules(&self, user_id: &UserId, rules: &Ruleset) -> Result<()> {
         let json = serde_json::to_value(rules)?;
-        self.store.set_push_rules(user_id, &json).await?;
+        let at = self.store.set_push_rules(user_id, &json).await?;
         self.push_rules_cache.remove(user_id);
-        self.notifier.notify(Notification::User {
-            user_id: user_id.to_owned(),
-        });
+        self.wake_when_reportable(
+            asaroton_store::SyncStream::AccountData,
+            at,
+            vec![Notification::User {
+                user_id: user_id.to_owned(),
+            }],
+        );
         Ok(())
     }
 

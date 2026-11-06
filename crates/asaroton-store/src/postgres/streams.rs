@@ -18,34 +18,42 @@
 //! ([`Streams::settled`]). Rows up to the position it gets back are then all visible to
 //! whatever it reads afterwards.
 //!
-//! A writer, for its part, does not return to its caller before its own row can be reported
-//! ([`Streams::past`]): the caller wakes the syncs that wait for the row, and a sync that is
-//! woken while an earlier write still holds the position back would find nothing and go
-//! back to waiting, with nobody left to wake it. The wait is for the writes that were under
-//! way when this one finished, which is a matter of milliseconds.
+//! Whoever wakes syncs for a row it has written has to wait until the row's position can be
+//! reported ([`Streams::reportable`], [`Streams::past`]). A sync that is woken while an
+//! earlier write still holds the position back finds nothing and goes back to waiting, and
+//! nobody is left to wake it. The writer itself does not wait: it would hold up whoever
+//! writes after it, for as long as the slowest write under way takes.
+//!
+//! A write that hangs does not hold everything back for ever: after `STALE` it is no longer
+//! counted, and says so in the log. Its row may then be skipped, which is what this module
+//! exists to prevent, but the alternative is that no sync on the server sees anything new.
 //!
 //! All of this lives in the process: asaroton runs as one process per database.
 
-use std::{collections::BTreeMap, sync::Mutex, time::Duration};
+use std::{
+    collections::BTreeMap,
+    sync::Mutex,
+    time::{Duration, Instant},
+};
 
-/// How long a finished write waits for earlier ones before it returns regardless. A write
-/// that hangs must not hold up every other one for good.
-const LONGEST_WAIT: Duration = Duration::from_secs(2);
+use crate::SyncStream;
 
-/// The streams whose positions go into sync tokens.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Stream {
-    Events,
-    /// Account data and push rules, which share a sequence.
-    AccountData,
-    Receipts,
-    ToDevice,
-    DeviceLists,
-    ThreadSubscriptions,
-    ProfileUpdates,
-}
+/// How long a write may be under way before it stops holding its stream's position back.
+const STALE: Duration = Duration::from_secs(30);
 
 const STREAMS: usize = 7;
+
+fn index(stream: SyncStream) -> usize {
+    match stream {
+        SyncStream::Events => 0,
+        SyncStream::AccountData => 1,
+        SyncStream::Receipts => 2,
+        SyncStream::ToDevice => 3,
+        SyncStream::DeviceLists => 4,
+        SyncStream::ThreadSubscriptions => 5,
+        SyncStream::ProfileUpdates => 6,
+    }
+}
 
 #[derive(Debug, Default)]
 struct State {
@@ -53,8 +61,28 @@ struct State {
     reported: i64,
     /// The highest number that a finished write was given.
     written: i64,
-    /// The floors of the writes under way, with how many share each.
-    floors: BTreeMap<i64, u32>,
+    /// The writes under way: their floor, a number to tell them apart, and when they began.
+    under_way: BTreeMap<(i64, u64), Instant>,
+    next: u64,
+}
+
+impl State {
+    /// The lowest floor among the writes under way. A write that has been under way for too
+    /// long is struck off first.
+    fn lowest_floor(&mut self, stream: SyncStream) -> Option<i64> {
+        while let Some((&key, began)) = self.under_way.iter().next() {
+            if began.elapsed() < STALE {
+                return Some(key.0);
+            }
+            self.under_way.remove(&key);
+            tracing::warn!(
+                ?stream,
+                seconds = STALE.as_secs(),
+                "a write has been under way for too long; sync no longer waits for it, and may miss what it writes"
+            );
+        }
+        None
+    }
 }
 
 /// See the module documentation.
@@ -66,40 +94,42 @@ pub(crate) struct Streams {
 }
 
 impl Streams {
-    fn state(&self, stream: Stream) -> std::sync::MutexGuard<'_, State> {
-        self.states[stream as usize]
+    fn state(&self, stream: SyncStream) -> std::sync::MutexGuard<'_, State> {
+        self.states[index(stream)]
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// Tells the stream where it stands when the process starts: the highest position in the
-    /// database. Without it the first write would take zero for its floor.
-    pub(crate) fn seed(&self, stream: Stream, position: i64) {
+    /// Tells the stream where it stands when the process starts. Without it the first write
+    /// would take zero for its floor.
+    pub(crate) fn seed(&self, stream: SyncStream, position: i64) {
         let mut state = self.state(stream);
         state.reported = state.reported.max(position);
     }
 
     /// Registers a write. To be called before the write takes its number from the sequence,
     /// and the returned value kept until the write is committed (or has failed).
-    pub(crate) fn writing(&self, stream: Stream) -> Writing<'_> {
+    pub(crate) fn writing(&self, stream: SyncStream) -> Writing<'_> {
         let mut state = self.state(stream);
         // Both are numbers that were taken before this write takes its own.
         let floor = state.reported.max(state.written);
-        *state.floors.entry(floor).or_default() += 1;
+        let id = state.next;
+        state.next += 1;
+        state.under_way.insert((floor, id), Instant::now());
         Writing {
             streams: self,
             stream,
-            floor,
+            key: (floor, id),
             wrote: None,
         }
     }
 
     /// The position to report for a stream whose highest committed number is `committed`.
     /// `committed` has to have been read before this is called.
-    pub(crate) fn settled(&self, stream: Stream, committed: i64) -> i64 {
+    pub(crate) fn settled(&self, stream: SyncStream, committed: i64) -> i64 {
         let mut state = self.state(stream);
-        let settled = match state.floors.keys().next() {
-            Some(lowest) => committed.min(*lowest),
+        let settled = match state.lowest_floor(stream) {
+            Some(lowest) => committed.min(lowest),
             None => committed,
         };
         // What was reported once is not taken back. (It cannot lie above a floor either:
@@ -108,25 +138,27 @@ impl Streams {
         state.reported
     }
 
-    /// Returns once `position`, which the caller has written and committed, can be reported:
-    /// no write that began before it was done is still under way. (Not for ever: see
-    /// `LONGEST_WAIT`.)
-    pub(crate) async fn past(&self, stream: Stream, position: i64) {
-        let deadline = tokio::time::Instant::now() + LONGEST_WAIT;
+    /// Whether `position`, which the caller has written and committed, can be reported: no
+    /// write that began before it was done is still under way.
+    pub(crate) fn reportable(&self, stream: SyncStream, position: i64) -> bool {
+        self.state(stream)
+            .lowest_floor(stream)
+            .is_none_or(|lowest| lowest >= position)
+    }
+
+    /// Returns once `position` can be reported (see [`Streams::reportable`]).
+    pub(crate) async fn past(&self, stream: SyncStream, position: i64) {
         loop {
             // Listening before looking, so that a write that ends in between is not missed.
             let ended = self.ended.notified();
             tokio::pin!(ended);
             ended.as_mut().enable();
-            let held_back = self
-                .state(stream)
-                .floors
-                .keys()
-                .next()
-                .is_some_and(|lowest| *lowest < position);
-            if !held_back || tokio::time::timeout_at(deadline, ended).await.is_err() {
+            if self.reportable(stream, position) {
                 return;
             }
+            // A write that hangs ends no wait; it is struck off when it is stale, which only
+            // a look finds out.
+            let _ = tokio::time::timeout(Duration::from_secs(1), ended).await;
         }
     }
 }
@@ -135,8 +167,8 @@ impl Streams {
 #[derive(Debug)]
 pub(crate) struct Writing<'a> {
     streams: &'a Streams,
-    stream: Stream,
-    floor: i64,
+    stream: SyncStream,
+    key: (i64, u64),
     wrote: Option<i64>,
 }
 
@@ -154,31 +186,16 @@ impl Drop for Writing<'_> {
         if let Some(position) = self.wrote {
             state.written = state.written.max(position);
         }
-        if let Some(count) = state.floors.get_mut(&self.floor) {
-            *count -= 1;
-            if *count == 0 {
-                state.floors.remove(&self.floor);
-            }
-        }
+        state.under_way.remove(&self.key);
         drop(state);
         self.streams.ended.notify_waiters();
-    }
-}
-
-impl Writing<'_> {
-    /// Ends the write, which was given `position` and is committed, and waits until that
-    /// position can be reported (see [`Streams::past`]).
-    pub(crate) async fn done(mut self, position: i64) {
-        let (streams, stream) = (self.streams, self.stream);
-        self.wrote(position);
-        drop(self);
-        streams.past(stream, position).await;
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::SyncStream as Stream;
 
     #[test]
     fn nothing_under_way_reports_what_is_committed() {
@@ -201,9 +218,11 @@ mod tests {
         drop(second);
         // 12 can be seen and 11 cannot: a reader must not be moved past 11.
         assert_eq!(streams.settled(Stream::Events, 12), 10);
+        assert!(!streams.reportable(Stream::Events, 12));
         first.wrote(11);
         drop(first);
         assert_eq!(streams.settled(Stream::Events, 12), 12);
+        assert!(streams.reportable(Stream::Events, 12));
     }
 
     #[test]
@@ -222,37 +241,38 @@ mod tests {
         drop(b);
         // `c` began after 11 was written: it holds the position at 11, not at 10.
         assert_eq!(streams.settled(Stream::Events, 12), 11);
+        // 11 can be reported now, 12 not yet: `c` began before 12 was written.
+        assert!(streams.reportable(Stream::Events, 11));
+        assert!(!streams.reportable(Stream::Events, 12));
         c.wrote(13);
         drop(c);
         assert_eq!(streams.settled(Stream::Events, 13), 13);
     }
 
     #[tokio::test]
-    async fn a_finished_write_waits_for_the_ones_that_began_before_it_was_done() {
+    async fn whoever_waits_for_a_position_is_let_go_when_the_writes_before_it_are_done() {
         let streams = std::sync::Arc::new(Streams::default());
         streams.seed(Stream::ToDevice, 10);
         // The first write will get 11. The second gets 12 and commits first.
         let mut first = streams.writing(Stream::ToDevice);
-        let second = {
+        let mut second = streams.writing(Stream::ToDevice);
+        second.wrote(12);
+        drop(second);
+        let waiting = {
             let streams = std::sync::Arc::clone(&streams);
-            tokio::spawn(async move {
-                let second = streams.writing(Stream::ToDevice);
-                second.done(12).await;
-            })
+            tokio::spawn(async move { streams.past(Stream::ToDevice, 12).await })
         };
         tokio::time::sleep(Duration::from_millis(30)).await;
         assert!(
-            !second.is_finished(),
-            "the second write does not return while 11 is being written"
+            !waiting.is_finished(),
+            "12 cannot be reported while 11 is being written"
         );
-        assert_eq!(streams.settled(Stream::ToDevice, 12), 10);
         first.wrote(11);
         drop(first);
-        tokio::time::timeout(Duration::from_secs(1), second)
+        tokio::time::timeout(Duration::from_secs(1), waiting)
             .await
-            .expect("it returns when the first write is done")
+            .expect("the wait ends with the first write")
             .unwrap();
-        assert_eq!(streams.settled(Stream::ToDevice, 12), 12);
         // With nothing under way there is nothing to wait for.
         streams.past(Stream::ToDevice, 99).await;
     }
@@ -260,9 +280,8 @@ mod tests {
     #[test]
     fn a_reported_position_is_never_taken_back() {
         let streams = Streams::default();
-        // A position that was written by something this process did not see (a write whose
-        // request was dropped after its commit) is reported, and a write that starts next
-        // takes it as its floor.
+        // A position that was written by something this process did not see is reported,
+        // and a write that starts next takes it as its floor.
         assert_eq!(streams.settled(Stream::Receipts, 7), 7);
         let writing = streams.writing(Stream::Receipts);
         assert_eq!(streams.settled(Stream::Receipts, 7), 7);
@@ -270,5 +289,25 @@ mod tests {
         // A write that fails leaves no trace.
         drop(writing);
         assert_eq!(streams.settled(Stream::Receipts, 9), 9);
+        // Rows that were deleted do not take the position back either.
+        assert_eq!(streams.settled(Stream::Receipts, 2), 9);
+    }
+
+    #[test]
+    fn a_write_that_hangs_is_struck_off() {
+        let streams = Streams::default();
+        streams.seed(Stream::Events, 10);
+        let hanging = streams.writing(Stream::Events);
+        // As if it had begun long ago.
+        {
+            let mut state = streams.state(Stream::Events);
+            let key = *state.under_way.keys().next().unwrap();
+            let long_ago = Instant::now().checked_sub(STALE + Duration::from_secs(1));
+            state.under_way.insert(key, long_ago.unwrap());
+        }
+        assert_eq!(streams.settled(Stream::Events, 15), 15);
+        // Its end, when it comes, is no trouble.
+        drop(hanging);
+        assert_eq!(streams.settled(Stream::Events, 16), 16);
     }
 }

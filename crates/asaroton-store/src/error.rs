@@ -23,6 +23,10 @@ pub enum Error {
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
 
+    /// A write that was running in a task of its own did not come back.
+    #[error("the write did not finish: {0}")]
+    Interrupted(String),
+
     /// The requested row does not exist.
     #[error("not found: {0}")]
     NotFound(&'static str),

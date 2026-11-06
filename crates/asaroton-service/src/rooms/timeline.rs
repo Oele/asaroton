@@ -769,7 +769,7 @@ impl Services {
     }
 
     /// The user's membership in the state before `ev` (`leave` when unknown).
-    async fn membership_before(
+    pub(crate) async fn membership_before(
         &self,
         user: &UserId,
         ev: &StoredEvent,

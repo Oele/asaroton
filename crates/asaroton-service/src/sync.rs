@@ -426,6 +426,42 @@ impl Services {
             .filter(|m| filter.room_allowed(&m.room_id))
             .filter(|m| !(invites_blocked && m.membership == MembershipState::Invite))
             .collect();
+        // A membership that changed after this answer's position belongs to the next answer,
+        // whose window it lies in: someone invited or joined in the moment between the
+        // position being read and the memberships, or, when the answer stops short of a room
+        // that is still being created, after the point where it stops. Reported here as
+        // well, it would come twice. So an invitation, a knock or a new join above the
+        // position is left out of this answer altogether. A join that only replaces a join
+        // (a changed name or picture) is another matter: the room was the user's before, and
+        // what happened in it up to the position has to come now. That room stays, as it was
+        // before the change. And so does a leave: the room's last events before it have to
+        // come with it, now or never.
+        let mut still_as_before: HashSet<OwnedRoomId> = HashSet::new();
+        let mut kept = Vec::with_capacity(memberships.len());
+        for m in memberships {
+            if m.stream_ordering > now.events {
+                match m.membership {
+                    MembershipState::Invite | MembershipState::Knock => continue,
+                    MembershipState::Join => {
+                        let was_joined = match self.store.get_event(&m.event_id).await? {
+                            Some(ev) => {
+                                self.membership_before(user, &ev, &mut HashMap::new())
+                                    .await?
+                                    == "join"
+                            }
+                            None => false,
+                        };
+                        if !was_joined {
+                            continue;
+                        }
+                        still_as_before.insert(m.room_id.clone());
+                    }
+                    _ => {}
+                }
+            }
+            kept.push(m);
+        }
+        let memberships = kept;
 
         let ignored = self.ignored_users(user).await?;
         // Incremental syncs: rooms with nothing new (no events, receipts or typing) are not
@@ -453,21 +489,8 @@ impl Services {
             };
         let mut newly_joined: Vec<OwnedRoomId> = Vec::new();
         for m in &memberships {
-            // A membership that changed after this answer's position belongs to the next
-            // answer, whose window it lies in: someone invited or joined in the moment
-            // between the position being read and the memberships, or, when the answer
-            // stops short of a room that is still being created, after the point where it
-            // stops. Reported here as well, it would come twice. (Not so for a leave: the
-            // room's last events before it have to come now or never.)
-            if m.stream_ordering > now.events
-                && matches!(
-                    m.membership,
-                    MembershipState::Join | MembershipState::Invite | MembershipState::Knock
-                )
-            {
-                continue;
-            }
-            let changed_in_window = since.is_none_or(|s| m.stream_ordering > s.events);
+            let changed_in_window = since.is_none_or(|s| m.stream_ordering > s.events)
+                && !(since.is_some() && still_as_before.contains(&m.room_id));
             match m.membership {
                 MembershipState::Join => {
                     let full = req.full_state || since.is_none() || changed_in_window;

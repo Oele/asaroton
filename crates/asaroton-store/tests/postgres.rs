@@ -1256,83 +1256,45 @@ async fn a_rejection_is_taken_back_when_the_event_passes_later(pool: PgPool) {
 /// room's event, and continue after it for good.
 #[sqlx::test(migrations = "./migrations")]
 async fn a_position_is_not_reported_past_a_write_that_is_under_way(pool: PgPool) {
+    use asaroton_store::SyncStream;
     let store = PostgresStore::from_pool(pool.clone());
     let one = build_room(&store, &RoomVersionId::V10).await;
     let two = build_room(&store, &RoomVersionId::V10).await;
     let before = store.stream_positions().await.unwrap().events;
-    let message = |d: &RoomDriver, body: &str| {
-        PduBuilder::new(
-            user_id!("@bob:example.org").to_owned(),
-            TimelineEventType::RoomMessage,
-        )
-        .room_id(d.room_id.clone().unwrap())
-        .content(&json!({ "msgtype": "m.text", "body": body }))
-        .unwrap()
-        .prev_events(d.last.clone())
-        .auth_events(d.events.iter().take(3).map(|e| e.event_id().to_owned()))
-        .depth(UInt::from(50u32))
-        .build(&d.rules, &d.key, server_name!("example.org"))
-        .unwrap()
-    };
-    let write = |pdu: Pdu, group: i64, with_extremities: bool| {
-        let store = store.clone();
-        tokio::spawn(async move {
-            let extremities = with_extremities.then(|| vec![pdu.event_id().to_owned()]);
-            store
-                .persist_event(PersistEvent {
-                    pdu,
-                    state: EventState::Existing(group),
-                    soft_failed: false,
-                    backfilled: false,
-                    stream_ordering: None,
-                    current_state_delta: None,
-                    forward_extremities: extremities,
-                })
-                .await
-                .unwrap()
-        })
-    };
-    let until = |sql: &'static str, id: Option<OwnedEventId>| {
-        let pool = pool.clone();
-        async move {
-            for _ in 0..500 {
-                let mut q = sqlx::query_scalar::<_, bool>(sql);
-                if let Some(id) = &id {
-                    q = q.bind(id.as_str());
-                }
-                if q.fetch_one(&pool).await.unwrap() {
-                    return;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-            panic!("timed out waiting for: {sql}");
-        }
-    };
 
     // The first room's write stores its event, which takes a number, and then goes on to
     // replace the room's forward extremities. That table is locked here against writing
     // (reading stays possible), so it waits there.
-    let mut lock = pool.begin().await.unwrap();
-    sqlx::query("LOCK TABLE forward_extremities IN SHARE ROW EXCLUSIVE MODE")
-        .execute(&mut *lock)
-        .await
-        .unwrap();
-    let held_event = message(&one, "held up");
-    let held = write(held_event.clone(), one.state_group.unwrap(), true);
-    until(
-        "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE NOT granted AND relation = 'forward_extremities'::regclass)",
+    let lock = lock_against_writing(&pool, "forward_extremities").await;
+    let held_event = message_in(&one, "held up");
+    let held = write_in_a_task(
+        &store,
+        held_event.clone(),
+        one.state_group.unwrap(),
+        true,
         None,
+    );
+    until(
+        &pool,
+        "SELECT last_value > $1 FROM events_stream_seq",
+        before,
     )
     .await;
 
-    // The second room's event does not touch that table, and is committed.
-    let free_event = message(&two, "free to go");
-    let free = write(free_event.clone(), two.state_group.unwrap(), false);
-    until(
-        "SELECT EXISTS (SELECT 1 FROM events WHERE event_id = $1)",
-        Some(free_event.event_id().to_owned()),
-    )
-    .await;
+    // The second room's event does not touch that table, and is committed. Its write does
+    // not wait for the first one.
+    let free_event = message_in(&two, "free to go");
+    let free = write_in_a_task(
+        &store,
+        free_event.clone(),
+        two.state_group.unwrap(),
+        false,
+        None,
+    );
+    let free = tokio::time::timeout(std::time::Duration::from_secs(5), free)
+        .await
+        .expect("a write does not wait for the one before it")
+        .unwrap();
 
     let at = store.stream_positions().await.unwrap().events;
     assert_eq!(
@@ -1343,15 +1305,27 @@ async fn a_position_is_not_reported_past_a_write_that_is_under_way(pool: PgPool)
         store.events_after(before, 10).await.unwrap().is_empty(),
         "whoever follows the stream is not handed the later event ahead of the earlier one"
     );
+    // Whoever wakes syncs for the later event has to wait.
+    assert!(!store.stream_position_reportable(SyncStream::Events, free.stream_ordering));
+    let woken = {
+        let store = store.clone();
+        tokio::spawn(async move {
+            store
+                .stream_position_settles(SyncStream::Events, free.stream_ordering)
+                .await;
+        })
+    };
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    assert!(
-        !free.is_finished(),
-        "the write that is done does not return before its event can be reported"
-    );
+    assert!(!woken.is_finished());
 
     lock.rollback().await.unwrap();
-    let (held, free) = (held.await.unwrap(), free.await.unwrap());
+    let held = held.await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), woken)
+        .await
+        .expect("the wake-up for the later event goes out when the earlier one is done")
+        .unwrap();
     assert!(held.stream_ordering < free.stream_ordering);
+    assert!(store.stream_position_reportable(SyncStream::Events, free.stream_ordering));
     assert_eq!(
         store.stream_positions().await.unwrap().events,
         free.stream_ordering
@@ -1372,6 +1346,92 @@ async fn a_position_is_not_reported_past_a_write_that_is_under_way(pool: PgPool)
     );
 }
 
+/// An invitation from another server is stored as an outlier, in no timeline, but the user's
+/// membership carries its number and sync goes by that. Such a write holds the position too.
+#[sqlx::test(migrations = "./migrations")]
+async fn a_membership_stored_as_an_outlier_holds_the_position_too(pool: PgPool) {
+    let store = PostgresStore::from_pool(pool.clone());
+    let one = build_room(&store, &RoomVersionId::V10).await;
+    let two = build_room(&store, &RoomVersionId::V10).await;
+    let before = store.stream_positions().await.unwrap().events;
+    let carol = user_id!("@carol:example.org");
+    let invitation = PduBuilder::new(
+        user_id!("@alice:example.org").to_owned(),
+        TimelineEventType::RoomMember,
+    )
+    .room_id(one.room_id.clone().unwrap())
+    .state_key(carol.as_str())
+    .content(&json!({ "membership": "invite" }))
+    .unwrap()
+    .prev_events(one.last.clone())
+    .auth_events(one.events.iter().take(3).map(|e| e.event_id().to_owned()))
+    .depth(UInt::from(50u32))
+    .build(&one.rules, &one.key, server_name!("example.org"))
+    .unwrap();
+    let delta = CurrentStateDelta {
+        upsert: vec![(
+            (StateEventType::RoomMember, carol.to_string()),
+            invitation.event_id().to_owned(),
+        )],
+        remove: vec![],
+    };
+
+    // The membership is written after the event has its number; that is where it waits.
+    let lock = lock_against_writing(&pool, "room_memberships").await;
+    let held = {
+        let store = store.clone();
+        tokio::spawn(async move {
+            store
+                .persist_event(PersistEvent {
+                    pdu: invitation,
+                    state: EventState::Outlier,
+                    soft_failed: false,
+                    backfilled: false,
+                    stream_ordering: None,
+                    current_state_delta: Some(delta),
+                    forward_extremities: None,
+                })
+                .await
+                .unwrap()
+        })
+    };
+    until(
+        &pool,
+        "SELECT last_value > $1 FROM events_stream_seq",
+        before,
+    )
+    .await;
+    let free = write_in_a_task(
+        &store,
+        message_in(&two, "free to go"),
+        two.state_group.unwrap(),
+        false,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        store.stream_positions().await.unwrap().events,
+        before,
+        "the position stays below the invitation that is being written"
+    );
+    lock.rollback().await.unwrap();
+    let held = held.await.unwrap();
+    assert!(held.stream_ordering < free.stream_ordering);
+    let invited = store
+        .memberships_for_user(carol)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|m| m.room_id == *one.room_id.as_ref().unwrap())
+        .expect("the invitation is stored");
+    assert_eq!(invited.stream_ordering, held.stream_ordering);
+    assert_eq!(
+        store.stream_positions().await.unwrap().events,
+        free.stream_ordering
+    );
+}
+
 /// The same for a stream that is written with single statements: account data and push rules
 /// share one.
 #[sqlx::test(migrations = "./migrations")]
@@ -1379,67 +1439,119 @@ async fn account_data_is_not_reported_past_a_write_that_is_under_way(pool: PgPoo
     use asaroton_store::E2eeStore;
     let store = PostgresStore::from_pool(pool.clone());
     let alice = user_id!("@alice:example.org");
-    store
-        .set_account_data(alice, None, "m.test", &json!({ "n": 0 }))
-        .await
-        .unwrap();
+    store.set_push_rules(alice, &json!({})).await.unwrap();
     let before = store.stream_positions().await.unwrap().account_data;
 
-    // A change of push rules is held up by a lock on its table (against writing; reading
-    // stays possible), before it has a number.
+    // A change of push rules takes its number and then has to replace the user's row, which
+    // is locked here.
     let mut lock = pool.begin().await.unwrap();
-    sqlx::query("LOCK TABLE push_rules IN SHARE ROW EXCLUSIVE MODE")
+    sqlx::query("SELECT 1 FROM push_rules WHERE user_id = $1 FOR UPDATE")
+        .bind(alice.as_str())
         .execute(&mut *lock)
         .await
         .unwrap();
     let held = {
         let store = store.clone();
-        tokio::spawn(async move { store.set_push_rules(alice, &json!({})).await.unwrap() })
-    };
-    for _ in 0..500 {
-        let waiting: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE NOT granted AND relation = 'push_rules'::regclass)",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        if waiting {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    // Account data written meanwhile is committed, with a number of its own.
-    let free = {
-        let store = store.clone();
         tokio::spawn(async move {
             store
-                .set_account_data(alice, None, "m.test", &json!({ "n": 1 }))
+                .set_push_rules(alice, &json!({ "n": 1 }))
                 .await
                 .unwrap()
         })
     };
-    for _ in 0..500 {
-        let n: i64 = sqlx::query_scalar("SELECT MAX(stream_id) FROM account_data")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        if n > before {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
+    until(
+        &pool,
+        "SELECT last_value > $1 FROM account_data_seq",
+        before,
+    )
+    .await;
+    // Account data written meanwhile gets the next number and is committed.
+    let free = store
+        .set_account_data(alice, None, "m.test", &json!({ "n": 1 }))
+        .await
+        .unwrap();
     assert_eq!(
         store.stream_positions().await.unwrap().account_data,
         before,
         "the position waits for the push rules"
     );
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    assert!(!free.is_finished());
 
     lock.rollback().await.unwrap();
-    let (held, free) = (held.await.unwrap(), free.await.unwrap());
-    assert_eq!(
-        store.stream_positions().await.unwrap().account_data,
-        held.max(free)
-    );
+    let held = held.await.unwrap();
+    assert!(held < free);
+    assert_eq!(store.stream_positions().await.unwrap().account_data, free);
+}
+
+/// A table lock that keeps writers out and lets readers in, for as long as the returned
+/// transaction is open.
+async fn lock_against_writing(
+    pool: &PgPool,
+    table: &str,
+) -> sqlx::Transaction<'static, sqlx::Postgres> {
+    let mut lock = pool.begin().await.unwrap();
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "LOCK TABLE {table} IN SHARE ROW EXCLUSIVE MODE"
+    )))
+    .execute(&mut *lock)
+    .await
+    .unwrap();
+    lock
+}
+
+/// Waits until a query with one number as its parameter answers true.
+async fn until(pool: &PgPool, sql: &'static str, n: i64) {
+    for _ in 0..500 {
+        if sqlx::query_scalar::<_, bool>(sql)
+            .bind(n)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+        {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("timed out waiting for: {sql}");
+}
+
+/// A message of Bob's in the room, building on its newest event.
+fn message_in(d: &RoomDriver, body: &str) -> Pdu {
+    PduBuilder::new(
+        user_id!("@bob:example.org").to_owned(),
+        TimelineEventType::RoomMessage,
+    )
+    .room_id(d.room_id.clone().unwrap())
+    .content(&json!({ "msgtype": "m.text", "body": body }))
+    .unwrap()
+    .prev_events(d.last.clone())
+    .auth_events(d.events.iter().take(3).map(|e| e.event_id().to_owned()))
+    .depth(UInt::from(50u32))
+    .build(&d.rules, &d.key, server_name!("example.org"))
+    .unwrap()
+}
+
+/// Stores a timeline event from a task of its own, with or without new forward extremities.
+fn write_in_a_task(
+    store: &PostgresStore,
+    pdu: Pdu,
+    group: i64,
+    with_extremities: bool,
+    delta: Option<CurrentStateDelta>,
+) -> tokio::task::JoinHandle<asaroton_store::PersistedEvent> {
+    let store = store.clone();
+    tokio::spawn(async move {
+        let extremities = with_extremities.then(|| vec![pdu.event_id().to_owned()]);
+        store
+            .persist_event(PersistEvent {
+                pdu,
+                state: EventState::Existing(group),
+                soft_failed: false,
+                backfilled: false,
+                stream_ordering: None,
+                current_state_delta: delta,
+                forward_extremities: extremities,
+            })
+            .await
+            .unwrap()
+    })
 }

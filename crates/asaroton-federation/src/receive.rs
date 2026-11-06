@@ -1625,13 +1625,15 @@ impl Federation {
                     if !services.server_acl_allows(&room_id, origin).await? {
                         continue;
                     }
+                    // The newest of the room's receipts: the wake-up waits for that one.
+                    let mut newest = 0;
                     for (user_id, data) in map.read {
                         if user_id.server_name() != origin {
                             continue;
                         }
                         for event_id in data.event_ids {
                             let ts = data.data.ts.map_or(0, |t| u64::from(t.0));
-                            let _ = services
+                            let stored = services
                                 .store
                                 .set_receipt(asaroton_store::Receipt {
                                     room_id: room_id.clone(),
@@ -1652,11 +1654,16 @@ impl Federation {
                                     stream_id: 0,
                                 })
                                 .await;
+                            if let Ok(at) = stored {
+                                newest = newest.max(at);
+                            }
                         }
                     }
-                    services
-                        .notifier
-                        .notify(Notification::RoomEphemeral { room_id });
+                    services.wake_when_reportable(
+                        asaroton_store::SyncStream::Receipts,
+                        newest,
+                        vec![Notification::RoomEphemeral { room_id }],
+                    );
                 }
             }
             Edu::Presence(p) => {

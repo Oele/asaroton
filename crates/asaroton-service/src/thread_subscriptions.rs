@@ -126,12 +126,17 @@ impl Services {
         {
             return Ok(());
         }
-        self.store
+        let position = self
+            .store
             .subscribe_thread(user_id, room_id, root, automatic_flag)
             .await?;
-        self.notifier.notify(Notification::User {
-            user_id: user_id.to_owned(),
-        });
+        self.wake_when_reportable(
+            asaroton_store::SyncStream::ThreadSubscriptions,
+            position,
+            vec![Notification::User {
+                user_id: user_id.to_owned(),
+            }],
+        );
         Ok(())
     }
 
@@ -145,12 +150,17 @@ impl Services {
     ) -> Result<()> {
         self.thread_root_in_room(room_id, root).await?;
         let at = self.store.max_stream_ordering().await?;
-        self.store
+        let position = self
+            .store
             .unsubscribe_thread(user_id, room_id, root, at)
             .await?;
-        self.notifier.notify(Notification::User {
-            user_id: user_id.to_owned(),
-        });
+        self.wake_when_reportable(
+            asaroton_store::SyncStream::ThreadSubscriptions,
+            position,
+            vec![Notification::User {
+                user_id: user_id.to_owned(),
+            }],
+        );
         Ok(())
     }
 

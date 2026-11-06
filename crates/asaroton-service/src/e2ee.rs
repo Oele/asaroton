@@ -336,9 +336,13 @@ impl Services {
             .store
             .add_device_list_change(user_id, device_id)
             .await?;
-        self.notifier.notify(Notification::DeviceLists {
-            user_id: user_id.to_owned(),
-        });
+        self.wake_when_reportable(
+            asaroton_store::SyncStream::DeviceLists,
+            stream_id,
+            vec![Notification::DeviceLists {
+                user_id: user_id.to_owned(),
+            }],
+        );
         if self.is_local(user_id) {
             let servers = self.remote_servers_sharing_rooms_with(user_id).await?;
             match device_id {
@@ -430,6 +434,8 @@ impl Services {
                 entry.insert(user.to_string(), Value::Object(devices));
                 continue;
             }
+            // The newest of this user's messages: the wake-up waits for that one.
+            let mut newest = 0;
             for (device, content) in per_device {
                 let targets: Vec<OwnedDeviceId> = if device == "*" {
                     self.store
@@ -442,14 +448,20 @@ impl Services {
                     vec![OwnedDeviceId::from(device.as_str())]
                 };
                 for d in targets {
-                    self.store
+                    let at = self
+                        .store
                         .add_to_device_message(user, &d, sender, event_type, content)
                         .await?;
+                    newest = newest.max(at);
                 }
             }
-            self.notifier.notify(Notification::User {
-                user_id: user.clone(),
-            });
+            self.wake_when_reportable(
+                asaroton_store::SyncStream::ToDevice,
+                newest,
+                vec![Notification::User {
+                    user_id: user.clone(),
+                }],
+            );
         }
         for (server, msgs) in by_server {
             self.send_edu_to(

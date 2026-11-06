@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use asaroton_service::Notification;
-use asaroton_store::Receipt;
+use asaroton_store::{Receipt, SyncStream};
 use ruma::{
     MilliSecondsSinceUnixEpoch, RoomId, UInt, UserId,
     api::client as c,
@@ -43,13 +43,17 @@ pub async fn set_global_account_data(
     }
     let content: Value = serde_json::from_str(req.body.data.json().get())
         .map_err(|e| Error::bad_json(e.to_string()))?;
-    services
+    let at = services
         .store
         .set_account_data(&sender.user_id, None, &ty, &content)
         .await?;
-    services.notifier.notify(Notification::User {
-        user_id: sender.user_id.clone(),
-    });
+    services.wake_when_reportable(
+        SyncStream::AccountData,
+        at,
+        vec![Notification::User {
+            user_id: sender.user_id.clone(),
+        }],
+    );
     Ok(set_global_account_data::v3::Response::new())
 }
 
@@ -67,13 +71,17 @@ pub async fn set_room_account_data(
     }
     let content: Value = serde_json::from_str(req.body.data.json().get())
         .map_err(|e| Error::bad_json(e.to_string()))?;
-    services
+    let at = services
         .store
         .set_account_data(&sender.user_id, Some(&req.body.room_id), &ty, &content)
         .await?;
-    services.notifier.notify(Notification::User {
-        user_id: sender.user_id.clone(),
-    });
+    services.wake_when_reportable(
+        SyncStream::AccountData,
+        at,
+        vec![Notification::User {
+            user_id: sender.user_id.clone(),
+        }],
+    );
     Ok(set_room_account_data::v3::Response::new())
 }
 
@@ -136,13 +144,17 @@ async fn store_room_tags(
     room_id: &RoomId,
     tags: serde_json::Map<String, Value>,
 ) -> Result<()> {
-    services
+    let at = services
         .store
         .set_account_data(user_id, Some(room_id), "m.tag", &json!({ "tags": tags }))
         .await?;
-    services.notifier.notify(Notification::User {
-        user_id: user_id.to_owned(),
-    });
+    services.wake_when_reportable(
+        SyncStream::AccountData,
+        at,
+        vec![Notification::User {
+            user_id: user_id.to_owned(),
+        }],
+    );
     Ok(())
 }
 
@@ -262,15 +274,18 @@ async fn delete_account_data_inner(
         .map(ruma::OwnedRoomId::try_from)
         .transpose()
         .map_err(|_| Error::invalid_param("Invalid room ID."))?;
-    if services
+    if let Some(at) = services
         .store
         .delete_account_data(&sender.user_id, room_id.as_deref(), data_type)
         .await?
-        .is_some()
     {
-        services.notifier.notify(Notification::User {
-            user_id: sender.user_id.clone(),
-        });
+        services.wake_when_reportable(
+            SyncStream::AccountData,
+            at,
+            vec![Notification::User {
+                user_id: sender.user_id.clone(),
+            }],
+        );
     }
     Ok(())
 }
@@ -349,7 +364,7 @@ async fn store_receipt(
     thread: Option<String>,
     event_id: &ruma::EventId,
 ) -> Result<()> {
-    services
+    let at = services
         .store
         .set_receipt(Receipt {
             room_id: room_id.to_owned(),
@@ -361,9 +376,13 @@ async fn store_receipt(
             stream_id: 0,
         })
         .await?;
-    services.notifier.notify(Notification::RoomEphemeral {
-        room_id: room_id.to_owned(),
-    });
+    services.wake_when_reportable(
+        SyncStream::Receipts,
+        at,
+        vec![Notification::RoomEphemeral {
+            room_id: room_id.to_owned(),
+        }],
+    );
     // Public receipts go to the other servers in the room.
     if receipt_type != "m.read.private"
         && let Ok(servers) = services.remote_servers_in_room(room_id).await
@@ -406,7 +425,7 @@ pub async fn receipt(
         _ => None,
     };
     if ty == "m.fully_read" {
-        services
+        let at = services
             .store
             .set_account_data(
                 &sender.user_id,
@@ -415,9 +434,13 @@ pub async fn receipt(
                 &json!({ "event_id": req.body.event_id }),
             )
             .await?;
-        services.notifier.notify(Notification::User {
-            user_id: sender.user_id.clone(),
-        });
+        services.wake_when_reportable(
+            SyncStream::AccountData,
+            at,
+            vec![Notification::User {
+                user_id: sender.user_id.clone(),
+            }],
+        );
     } else {
         store_receipt(
             &services,
@@ -441,7 +464,7 @@ pub async fn read_markers(
         .require_joined(&req.body.room_id, &sender.user_id)
         .await?;
     if let Some(ev) = &req.body.fully_read {
-        services
+        let at = services
             .store
             .set_account_data(
                 &sender.user_id,
@@ -450,9 +473,13 @@ pub async fn read_markers(
                 &json!({ "event_id": ev }),
             )
             .await?;
-        services.notifier.notify(Notification::User {
-            user_id: sender.user_id.clone(),
-        });
+        services.wake_when_reportable(
+            SyncStream::AccountData,
+            at,
+            vec![Notification::User {
+                user_id: sender.user_id.clone(),
+            }],
+        );
     }
     if let Some(ev) = &req.body.read_receipt {
         store_receipt(

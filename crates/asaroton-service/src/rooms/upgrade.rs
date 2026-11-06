@@ -290,11 +290,15 @@ impl Services {
             }
         }
         if changed {
-            self.store.set_push_rules(user, &rules).await?;
+            let at = self.store.set_push_rules(user, &rules).await?;
             self.push_rules_cache.remove(user);
-            self.notifier.notify(crate::notifier::Notification::User {
-                user_id: user.to_owned(),
-            });
+            self.wake_when_reportable(
+                asaroton_store::SyncStream::AccountData,
+                at,
+                vec![crate::notifier::Notification::User {
+                    user_id: user.to_owned(),
+                }],
+            );
         }
         Ok(())
     }

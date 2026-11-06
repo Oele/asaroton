@@ -3,21 +3,25 @@ use async_trait::async_trait;
 use ruma::{EventId, OwnedEventId, OwnedRoomId, OwnedServerName, RoomId, ServerName, UserId};
 use sqlx::{FromRow, PgConnection, Row};
 
-use super::{EVENT_COLUMNS, EventRow, PostgresStore, streams::Stream, strings};
+use super::{EVENT_COLUMNS, EventRow, PostgresStore, strings};
+use crate::SyncStream as Stream;
 use crate::{
     AwaitingAuth, Direction, Error, EventState, EventStore, PersistEvent, PersistedEvent,
     RelationRow, Result, SearchHit, SearchMode, SearchQuery, StoredEvent, StreamOrdering,
     ThreadSummary, now_ts, parse_ids, uint_to_i64,
 };
 
-/// Whether writing this event can put a row into the timelines that sync reads, at the next
-/// live position. Such a write is registered, so that no sync is moved past its position
-/// before it is done (see `streams`). The others are not: an event filed behind the room's
-/// history gets a number below zero, which no sync position reaches, and an outlier is in no
-/// timeline. The state of a room that is being joined comes as thousands of outliers in one
-/// transaction; registered, it would hold back every sync on the server until it was through.
+/// Whether writing this event puts something at the next live position that a sync goes by:
+/// a row in a timeline, or a membership, which carries its event's number too (an invitation
+/// from another server is stored as an outlier, and so is the leave that declines one). Such
+/// a write is registered, so that no sync is moved past its position before it is done (see
+/// `streams`). The others are not: an event filed behind the room's history gets a number
+/// below zero, which no sync position reaches, and an outlier that changes nothing in the
+/// room's state is seen by no sync. The state of a room that is being joined comes as
+/// thousands of those in one transaction; registered, it would hold back every sync on the
+/// server until it was through.
 fn takes_a_place_in_the_stream(ev: &PersistEvent) -> bool {
-    !ev.backfilled && !matches!(ev.state, EventState::Outlier)
+    !ev.backfilled && (!matches!(ev.state, EventState::Outlier) || ev.current_state_delta.is_some())
 }
 
 async fn persist_one(
@@ -353,43 +357,54 @@ impl EventStore for PostgresStore {
     }
 
     async fn persist_event(&self, event: PersistEvent) -> Result<PersistedEvent> {
-        let writing = if takes_a_place_in_the_stream(&event) {
-            Some(self.streams().await?.writing(Stream::Events))
-        } else {
-            None
-        };
-        let mut tx = self.pool.begin().await?;
-        let keep = self
-            .search_plaintext
-            .load(std::sync::atomic::Ordering::Relaxed);
-        let out = persist_one(&mut tx, event, keep).await?;
-        tx.commit().await?;
-        if let Some(writing) = writing {
-            writing.done(out.stream_ordering).await;
-        }
-        Ok(out)
+        self.persist_events(vec![event])
+            .await?
+            .pop()
+            .ok_or_else(|| Error::Corrupt("an event was written and nothing came back".into()))
     }
 
     async fn persist_events(&self, events: Vec<PersistEvent>) -> Result<Vec<PersistedEvent>> {
-        let writing = if events.iter().any(takes_a_place_in_the_stream) {
-            Some(self.streams().await?.writing(Stream::Events))
-        } else {
-            None
-        };
-        let mut tx = self.pool.begin().await?;
-        let keep = self
-            .search_plaintext
-            .load(std::sync::atomic::Ordering::Relaxed);
-        let mut out = Vec::with_capacity(events.len());
-        for ev in events {
-            out.push(persist_one(&mut tx, ev, keep).await?);
+        let store = self.clone();
+        // In a task of its own, so that a request that is dropped does not end the
+        // registration while the transaction is still with the database (see `streams`).
+        tokio::spawn(async move {
+            let keep = store
+                .search_plaintext
+                .load(std::sync::atomic::Ordering::Relaxed);
+            // The connection first: waiting for one is no part of the write.
+            let mut tx = store.pool.begin().await?;
+            let mut writing = if events.iter().any(takes_a_place_in_the_stream) {
+                Some(store.streams().await?.writing(Stream::Events))
+            } else {
+                None
+            };
+            let mut out = Vec::with_capacity(events.len());
+            for ev in events {
+                out.push(persist_one(&mut tx, ev, keep).await?);
+            }
+            tx.commit().await?;
+            if let Some(writing) = &mut writing {
+                for stored in &out {
+                    writing.wrote(stored.stream_ordering);
+                }
+            }
+            Ok(out)
+        })
+        .await
+        .map_err(|e| Error::Interrupted(e.to_string()))?
+    }
+
+    fn stream_position_reportable(&self, stream: crate::SyncStream, position: i64) -> bool {
+        // Before the first write there is nothing under way.
+        self.streams
+            .get()
+            .is_none_or(|streams| streams.reportable(stream, position))
+    }
+
+    async fn stream_position_settles(&self, stream: crate::SyncStream, position: i64) {
+        if let Some(streams) = self.streams.get() {
+            streams.past(stream, position).await;
         }
-        tx.commit().await?;
-        if let Some(writing) = writing {
-            let newest = out.iter().map(|e| e.stream_ordering).max().unwrap_or(0);
-            writing.done(newest).await;
-        }
-        Ok(out)
     }
 
     async fn event_at_timestamp(

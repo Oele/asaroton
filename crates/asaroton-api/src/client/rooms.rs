@@ -1411,14 +1411,20 @@ pub async fn upgrade(
             "Unsupported room version.",
         ));
     }
-    let new_room = services
-        .upgrade_room(
-            &sender.user_id,
-            &req.body.room_id,
-            req.body.new_version.clone(),
-            req.body.additional_creators.clone(),
-        )
-        .await?;
+    // Like createRoom: in a task of its own, so that a client that hangs up halfway does not
+    // leave a successor room without its state, or an old room that was never closed.
+    let app = std::sync::Arc::clone(&services);
+    let (user, old_room) = (sender.user_id.clone(), req.body.room_id.clone());
+    let (new_version, creators) = (
+        req.body.new_version.clone(),
+        req.body.additional_creators.clone(),
+    );
+    let new_room = tokio::spawn(async move {
+        app.upgrade_room(&user, &old_room, new_version, creators)
+            .await
+    })
+    .await
+    .map_err(|e| Error::internal(format!("upgrading a room: {e}")))??;
     Ok(room::upgrade_room::v3::Response::new(new_room))
 }
 

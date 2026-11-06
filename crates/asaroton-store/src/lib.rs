@@ -246,8 +246,16 @@ pub trait EventStore: Send + Sync {
     /// backfilled events can be stored oldest-first yet ordered correctly.
     async fn reserve_backfill_orderings(&self, n: usize) -> Result<Vec<StreamOrdering>>;
 
-    /// The newest position of every stream, for building a sync token.
+    /// The position of every stream that a sync can be told: the newest one below which no
+    /// write is still under way.
     async fn stream_positions(&self) -> Result<StreamPositions>;
+    /// Whether a sync can be told about `position` of `stream`, where the caller has just
+    /// written a row, right now. It cannot while an earlier write to the stream is still
+    /// under way: the stream's position is held below that write. Whoever wakes syncs for
+    /// the row has to wait for this, or the syncs find nothing and go back to waiting.
+    fn stream_position_reportable(&self, stream: SyncStream, position: i64) -> bool;
+    /// Returns once `stream_position_reportable` holds.
+    async fn stream_position_settles(&self, stream: SyncStream, position: i64);
     /// How many live, accepted events of the room have `from <= stream_ordering <= to`.
     async fn room_event_count_in_range(&self, room_id: &RoomId, from: i64, to: i64) -> Result<i64>;
     async fn get_event(&self, event_id: &EventId) -> Result<Option<StoredEvent>>;

@@ -3,7 +3,7 @@ use ruma::{DeviceId, OwnedDeviceId, OwnedUserId, UserId};
 use sqlx::Row;
 
 use super::PostgresStore;
-use super::streams::Stream;
+use crate::SyncStream as Stream;
 use crate::{
     AccessToken, Device, Error, NewUser, RefreshToken, Result, User, UserListQuery, UserStore,
     now_ts,
@@ -252,20 +252,25 @@ impl UserStore for PostgresStore {
     }
 
     async fn record_profile_update(&self, user_id: &UserId, field: &str) -> Result<i64> {
-        let writing = self.streams().await?.writing(Stream::ProfileUpdates);
-        let row = sqlx::query(
-            "INSERT INTO profile_updates (user_id, field_id, stream_id)
-             VALUES ($1, $2, nextval('profile_updates_seq'))
-             ON CONFLICT (user_id, field_id) DO UPDATE SET stream_id = EXCLUDED.stream_id
-             RETURNING stream_id",
-        )
-        .bind(user_id.as_str())
-        .bind(field)
-        .fetch_one(&self.pool)
-        .await?;
-        let position = row.get::<i64, _>(0);
-        writing.done(position).await;
-        Ok(position)
+        let (user, field) = (user_id.to_string(), field.to_owned());
+        let position = self
+            .write_to_stream(Stream::ProfileUpdates, move |conn| {
+                Box::pin(async move {
+                    let row = sqlx::query(
+                        "INSERT INTO profile_updates (user_id, field_id, stream_id)
+                         VALUES ($1, $2, nextval('profile_updates_seq'))
+                         ON CONFLICT (user_id, field_id) DO UPDATE SET stream_id = EXCLUDED.stream_id
+                         RETURNING stream_id",
+                    )
+                    .bind(user)
+                    .bind(field)
+                    .fetch_one(conn)
+                    .await?;
+                    Ok(Some(row.get::<i64, _>(0)))
+                })
+            })
+            .await?;
+        Ok(position.unwrap_or_default())
     }
 
     async fn profile_updates_between(

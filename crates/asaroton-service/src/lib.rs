@@ -198,4 +198,30 @@ impl Services {
     pub fn is_local(&self, user_id: &ruma::UserId) -> bool {
         user_id.server_name() == self.config.server_name
     }
+
+    /// Wakes syncs for a row that was just written at `position` of `stream`, once a sync
+    /// can be told about that position. It cannot while an earlier write to the stream is
+    /// still under way (see `stream_positions` in the store): a sync woken then would find
+    /// nothing, go back to waiting, and nobody would wake it when the row does show. Most of
+    /// the time nothing is under way and the wake-up goes out at once.
+    pub fn wake_when_reportable(
+        &self,
+        stream: asaroton_store::SyncStream,
+        position: i64,
+        wake: Vec<Notification>,
+    ) {
+        if self.store.stream_position_reportable(stream, position) {
+            for n in wake {
+                self.notifier.notify(n);
+            }
+            return;
+        }
+        let (store, notifier) = (Arc::clone(&self.store), self.notifier.clone());
+        tokio::spawn(async move {
+            store.stream_position_settles(stream, position).await;
+            for n in wake {
+                notifier.notify(n);
+            }
+        });
+    }
 }

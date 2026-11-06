@@ -97,28 +97,92 @@ impl PostgresStore {
     }
 
     /// The bookkeeping of writes under way, told at first use where each stream stands.
+    ///
+    /// Each stream starts from the last number its sequence gave out, not from the highest
+    /// number among its rows. Rows get deleted (delivered to-device messages, a room that is
+    /// removed), and a position that was handed to a client before a restart must not turn
+    /// out to lie ahead of where the server thinks it is afterwards.
     pub(crate) async fn streams(&self) -> Result<&streams::Streams> {
-        use streams::Stream;
+        use sqlx::Row;
+
+        use crate::SyncStream as Stream;
         self.streams
             .get_or_try_init(|| async {
-                let at = self.committed_positions().await?;
+                let rows = self.committed_positions().await?;
+                let given_out = |sequence: &str| {
+                    format!(
+                        "(SELECT CASE WHEN is_called THEN last_value ELSE 0 END FROM {sequence})"
+                    )
+                };
+                let sql = format!(
+                    "SELECT {}, {}, {}, {}, {}, {}, {}",
+                    given_out("events_stream_seq"),
+                    given_out("account_data_seq"),
+                    given_out("receipts_seq"),
+                    given_out("to_device_seq"),
+                    given_out("device_lists_seq"),
+                    given_out("thread_subscriptions_seq"),
+                    given_out("profile_updates_seq"),
+                );
+                let seq = sqlx::query(sqlx::AssertSqlSafe(sql))
+                    .fetch_one(&self.pool)
+                    .await?;
                 let streams = streams::Streams::default();
-                streams.seed(Stream::Events, at.events);
-                streams.seed(Stream::AccountData, at.account_data);
-                streams.seed(Stream::Receipts, at.receipts);
-                streams.seed(Stream::ToDevice, at.to_device);
-                streams.seed(Stream::DeviceLists, at.device_lists);
-                streams.seed(Stream::ThreadSubscriptions, at.thread_subscriptions);
-                streams.seed(Stream::ProfileUpdates, at.profile_updates);
+                for (n, (stream, in_rows)) in [
+                    (Stream::Events, rows.events),
+                    (Stream::AccountData, rows.account_data),
+                    (Stream::Receipts, rows.receipts),
+                    (Stream::ToDevice, rows.to_device),
+                    (Stream::DeviceLists, rows.device_lists),
+                    (Stream::ThreadSubscriptions, rows.thread_subscriptions),
+                    (Stream::ProfileUpdates, rows.profile_updates),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    streams.seed(stream, in_rows.max(seq.get::<i64, _>(n)));
+                }
                 Ok(streams)
             })
             .await
     }
 
+    /// Writes one row of a sync stream. `statement` runs the statement on the connection it
+    /// is given and returns the number the row got, or `None` when it wrote no row.
+    ///
+    /// The write is registered for as long as it is under way (see [`streams`]), and it runs
+    /// in a task of its own: a request that is dropped while its statement is with the
+    /// database would end the registration, and the row would then appear below a position
+    /// that had been reported in the meantime.
+    pub(crate) async fn write_to_stream<F>(
+        &self,
+        stream: crate::SyncStream,
+        statement: F,
+    ) -> Result<Option<i64>>
+    where
+        F: for<'c> FnOnce(&'c mut sqlx::PgConnection) -> BoxFuture<'c, Result<Option<i64>>>
+            + Send
+            + 'static,
+    {
+        let store = self.clone();
+        tokio::spawn(async move {
+            // The connection first: waiting for one is no part of the write.
+            let mut conn = store.pool.acquire().await?;
+            let mut writing = store.streams().await?.writing(stream);
+            let position = statement(&mut conn).await?;
+            if let Some(position) = position {
+                writing.wrote(position);
+            }
+            Ok(position)
+        })
+        .await
+        .map_err(|e| Error::Interrupted(e.to_string()))?
+    }
+
     /// The position in each stream that a sync can be told: the highest one below which no
     /// write is still under way.
     pub(crate) async fn settled_positions(&self) -> Result<crate::StreamPositions> {
-        use streams::Stream;
+        use crate::SyncStream as Stream;
         // The numbers first, the writes under way second: in that order, every row up to the
         // answer is visible to what the caller reads next.
         let at = self.committed_positions().await?;

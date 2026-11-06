@@ -6,7 +6,7 @@ use ruma::{
 use sqlx::Row;
 
 use super::PostgresStore;
-use super::streams::Stream;
+use crate::SyncStream as Stream;
 use crate::{
     Error, Membership, Result, RoomAlias, RoomInfo, RoomStore, StreamOrdering, now_ts, parse_ids,
 };
@@ -470,25 +470,29 @@ impl RoomStore for PostgresStore {
     }
 
     async fn set_receipt(&self, receipt: crate::Receipt) -> Result<i64> {
-        let writing = self.streams().await?.writing(Stream::Receipts);
-        let row = sqlx::query(
-            "INSERT INTO receipts (room_id, user_id, receipt_type, thread_id, event_id, data, stream_id)
-             VALUES ($1, $2, $3, $4, $5, $6, nextval('receipts_seq'))
-             ON CONFLICT (room_id, user_id, receipt_type, thread_id) DO UPDATE SET event_id = EXCLUDED.event_id,
-                data = EXCLUDED.data, stream_id = EXCLUDED.stream_id
-             RETURNING stream_id",
-        )
-        .bind(receipt.room_id.as_str())
-        .bind(receipt.user_id.as_str())
-        .bind(&receipt.receipt_type)
-        .bind(receipt.thread_id.as_deref().unwrap_or(""))
-        .bind(receipt.event_id.as_str())
-        .bind(&receipt.data)
-        .fetch_one(&self.pool)
-        .await?;
-        let position = row.get::<i64, _>(0);
-        writing.done(position).await;
-        Ok(position)
+        let position = self
+            .write_to_stream(Stream::Receipts, move |conn| {
+                Box::pin(async move {
+                    let row = sqlx::query(
+                        "INSERT INTO receipts (room_id, user_id, receipt_type, thread_id, event_id, data, stream_id)
+                         VALUES ($1, $2, $3, $4, $5, $6, nextval('receipts_seq'))
+                         ON CONFLICT (room_id, user_id, receipt_type, thread_id) DO UPDATE SET event_id = EXCLUDED.event_id,
+                            data = EXCLUDED.data, stream_id = EXCLUDED.stream_id
+                         RETURNING stream_id",
+                    )
+                    .bind(receipt.room_id.as_str())
+                    .bind(receipt.user_id.as_str())
+                    .bind(&receipt.receipt_type)
+                    .bind(receipt.thread_id.as_deref().unwrap_or(""))
+                    .bind(receipt.event_id.as_str())
+                    .bind(&receipt.data)
+                    .fetch_one(conn)
+                    .await?;
+                    Ok(Some(row.get::<i64, _>(0)))
+                })
+            })
+            .await?;
+        Ok(position.unwrap_or_default())
     }
 
     async fn receipts_since(&self, since: i64, limit: usize) -> Result<Vec<crate::Receipt>> {

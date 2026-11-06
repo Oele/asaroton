@@ -3,7 +3,7 @@ use ruma::{DeviceId, OwnedDeviceId, OwnedUserId, UserId};
 use sqlx::Row;
 
 use super::PostgresStore;
-use super::streams::Stream;
+use crate::SyncStream as Stream;
 use crate::{E2eeStore, Error, OneTimeKeyRow, Pusher, Result, ToDeviceMessage, now_ts, parse_ids};
 
 #[async_trait]
@@ -290,19 +290,24 @@ impl E2eeStore for PostgresStore {
         user_id: &UserId,
         device_id: Option<&DeviceId>,
     ) -> Result<i64> {
-        let writing = self.streams().await?.writing(Stream::DeviceLists);
-        let row = sqlx::query(
-            "INSERT INTO device_list_changes (stream_id, user_id, device_id, changed_ts)
-             VALUES (nextval('device_lists_seq'), $1, $2, $3) RETURNING stream_id",
-        )
-        .bind(user_id.as_str())
-        .bind(device_id.map(DeviceId::as_str))
-        .bind(now_ts())
-        .fetch_one(&self.pool)
-        .await?;
-        let position = row.get::<i64, _>(0);
-        writing.done(position).await;
-        Ok(position)
+        let (user, device) = (user_id.to_string(), device_id.map(ToString::to_string));
+        let position = self
+            .write_to_stream(Stream::DeviceLists, move |conn| {
+                Box::pin(async move {
+                    let row = sqlx::query(
+                        "INSERT INTO device_list_changes (stream_id, user_id, device_id, changed_ts)
+                         VALUES (nextval('device_lists_seq'), $1, $2, $3) RETURNING stream_id",
+                    )
+                    .bind(user)
+                    .bind(device)
+                    .bind(now_ts())
+                    .fetch_one(conn)
+                    .await?;
+                    Ok(Some(row.get::<i64, _>(0)))
+                })
+            })
+            .await?;
+        Ok(position.unwrap_or_default())
     }
 
     async fn device_list_changes_since(&self, since: i64, to: i64) -> Result<Vec<OwnedUserId>> {
@@ -331,22 +336,32 @@ impl E2eeStore for PostgresStore {
         event_type: &str,
         content: &serde_json::Value,
     ) -> Result<i64> {
-        let writing = self.streams().await?.writing(Stream::ToDevice);
-        let row = sqlx::query(
-            "INSERT INTO to_device_messages (stream_id, user_id, device_id, sender, event_type, content, created_ts)
-             VALUES (nextval('to_device_seq'), $1, $2, $3, $4, $5, $6) RETURNING stream_id",
-        )
-        .bind(user_id.as_str())
-        .bind(device_id.as_str())
-        .bind(sender.as_str())
-        .bind(event_type)
-        .bind(content)
-        .bind(now_ts())
-        .fetch_one(&self.pool)
-        .await?;
-        let position = row.get::<i64, _>(0);
-        writing.done(position).await;
-        Ok(position)
+        let (user, device, sender) = (
+            user_id.to_string(),
+            device_id.to_string(),
+            sender.to_string(),
+        );
+        let (event_type, content) = (event_type.to_owned(), content.clone());
+        let position = self
+            .write_to_stream(Stream::ToDevice, move |conn| {
+                Box::pin(async move {
+                    let row = sqlx::query(
+                        "INSERT INTO to_device_messages (stream_id, user_id, device_id, sender, event_type, content, created_ts)
+                         VALUES (nextval('to_device_seq'), $1, $2, $3, $4, $5, $6) RETURNING stream_id",
+                    )
+                    .bind(user)
+                    .bind(device)
+                    .bind(sender)
+                    .bind(event_type)
+                    .bind(content)
+                    .bind(now_ts())
+                    .fetch_one(conn)
+                    .await?;
+                    Ok(Some(row.get::<i64, _>(0)))
+                })
+            })
+            .await?;
+        Ok(position.unwrap_or_default())
     }
 
     async fn to_device_messages(
@@ -412,19 +427,24 @@ impl E2eeStore for PostgresStore {
     }
 
     async fn set_push_rules(&self, user_id: &UserId, ruleset: &serde_json::Value) -> Result<i64> {
-        let writing = self.streams().await?.writing(Stream::AccountData);
-        let row = sqlx::query(
-            "INSERT INTO push_rules (user_id, ruleset, stream_id) VALUES ($1, $2, nextval('account_data_seq'))
-             ON CONFLICT (user_id) DO UPDATE SET ruleset = EXCLUDED.ruleset, stream_id = EXCLUDED.stream_id
-             RETURNING stream_id",
-        )
-        .bind(user_id.as_str())
-        .bind(ruleset)
-        .fetch_one(&self.pool)
-        .await?;
-        let position = row.get::<i64, _>(0);
-        writing.done(position).await;
-        Ok(position)
+        let (user, ruleset) = (user_id.to_string(), ruleset.clone());
+        let position = self
+            .write_to_stream(Stream::AccountData, move |conn| {
+                Box::pin(async move {
+                    let row = sqlx::query(
+                        "INSERT INTO push_rules (user_id, ruleset, stream_id) VALUES ($1, $2, nextval('account_data_seq'))
+                         ON CONFLICT (user_id) DO UPDATE SET ruleset = EXCLUDED.ruleset, stream_id = EXCLUDED.stream_id
+                         RETURNING stream_id",
+                    )
+                    .bind(user)
+                    .bind(ruleset)
+                    .fetch_one(conn)
+                    .await?;
+                    Ok(Some(row.get::<i64, _>(0)))
+                })
+            })
+            .await?;
+        Ok(position.unwrap_or_default())
     }
 
     async fn set_pusher(&self, p: Pusher) -> Result<()> {

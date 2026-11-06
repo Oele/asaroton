@@ -65,6 +65,20 @@ impl Services {
             None => None,
         };
 
+        // A room has one create event, and it is written here. One among `initial_state`
+        // would not be refused where state events are otherwise checked: in the room
+        // versions whose room ID is the hash of the create event it has no room ID of its
+        // own, and would be stored as the first event of yet another room.
+        if req
+            .initial_state
+            .iter()
+            .any(|(ty, _, _)| ty == "m.room.create")
+        {
+            return Err(Error::bad_json(
+                "initial_state cannot contain m.room.create.",
+            ));
+        }
+
         let preset = req.preset.clone().unwrap_or(match req.visibility {
             Some(Visibility::Public) => RoomPreset::PublicChat,
             _ => RoomPreset::PrivateChat,
@@ -162,8 +176,9 @@ impl Services {
 
         // The room's own events. When one of them cannot be written (the creator gave away
         // the power to send the next one, an alias that somebody took in the meantime, the
-        // database), what there is of the room is taken away again: a room exists whole or
-        // not at all, and the creator's syncs have not been shown any of it.
+        // database), what there is of the room is taken away again, unless somebody else is
+        // in it by then: a room exists whole or not at all, and the creator's syncs have not
+        // been shown any of it.
         let written: Result<()> = async {
             // --- creator join ---------------------------------------------------------------
             let member_content = self.member_content_for(&creator, "join", None).await?;
@@ -328,7 +343,7 @@ impl Services {
         }
         .await;
         if let Err(e) = written {
-            self.discard_unfinished_room(&room_id).await;
+            self.discard_unfinished_room(&room_id, &creator).await;
             drop(making);
             return Err(e);
         }
@@ -385,7 +400,7 @@ impl Services {
             let stored = match self.send_local_event_locked(ctx, create_ev).await {
                 Ok(stored) => stored,
                 Err(e) => {
-                    self.discard_unfinished_room(&room_id).await;
+                    self.discard_unfinished_room(&room_id, creator).await;
                     return Err(e);
                 }
             };
@@ -441,7 +456,7 @@ impl Services {
         let stored = match self.send_local_event_locked(ctx, ev).await {
             Ok(stored) => stored,
             Err(e) => {
-                self.discard_unfinished_room(&room_id).await;
+                self.discard_unfinished_room(&room_id, creator).await;
                 return Err(e);
             }
         };
@@ -450,10 +465,26 @@ impl Services {
         Ok((room_id, making))
     }
 
-    /// Takes away what was written of a room that could not be created in full. Nobody has
-    /// seen it: it is kept out of the creator's syncs until it is whole, and nobody else is
-    /// in it.
-    async fn discard_unfinished_room(&self, room_id: &ruma::RoomId) {
+    /// Takes away what was written of a room that could not be created in full, as long as
+    /// its creator is the only one the room exists for. The creator has not been shown any
+    /// of it: it is kept out of their syncs until it is whole. But `initial_state` may hold a
+    /// membership event for somebody else, and that person has then seen an invitation. A
+    /// room that vanished from under it would leave them with an invitation they can neither
+    /// take nor turn down, so such a room stays, unfinished as it is. (An application
+    /// service that follows the creator may have been sent the room's first events either
+    /// way.)
+    async fn discard_unfinished_room(&self, room_id: &ruma::RoomId, creator: &UserId) {
+        match self.store.members(room_id, None).await {
+            Ok(members) if members.iter().all(|m| m.user_id == *creator) => {}
+            Ok(_) => {
+                tracing::debug!(%room_id, "a room whose creation failed is kept: it has other members");
+                return;
+            }
+            Err(e) => {
+                tracing::warn!(%room_id, error = %e, "could not look at a room whose creation failed");
+                return;
+            }
+        }
         if let Err(e) = self.store.purge_room(room_id).await {
             tracing::warn!(%room_id, error = %e, "could not remove a room whose creation failed");
         }

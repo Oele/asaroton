@@ -3,7 +3,7 @@ use ruma::{EventId, RoomId, UserId};
 use sqlx::Row;
 
 use super::PostgresStore;
-use super::streams::Stream;
+use crate::SyncStream as Stream;
 use crate::{Error, Result, ThreadSubscription, ThreadSubscriptionStore};
 
 const COLUMNS: &str = "room_id, thread_root, subscribed, automatic, stream_id, unsubscribed_at";
@@ -48,23 +48,32 @@ impl ThreadSubscriptionStore for PostgresStore {
         thread_root: &EventId,
         automatic: bool,
     ) -> Result<i64> {
-        let writing = self.streams().await?.writing(Stream::ThreadSubscriptions);
-        let row = sqlx::query(
-            "INSERT INTO thread_subscriptions (user_id, room_id, thread_root, subscribed, automatic, stream_id, unsubscribed_at)
-             VALUES ($1, $2, $3, TRUE, $4, nextval('thread_subscriptions_seq'), NULL)
-             ON CONFLICT (user_id, room_id, thread_root) DO UPDATE SET subscribed = TRUE,
-                automatic = EXCLUDED.automatic, stream_id = EXCLUDED.stream_id, unsubscribed_at = NULL
-             RETURNING stream_id",
-        )
-        .bind(user_id.as_str())
-        .bind(room_id.as_str())
-        .bind(thread_root.as_str())
-        .bind(automatic)
-        .fetch_one(&self.pool)
-        .await?;
-        let position = row.get::<i64, _>(0);
-        writing.done(position).await;
-        Ok(position)
+        let (user, room, root) = (
+            user_id.to_string(),
+            room_id.to_string(),
+            thread_root.to_string(),
+        );
+        let position = self
+            .write_to_stream(Stream::ThreadSubscriptions, move |conn| {
+                Box::pin(async move {
+                    let row = sqlx::query(
+                        "INSERT INTO thread_subscriptions (user_id, room_id, thread_root, subscribed, automatic, stream_id, unsubscribed_at)
+                         VALUES ($1, $2, $3, TRUE, $4, nextval('thread_subscriptions_seq'), NULL)
+                         ON CONFLICT (user_id, room_id, thread_root) DO UPDATE SET subscribed = TRUE,
+                            automatic = EXCLUDED.automatic, stream_id = EXCLUDED.stream_id, unsubscribed_at = NULL
+                         RETURNING stream_id",
+                    )
+                    .bind(user)
+                    .bind(room)
+                    .bind(root)
+                    .bind(automatic)
+                    .fetch_one(conn)
+                    .await?;
+                    Ok(Some(row.get::<i64, _>(0)))
+                })
+            })
+            .await?;
+        Ok(position.unwrap_or_default())
     }
 
     async fn unsubscribe_thread(
@@ -74,23 +83,32 @@ impl ThreadSubscriptionStore for PostgresStore {
         thread_root: &EventId,
         at: i64,
     ) -> Result<i64> {
-        let writing = self.streams().await?.writing(Stream::ThreadSubscriptions);
-        let row = sqlx::query(
-            "INSERT INTO thread_subscriptions (user_id, room_id, thread_root, subscribed, automatic, stream_id, unsubscribed_at)
-             VALUES ($1, $2, $3, FALSE, FALSE, nextval('thread_subscriptions_seq'), $4)
-             ON CONFLICT (user_id, room_id, thread_root) DO UPDATE SET subscribed = FALSE,
-                automatic = FALSE, stream_id = EXCLUDED.stream_id, unsubscribed_at = EXCLUDED.unsubscribed_at
-             RETURNING stream_id",
-        )
-        .bind(user_id.as_str())
-        .bind(room_id.as_str())
-        .bind(thread_root.as_str())
-        .bind(at)
-        .fetch_one(&self.pool)
-        .await?;
-        let position = row.get::<i64, _>(0);
-        writing.done(position).await;
-        Ok(position)
+        let (user, room, root) = (
+            user_id.to_string(),
+            room_id.to_string(),
+            thread_root.to_string(),
+        );
+        let position = self
+            .write_to_stream(Stream::ThreadSubscriptions, move |conn| {
+                Box::pin(async move {
+                    let row = sqlx::query(
+                        "INSERT INTO thread_subscriptions (user_id, room_id, thread_root, subscribed, automatic, stream_id, unsubscribed_at)
+                         VALUES ($1, $2, $3, FALSE, FALSE, nextval('thread_subscriptions_seq'), $4)
+                         ON CONFLICT (user_id, room_id, thread_root) DO UPDATE SET subscribed = FALSE,
+                            automatic = FALSE, stream_id = EXCLUDED.stream_id, unsubscribed_at = EXCLUDED.unsubscribed_at
+                         RETURNING stream_id",
+                    )
+                    .bind(user)
+                    .bind(room)
+                    .bind(root)
+                    .bind(at)
+                    .fetch_one(conn)
+                    .await?;
+                    Ok(Some(row.get::<i64, _>(0)))
+                })
+            })
+            .await?;
+        Ok(position.unwrap_or_default())
     }
 
     async fn thread_subscription_changes(

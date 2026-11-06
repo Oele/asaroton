@@ -197,7 +197,11 @@ async fn worker(fed: Arc<Federation>, a: Arc<asaroton_service::appservice::Appse
     let mut retry = MIN_RETRY;
     let mut ephemeral = EphemeralCursor {
         typing: services.typing.position(),
-        receipts: services.store.max_receipt_stream_id().await.unwrap_or(0),
+        receipts: services
+            .store
+            .stream_positions()
+            .await
+            .map_or(0, |p| p.receipts),
         presence: services.presence.position(),
     };
     loop {
@@ -252,7 +256,9 @@ async fn push_pending(
     let mut ephemeral: Vec<Value> = Vec::new();
     let (typing_now, receipts_now, presence_now) = (
         services.typing.position(),
-        services.store.max_receipt_stream_id().await?,
+        // Not the newest receipt there is: one that is still being written may get a lower
+        // number than one that is done, and would be passed over.
+        services.store.stream_positions().await?.receipts,
         services.presence.position(),
     );
     if a.receive_ephemeral {

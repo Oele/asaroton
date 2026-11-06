@@ -129,16 +129,17 @@ impl Services {
     /// when the wait began, and an invitation, or a room created or joined on another device,
     /// concerns a room that was not among them yet.
     pub fn notify_room_event(&self, pdu: &Pdu, stream_ordering: i64) {
-        self.notifier.notify(Notification::RoomEvent {
+        let mut wake = vec![Notification::RoomEvent {
             room_id: pdu.room_id().to_owned(),
             stream_ordering,
-        });
+        }];
         if pdu.event_type() == &TimelineEventType::RoomMember
             && let Some(user) = pdu.state_key().and_then(|k| OwnedUserId::try_from(k).ok())
             && self.is_local(&user)
         {
-            self.notifier.notify(Notification::User { user_id: user });
+            wake.push(Notification::User { user_id: user });
         }
+        self.wake_when_reportable(asaroton_store::SyncStream::Events, stream_ordering, wake);
     }
 }
 

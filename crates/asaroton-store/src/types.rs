@@ -258,6 +258,19 @@ impl AccountData {
 
 // ------------------------------------------------------------------ stream positions
 
+/// The streams whose positions go into sync tokens.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SyncStream {
+    Events,
+    /// Account data and push rules, which share a sequence.
+    AccountData,
+    Receipts,
+    ToDevice,
+    DeviceLists,
+    ThreadSubscriptions,
+    ProfileUpdates,
+}
+
 /// The newest position of every stream a sync token tracks, read in one query.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct StreamPositions {
