@@ -37,6 +37,35 @@ pub struct TransactionReply {
     pub body: bytes::Bytes,
 }
 
+/// Read a response body, giving up as soon as it is known to be larger than `max`: first by
+/// what the sender announces, then by what actually arrives. Nothing beyond the limit is
+/// kept in memory.
+pub(crate) async fn read_body(
+    destination: &ServerName,
+    mut resp: reqwest::Response,
+    max: Option<usize>,
+) -> Result<bytes::Bytes> {
+    let transport = |e: reqwest::Error| Error::Transport(destination.to_owned(), error_chain(&e));
+    let Some(max) = max else {
+        return resp.bytes().await.map_err(transport);
+    };
+    let too_large = || Error::TooLarge(destination.to_owned(), max);
+    if resp
+        .content_length()
+        .is_some_and(|len| usize::try_from(len).map_or(true, |len| len > max))
+    {
+        return Err(too_large());
+    }
+    let mut body = bytes::BytesMut::new();
+    while let Some(chunk) = resp.chunk().await.map_err(transport)? {
+        if body.len() + chunk.len() > max {
+            return Err(too_large());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body.freeze())
+}
+
 /// An error with its sources, as reqwest's top-level message hides the actual cause.
 fn error_chain(e: &reqwest::Error) -> String {
     let mut parts = vec![e.to_string()];
@@ -163,7 +192,7 @@ impl FederationClient {
         R::PathBuilder: FedPath,
         R::EndpointError: std::fmt::Debug,
     {
-        self.send_with_timeout(destination, request, REQUEST_TIMEOUT)
+        self.send_with_timeout(destination, request, REQUEST_TIMEOUT, None)
             .await
     }
 
@@ -184,7 +213,7 @@ impl FederationClient {
         let http_req: http::Request<Vec<u8>> = request
             .try_into_http_request(&base, (), <R::PathBuilder as FedPath>::input(&versions))
             .map_err(|e| Error::Protocol(format!("building request: {e}")))?;
-        self.dispatch::<R>(destination, &resolved, http_req, REQUEST_TIMEOUT)
+        self.dispatch::<R>(destination, &resolved, http_req, REQUEST_TIMEOUT, None)
             .await
     }
 
@@ -199,7 +228,24 @@ impl FederationClient {
         R::PathBuilder: FedPath,
         R::EndpointError: std::fmt::Debug,
     {
-        self.send_with_timeout(destination, request, LONG_TIMEOUT)
+        self.send_with_timeout(destination, request, LONG_TIMEOUT, None)
+            .await
+    }
+
+    /// Like [`Self::send_long`], refusing a response body of more than `max_body` bytes
+    /// (media downloads: the size of what comes back is the remote server's choice).
+    pub async fn send_bounded<R>(
+        &self,
+        destination: &ServerName,
+        request: R,
+        max_body: usize,
+    ) -> Result<R::IncomingResponse>
+    where
+        R: OutgoingRequest<Authentication = ServerSignatures> + std::fmt::Debug,
+        R::PathBuilder: FedPath,
+        R::EndpointError: std::fmt::Debug,
+    {
+        self.send_with_timeout(destination, request, LONG_TIMEOUT, Some(max_body))
             .await
     }
 
@@ -214,7 +260,7 @@ impl FederationClient {
         let resolved = self.discovery.resolve(destination).await?;
         let http_req = self.signed(destination, &resolved, request)?;
         let (status, headers, body) = self
-            .exchange(destination, &resolved, http_req, TRANSACTION_TIMEOUT)
+            .exchange(destination, &resolved, http_req, TRANSACTION_TIMEOUT, None)
             .await?;
         let retry_after = headers
             .get(http::header::RETRY_AFTER)
@@ -233,6 +279,7 @@ impl FederationClient {
         destination: &ServerName,
         request: R,
         timeout: Duration,
+        max_body: Option<usize>,
     ) -> Result<R::IncomingResponse>
     where
         R: OutgoingRequest<Authentication = ServerSignatures> + std::fmt::Debug,
@@ -241,7 +288,7 @@ impl FederationClient {
     {
         let resolved = self.discovery.resolve(destination).await?;
         let http_req = self.signed(destination, &resolved, request)?;
-        self.dispatch::<R>(destination, &resolved, http_req, timeout)
+        self.dispatch::<R>(destination, &resolved, http_req, timeout, max_body)
             .await
     }
 
@@ -277,13 +324,14 @@ impl FederationClient {
         resolved: &crate::discovery::Resolved,
         http_req: http::Request<Vec<u8>>,
         timeout: Duration,
+        max_body: Option<usize>,
     ) -> Result<R::IncomingResponse>
     where
         R: OutgoingRequest,
         R::EndpointError: std::fmt::Debug,
     {
         let (status, headers, bytes) = self
-            .exchange(destination, resolved, http_req, timeout)
+            .exchange(destination, resolved, http_req, timeout, max_body)
             .await?;
         if !status.is_success() {
             return Err(Error::RemoteError {
@@ -315,6 +363,7 @@ impl FederationClient {
         resolved: &crate::discovery::Resolved,
         http_req: http::Request<Vec<u8>>,
         timeout: Duration,
+        max_body: Option<usize>,
     ) -> Result<(http::StatusCode, http::HeaderMap, bytes::Bytes)> {
         let (parts, body) = http_req.into_parts();
 
@@ -336,10 +385,7 @@ impl FederationClient {
         };
         let status = resp.status();
         let headers = resp.headers().clone();
-        let bytes = resp
-            .bytes()
-            .await
-            .map_err(|e| Error::Transport(destination.to_owned(), error_chain(&e)))?;
+        let bytes = read_body(destination, resp, max_body).await?;
         Ok((status, headers, bytes))
     }
 
@@ -446,6 +492,7 @@ impl FederationClient {
         &self,
         destination: &ServerName,
         path: &str,
+        max_body: usize,
     ) -> Result<(Vec<u8>, String, Option<String>)> {
         let resolved = self.discovery.resolve(destination).await?;
         let url = format!("{}{path}", resolved.base_url());
@@ -472,10 +519,7 @@ impl FederationClient {
             .get(http::header::CONTENT_DISPOSITION)
             .and_then(|v| v.to_str().ok())
             .map(str::to_owned);
-        let bytes = resp
-            .bytes()
-            .await
-            .map_err(|e| Error::Transport(destination.to_owned(), error_chain(&e)))?;
+        let bytes = read_body(destination, resp, Some(max_body)).await?;
         if !status.is_success() {
             return Err(Error::RemoteError {
                 server: destination.to_owned(),
@@ -484,6 +528,41 @@ impl FederationClient {
             });
         }
         Ok((bytes.to_vec(), content_type, disposition))
+    }
+
+    /// Fetch media from the URL a server redirected us to (typically its CDN): a plain `GET`
+    /// without our signature, bounded in time and size. Returns the bytes and content type.
+    pub async fn get_redirected(
+        &self,
+        origin: &ServerName,
+        url: &str,
+        max_body: usize,
+    ) -> Result<(Vec<u8>, String)> {
+        let parsed = reqwest::Url::parse(url)
+            .ok()
+            .filter(|u| matches!(u.scheme(), "http" | "https"))
+            .ok_or_else(|| Error::Protocol(format!("{origin}: unusable media location")))?;
+        let resp = self
+            .http
+            .get(parsed)
+            .timeout(LONG_REQUEST_TIMEOUT)
+            .send()
+            .await
+            .map_err(|e| Error::Transport(origin.to_owned(), error_chain(&e)))?;
+        let status = resp.status();
+        let content_type = resp
+            .headers()
+            .get(http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("application/octet-stream")
+            .to_owned();
+        let bytes = read_body(origin, resp, Some(max_body)).await?;
+        if !status.is_success() {
+            return Err(Error::Protocol(format!(
+                "{origin}: media location answered {status}"
+            )));
+        }
+        Ok((bytes.to_vec(), content_type))
     }
 
     /// Verify an incoming request's `X-Matrix` signature. Returns the origin server.

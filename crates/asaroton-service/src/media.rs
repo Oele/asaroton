@@ -13,6 +13,13 @@ use crate::{Error, Result, Services};
 pub const MAX_UPLOAD_BYTES: u64 = 100 * 1024 * 1024;
 /// Async uploads must complete within this long.
 const PENDING_UPLOAD_TTL_MS: i64 = 24 * 60 * 60 * 1000;
+/// Images with more pixels than this are not decoded for a thumbnail: a small file can
+/// declare enormous dimensions. (Synapse's default is the same.)
+const MAX_IMAGE_PIXELS: u64 = 32_000_000;
+/// Memory one decode may allocate.
+const MAX_DECODE_BYTES: u64 = 512 * 1024 * 1024;
+/// Thumbnails generated at the same time; each holds a decoded image in memory.
+static THUMBNAIL_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 
 /// A media file ready to serve.
 #[derive(Debug)]
@@ -243,12 +250,21 @@ impl Services {
             .federation()
             .remote_media(server_name, media_id)
             .await?;
-        // Cache locally.
+        // Cache locally. A file that could not be written must not be recorded: the record
+        // would make every later request fail instead of fetching the media again.
         let path = self.media_path(server_name, media_id);
         if let Some(parent) = path.parent() {
             let _ = tokio::fs::create_dir_all(parent).await;
         }
-        let _ = tokio::fs::write(&path, &bytes).await;
+        if let Err(e) = tokio::fs::write(&path, &bytes).await {
+            tracing::warn!(%server_name, media_id, error = %e, "could not cache remote media");
+            let _ = tokio::fs::remove_file(&path).await;
+            return Ok(MediaFile {
+                bytes,
+                content_type,
+                filename,
+            });
+        }
         let _ = self
             .store
             .create_media(&MediaInfo {
@@ -304,11 +320,18 @@ impl Services {
         }
         let src = original.bytes;
         let method_owned = method.to_owned();
+        let local = *server_name == self.config.server_name;
+        let slot = THUMBNAIL_SLOTS
+            .acquire()
+            .await
+            .map_err(|e| Error::internal(e.to_string()))?;
         let generated = tokio::task::spawn_blocking(move || {
-            generate_thumbnail(&src, width, height, &method_owned)
+            generate_thumbnail(&src, width, height, &method_owned, local)
         })
         .await
-        .map_err(|e| Error::internal(e.to_string()))??;
+        .map_err(|e| Error::internal(e.to_string()))?;
+        drop(slot);
+        let generated = generated?;
         let info = ThumbnailInfo {
             width,
             height,
@@ -348,14 +371,51 @@ fn snap_thumbnail_size(width: u32, height: u32, method: &str) -> (u32, u32, &'st
     (800, 600, method)
 }
 
-fn generate_thumbnail(src: &[u8], width: u32, height: u32, method: &str) -> Result<Vec<u8>> {
-    let img = image::load_from_memory(src).map_err(|e| {
+/// The pixel dimensions an image declares, read from its header without decoding it.
+pub fn image_dimensions(src: &[u8]) -> Option<(u32, u32)> {
+    image::ImageReader::new(std::io::Cursor::new(src))
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()
+}
+
+fn generate_thumbnail(
+    src: &[u8],
+    width: u32,
+    height: u32,
+    method: &str,
+    local: bool,
+) -> Result<Vec<u8>> {
+    let undecodable = |e: &dyn std::fmt::Display| {
         Error::matrix(
             ruma::api::error::ErrorKind::Unknown,
             http::StatusCode::BAD_REQUEST,
             format!("Cannot decode image: {e}"),
         )
-    })?;
+    };
+    // Look at the declared size before decoding anything.
+    let Some((w, h)) = image_dimensions(src) else {
+        return Err(undecodable(&"unrecognised image"));
+    };
+    if u64::from(w) * u64::from(h) > MAX_IMAGE_PIXELS {
+        return Err(Error::matrix(
+            ruma::api::error::ErrorKind::TooLarge,
+            if local {
+                http::StatusCode::PAYLOAD_TOO_LARGE
+            } else {
+                http::StatusCode::BAD_GATEWAY
+            },
+            format!("The image is too large to thumbnail ({w}x{h} pixels)."),
+        ));
+    }
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(src))
+        .with_guessed_format()
+        .map_err(|e| undecodable(&e))?;
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(MAX_DECODE_BYTES);
+    reader.limits(limits);
+    let img = reader.decode().map_err(|e| undecodable(&e))?;
     let thumb = if method == "crop" {
         img.resize_to_fill(width, height, image::imageops::FilterType::Lanczos3)
     } else {
@@ -373,4 +433,113 @@ pub fn parse_mxc(uri: &str) -> Option<(OwnedServerName, String)> {
     let rest = uri.strip_prefix("mxc://")?;
     let (server, id) = rest.split_once('/')?;
     Some((OwnedServerName::try_from(server).ok()?, id.to_owned()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A PNG file that consists of little more than its header.
+    fn png_declaring(width: u32, height: u32) -> Vec<u8> {
+        fn chunk(out: &mut Vec<u8>, kind: [u8; 4], data: &[u8]) {
+            let mut crc = 0xFFFF_FFFF_u32;
+            for byte in kind.iter().chain(data) {
+                crc ^= u32::from(*byte);
+                for _ in 0..8 {
+                    crc = if crc & 1 == 1 {
+                        (crc >> 1) ^ 0xEDB8_8320
+                    } else {
+                        crc >> 1
+                    };
+                }
+            }
+            out.extend_from_slice(&u32::try_from(data.len()).unwrap_or(0).to_be_bytes());
+            out.extend_from_slice(&kind);
+            out.extend_from_slice(data);
+            out.extend_from_slice(&(!crc).to_be_bytes());
+        }
+        let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
+        let mut header = Vec::new();
+        header.extend_from_slice(&width.to_be_bytes());
+        header.extend_from_slice(&height.to_be_bytes());
+        header.extend_from_slice(&[8, 2, 0, 0, 0]); // 8-bit RGB
+        chunk(&mut out, *b"IHDR", &header);
+        chunk(
+            &mut out,
+            *b"IDAT",
+            &[0x78, 0x9c, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01],
+        );
+        chunk(&mut out, *b"IEND", &[]);
+        out
+    }
+
+    fn status(e: &Error) -> Option<http::StatusCode> {
+        match e {
+            Error::Matrix { status, .. } => Some(*status),
+            _ => None,
+        }
+    }
+
+    fn real_png(width: u32, height: u32) -> Vec<u8> {
+        let img = image::RgbImage::from_fn(width, height, |x, y| {
+            image::Rgb([x.to_le_bytes()[0], y.to_le_bytes()[0], 128])
+        });
+        let mut out = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut out, image::ImageFormat::Png)
+            .unwrap_or_else(|e| panic!("encoding: {e}"));
+        out.into_inner()
+    }
+
+    #[test]
+    fn dimensions_come_from_the_header() {
+        assert_eq!(
+            image_dimensions(&png_declaring(40_000, 40_000)),
+            Some((40_000, 40_000))
+        );
+        assert_eq!(image_dimensions(&real_png(64, 48)), Some((64, 48)));
+        assert_eq!(image_dimensions(b"not an image"), None);
+    }
+
+    #[test]
+    fn an_image_declaring_too_many_pixels_is_not_decoded() {
+        // 1.6 billion pixels in a file of under a hundred bytes.
+        let bomb = png_declaring(40_000, 40_000);
+        assert!(bomb.len() < 100);
+        for (local, expected) in [
+            (true, http::StatusCode::PAYLOAD_TOO_LARGE),
+            (false, http::StatusCode::BAD_GATEWAY),
+        ] {
+            let err = generate_thumbnail(&bomb, 96, 96, "crop", local)
+                .err()
+                .unwrap_or_else(|| panic!("the oversized image was thumbnailed"));
+            assert_eq!(status(&err), Some(expected));
+            assert!(err.to_string().contains("too large to thumbnail"), "{err}");
+        }
+        // Just under the limit it is decoded (and fails here, as the file holds no pixels).
+        let err = generate_thumbnail(&png_declaring(8_000, 4_000), 96, 96, "crop", true)
+            .err()
+            .unwrap_or_else(|| panic!("an empty image was thumbnailed"));
+        assert_eq!(status(&err), Some(http::StatusCode::BAD_REQUEST));
+    }
+
+    #[test]
+    fn ordinary_images_are_thumbnailed() {
+        let src = real_png(640, 480);
+        for (method, expected) in [("scale", (320, 240)), ("crop", (96, 96))] {
+            let (w, h) = if method == "crop" {
+                (96, 96)
+            } else {
+                (320, 240)
+            };
+            let out = generate_thumbnail(&src, w, h, method, true)
+                .unwrap_or_else(|e| panic!("thumbnail failed: {e}"));
+            assert_eq!(image_dimensions(&out), Some(expected));
+        }
+        assert_eq!(
+            generate_thumbnail(b"plain text", 96, 96, "crop", true)
+                .err()
+                .and_then(|e| status(&e)),
+            Some(http::StatusCode::BAD_REQUEST)
+        );
+    }
 }

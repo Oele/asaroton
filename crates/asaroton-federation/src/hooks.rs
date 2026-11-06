@@ -397,9 +397,18 @@ impl FederationHooks for Hooks {
         media_id: &str,
     ) -> asaroton_service::Result<(Vec<u8>, String, Option<String>)> {
         use ruma::api::federation::authenticated_media::{FileOrLocation, get_content};
+        // How much a remote server sends is its own choice: stop reading at what a local
+        // upload may be. The authenticated endpoint wraps the file in a multipart body.
+        let max = usize::try_from(asaroton_service::media::MAX_UPLOAD_BYTES).unwrap_or(usize::MAX);
         let req = get_content::v1::Request::new(media_id.to_owned());
-        let resp = match self.0.client.send_long(server_name, req).await {
+        let resp = match self
+            .0
+            .client
+            .send_bounded(server_name, req, max.saturating_add(64 * 1024))
+            .await
+        {
             Ok(r) => r,
+            Err(e @ crate::Error::TooLarge(..)) => return Err(e.into()),
             Err(e) => {
                 // Servers without authenticated media (and some test servers) still serve the
                 // legacy unauthenticated endpoint.
@@ -412,7 +421,7 @@ impl FederationHooks for Hooks {
                 let (bytes, content_type, disposition) = self
                     .0
                     .client
-                    .get_bytes(server_name, &path)
+                    .get_bytes(server_name, &path, max)
                     .await
                     .map_err(asaroton_service::Error::from)?;
                 let filename = disposition.and_then(|d| {
@@ -437,20 +446,13 @@ impl FederationHooks for Hooks {
                 ))
             }
             FileOrLocation::Location(url) => {
-                let r = reqwest::get(&url)
+                let (bytes, content_type) = self
+                    .0
+                    .client
+                    .get_redirected(server_name, &url, max)
                     .await
-                    .map_err(|e| asaroton_service::Error::internal(e.to_string()))?;
-                let ct = r
-                    .headers()
-                    .get(http::header::CONTENT_TYPE)
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or("application/octet-stream")
-                    .to_owned();
-                let bytes = r
-                    .bytes()
-                    .await
-                    .map_err(|e| asaroton_service::Error::internal(e.to_string()))?;
-                Ok((bytes.to_vec(), ct, None))
+                    .map_err(asaroton_service::Error::from)?;
+                Ok((bytes, content_type, None))
             }
             _ => Err(asaroton_service::Error::internal("unknown media response")),
         }

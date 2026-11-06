@@ -14,6 +14,8 @@ pub enum Error {
         status: http::StatusCode,
         body: String,
     },
+    #[error("the response from {0} is larger than the {1} bytes allowed")]
+    TooLarge(OwnedServerName, usize),
     #[error("no signing keys available for {0}")]
     NoKeys(OwnedServerName),
     #[error("protocol error: {0}")]
@@ -104,6 +106,11 @@ impl From<Error> for asaroton_service::Error {
                 ErrorKind::Unknown,
                 http::StatusCode::BAD_GATEWAY,
                 format!("{s}: {m}"),
+            ),
+            Error::TooLarge(..) => asaroton_service::Error::matrix(
+                ErrorKind::TooLarge,
+                http::StatusCode::BAD_GATEWAY,
+                "The remote content is too large.",
             ),
             Error::NoKeys(s) => asaroton_service::Error::matrix(
                 ErrorKind::Unknown,

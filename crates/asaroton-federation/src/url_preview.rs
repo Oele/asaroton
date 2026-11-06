@@ -103,9 +103,9 @@ impl Federation {
         ct: &str,
     ) {
         let size = bytes.len();
-        let dims = image::load_from_memory(&bytes)
-            .ok()
-            .map(|i| (i.width(), i.height()));
+        // From the header only: decoding an untrusted image just to learn its size would let a
+        // small file claim a large amount of memory.
+        let dims = asaroton_service::media::image_dimensions(&bytes);
         match self.services.store_local_media(&bytes, ct, None).await {
             Ok(mxc) => {
                 og.insert("og:image".into(), json!(mxc));
