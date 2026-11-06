@@ -109,7 +109,9 @@ pub trait UserStore: Send + Sync {
 /// Rooms, aliases, and the event graph.
 #[async_trait]
 pub trait RoomStore: Send + Sync {
-    async fn create_room(&self, room: RoomInfo) -> Result<()>;
+    /// Registers a room. Returns whether it is new: a room that is known already is left as
+    /// it is.
+    async fn create_room(&self, room: RoomInfo) -> Result<bool>;
     async fn get_room(&self, room_id: &RoomId) -> Result<Option<RoomInfo>>;
     async fn room_exists(&self, room_id: &RoomId) -> Result<bool>;
     async fn set_room_public(&self, room_id: &RoomId, public: bool) -> Result<()>;

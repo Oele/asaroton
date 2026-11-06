@@ -75,8 +75,8 @@ pub(crate) const MEMBERSHIP_COLUMNS: &str = "room_id, user_id, membership, event
 
 #[async_trait]
 impl RoomStore for PostgresStore {
-    async fn create_room(&self, room: RoomInfo) -> Result<()> {
-        sqlx::query(
+    async fn create_room(&self, room: RoomInfo) -> Result<bool> {
+        let done = sqlx::query(
             "INSERT INTO rooms (room_id, room_version, creator, is_public, created_ts) VALUES ($1, $2, $3, $4, $5)
              ON CONFLICT (room_id) DO NOTHING",
         )
@@ -87,7 +87,7 @@ impl RoomStore for PostgresStore {
         .bind(room.created_ts)
         .execute(&self.pool)
         .await?;
-        Ok(())
+        Ok(done.rows_affected() == 1)
     }
 
     async fn get_room(&self, room_id: &RoomId) -> Result<Option<RoomInfo>> {

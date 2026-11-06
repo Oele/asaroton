@@ -42,6 +42,7 @@ scripts/ssinvitetest.py URL      # a pending invite does not stop sliding sync f
 scripts/syncaccesstest.py URL    # sync shows a user only what they may read: knocks, bans, declined invites, history visibility
 scripts/syncwaketest.py URL      # a waiting sync wakes for an invitation or a room created on another device
 scripts/sslazytest.py            # sliding sync with lazily loaded members hands out the memberships a timeline is about (starts its own server)
+scripts/createroomtest.py        # createRoom under pressure: several rooms at once (starts its own server)
 scripts/deploy.sh [status]      # check, build and deploy: this machine first, then the remote host (see docs/deployment.md)
 watch/                          # weekly watch job: spec, Synapse, tests and server logs become issues, see its README
 ```

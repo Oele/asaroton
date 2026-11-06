@@ -361,24 +361,44 @@ impl Services {
             return Ok(room_id);
         }
         // v12: build without a room_id to learn the ID, register the room, then persist.
-        let pdu = asaroton_core::builder::PduBuilder::new(
-            creator.to_owned(),
-            TimelineEventType::RoomCreate,
-        )
-        .state_key("")
-        .content_object(create_ev.content.clone())
-        .depth(ruma::UInt::from(1u32))
-        .build(&ctx.rules, &self.signing_key, &self.config.server_name)?;
+        //
+        // The ID is the hash of the create event, and two create events of one user with the
+        // same content and the same millisecond are one and the same event. The timestamp is
+        // the one thing that may differ, so it moves on until the ID is one no room has yet.
+        // Whoever registers the room first has it; the store says who that was.
+        let mut ts = ruma::MilliSecondsSinceUnixEpoch::now();
+        let mut tries = 0;
+        let pdu = loop {
+            let pdu = asaroton_core::builder::PduBuilder::new(
+                creator.to_owned(),
+                TimelineEventType::RoomCreate,
+            )
+            .state_key("")
+            .content_object(create_ev.content.clone())
+            .depth(ruma::UInt::from(1u32))
+            .origin_server_ts(ts)
+            .build(&ctx.rules, &self.signing_key, &self.config.server_name)?;
+            let is_new = self
+                .store
+                .create_room(RoomInfo {
+                    room_id: pdu.room_id().to_owned(),
+                    room_version: version.clone(),
+                    creator: Some(creator.to_owned()),
+                    is_public: false,
+                    created_ts: now_ts(),
+                })
+                .await?;
+            if is_new {
+                break pdu;
+            }
+            tries += 1;
+            ts =
+                ts.0.checked_add(ruma::UInt::from(1u32))
+                    .map(ruma::MilliSecondsSinceUnixEpoch)
+                    .filter(|_| tries < 1000)
+                    .ok_or_else(|| Error::internal("no free room ID for a new room"))?;
+        };
         let room_id = pdu.room_id().to_owned();
-        self.store
-            .create_room(RoomInfo {
-                room_id: room_id.clone(),
-                room_version: version.clone(),
-                creator: Some(creator.to_owned()),
-                is_public: false,
-                created_ts: now_ts(),
-            })
-            .await?;
         ctx.room_id = room_id.clone();
         let mut ev = create_ev;
         ev.room_id = room_id.clone();
