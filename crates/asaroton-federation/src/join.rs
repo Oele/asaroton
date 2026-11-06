@@ -436,23 +436,45 @@ impl Federation {
         self.event_cache
             .insert(join.event_id().to_owned(), join.clone());
         services.notify_room_event(&join, persisted.stream_ordering);
-        if let Err(e) = self.reauthorise_rejected(room_id, rules).await {
+        if let Err(e) = self
+            .reauthorise_rejected(room_id, rules, persisted.state_group)
+            .await
+        {
             tracing::warn!(%room_id, error = %e, "could not look again at rejected events");
+        }
+        // Events of this room that are waiting for auth events they cite: the join may have
+        // brought those in, so they are due now.
+        if let Err(e) = services.store.hasten_awaiting_auth(room_id, now_ts()).await {
+            tracing::warn!(%room_id, error = %e, "could not bring forward the events that were set aside");
         }
         Ok(())
     }
 
-    /// Look again at the timeline events of a room that are stored as rejected. Where the
-    /// rejection came from an auth event that was itself wrongly rejected (because what it
-    /// depends on could not be obtained or verified at the time), it no longer holds once
-    /// that event is accepted. An event is restored when it passes against the auth events it
-    /// cites and against the room's current state. Only events without a state key are
-    /// restored: taking back the rejection of a state event would mean recomputing the state
-    /// of everything after it, and state is repaired by the join itself.
-    async fn reauthorise_rejected(&self, room_id: &RoomId, rules: &RoomVersionRules) -> Result<()> {
+    /// Look again at the events of a room that are stored as rejected: the ones in its
+    /// timeline, and the ones set aside because an auth event they cite could not be obtained
+    /// (see `recheck`). Where a rejection came from an auth event that was itself wrongly
+    /// rejected, or missing, it no longer holds once the join has brought that event in.
+    ///
+    /// An event is restored when it passes against the auth events it cites and against the
+    /// room's current state. The state before the event, which the normal checks use, is no
+    /// measure here: it was put together before this join, from the same incomplete picture
+    /// that made the event fail. Only events without a state key are restored: taking back
+    /// the rejection of a state event would mean recomputing the state of everything after
+    /// it, and state is repaired by the join itself.
+    ///
+    /// A timeline event keeps its place. An event that had been set aside has none yet; it
+    /// is placed at the join (`joined_at`, the state group after it) and reaches the clients
+    /// as an event that arrived late.
+    async fn reauthorise_rejected(
+        &self,
+        room_id: &RoomId,
+        rules: &RoomVersionRules,
+        joined_at: Option<asaroton_store::StateGroupId>,
+    ) -> Result<()> {
         let services = &self.services;
-        let candidates = services.store.rejected_timeline_events(room_id).await?;
-        if candidates.is_empty() {
+        let in_timeline = services.store.rejected_timeline_events(room_id, 0).await?;
+        let set_aside = services.store.events_set_aside(room_id).await?;
+        if in_timeline.is_empty() && set_aside.is_empty() {
             return Ok(());
         }
         let current: HashMap<(StateEventType, String), Pdu> = services
@@ -466,10 +488,15 @@ impl Federation {
             })
             .collect();
         let mut restored: Vec<OwnedEventId> = Vec::new();
+        let mut placed = 0usize;
         let mut kept = 0usize;
-        for ev in candidates {
+        for (ev, aside) in in_timeline
+            .into_iter()
+            .map(|e| (e, false))
+            .chain(set_aside.into_iter().map(|e| (e, true)))
+        {
             let p = &ev.pdu;
-            if p.is_state() {
+            if p.is_state() || !p.rejected() || (aside && !ev.outlier) {
                 kept += 1;
                 continue;
             }
@@ -486,19 +513,52 @@ impl Federation {
                     .cloned()
                     .or_else(|| current.values().find(|c| c.event_id() == id).cloned())
             };
-            if auth::check_against_auth_events(p, rules, lookup).is_ok()
-                && auth::check_against_state(p, rules, &current).is_ok()
-            {
-                restored.push(p.event_id().to_owned());
-            } else {
+            // An event that was set aside never got as far as the checks of its form.
+            let well_formed = !aside
+                || (auth::check_size_limits(p).is_ok()
+                    && auth::check_state_independent(p, rules, lookup).is_ok());
+            let passes = well_formed
+                && p.auth_events()
+                    .iter()
+                    .all(|id| lookup(id).is_some_and(|cited| !cited.rejected()))
+                && auth::check_against_auth_events(p, rules, lookup).is_ok()
+                && auth::check_against_state(p, rules, &current).is_ok();
+            if !passes {
                 kept += 1;
+                continue;
             }
+            if !aside {
+                restored.push(p.event_id().to_owned());
+                continue;
+            }
+            let Some(group) = joined_at else {
+                kept += 1;
+                continue;
+            };
+            let accepted = p.with_rejected(false);
+            let persisted = services
+                .store
+                .persist_event(PersistEvent {
+                    pdu: accepted.clone(),
+                    state: EventState::Existing(group),
+                    soft_failed: false,
+                    backfilled: false,
+                    stream_ordering: None,
+                    current_state_delta: None,
+                    forward_extremities: None,
+                })
+                .await?;
+            services.store.forget_awaiting_auth(p.event_id()).await?;
+            self.event_cache
+                .insert(p.event_id().to_owned(), accepted.clone());
+            services.notify_room_event(&accepted, persisted.stream_ordering);
+            placed += 1;
         }
         let cleared = services.store.clear_rejected(&restored).await?;
         for id in &restored {
             self.event_cache.remove(id);
         }
-        tracing::info!(%room_id, restored = cleared, still_rejected = kept, "looked again at the room's rejected events");
+        tracing::info!(%room_id, restored = cleared, placed, still_rejected = kept, "looked again at the room's rejected events");
         Ok(())
     }
 
@@ -1017,6 +1077,7 @@ impl Federation {
         let mut chain_ids = services.store.auth_chain(&state_ids).await?;
         chain_ids.retain(|id| !state_ids.contains(id));
         let chain = services.store.get_events(&chain_ids).await?;
+        crate::warn_if_chain_incomplete(room_id, "send_join", &chain_ids, &chain);
         let to_raw = |p: &Pdu| {
             serde_json::value::to_raw_value(&asaroton_core::canonical::to_json_value(
                 p.to_federation_json_with_id(&rules),

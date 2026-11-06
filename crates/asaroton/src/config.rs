@@ -137,6 +137,11 @@ pub struct FederationConfig {
     /// gateway on the local network: `["192.168.2.0/24"]`.
     #[serde(default)]
     pub allowed_internal_ranges: Vec<String>,
+    /// An event from another server that cannot be checked, because an event it depends on
+    /// cannot be obtained, is set aside and tried again: first after this many seconds, then
+    /// after ever longer waits, for a week. The default is 120.
+    #[serde(default)]
+    pub unchecked_event_retry_secs: Option<u32>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]

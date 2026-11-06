@@ -178,6 +178,10 @@ fn federation_config(config: &Config) -> FederationConfig {
             .max_edu_transactions_per_minute
             .unwrap_or_default(),
         allowed_internal_ranges: config.federation.allowed_internal_ranges.clone(),
+        unchecked_event_retry_secs: config
+            .federation
+            .unchecked_event_retry_secs
+            .unwrap_or_default(),
     }
 }
 

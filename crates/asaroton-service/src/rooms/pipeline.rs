@@ -80,6 +80,26 @@ pub struct RoomContext {
     /// the next event gets: kept with the context so a send does not reload them.
     pub prev_refs: Vec<asaroton_core::builder::EventRef>,
     pub next_depth: u64,
+    /// Extremities that the next event does not name as prev events, because an event may
+    /// name only so many. They stay extremities, and later events tie them up.
+    pub unreferenced: Vec<OwnedEventId>,
+}
+
+/// The most prev events a new event names. The specification allows twenty.
+const MAX_PREV_EVENTS: usize = 20;
+
+/// Which of a room's extremities (deepest first) the next event names as prev events when
+/// there are more than it may name: the deepest half, to build on what is newest, and the
+/// shallowest, so that old loose ends get tied up too instead of waiting forever. Returns the
+/// chosen and the rest.
+fn choose_prev_events<T>(mut deepest_first: Vec<T>) -> (Vec<T>, Vec<T>) {
+    if deepest_first.len() <= MAX_PREV_EVENTS {
+        return (deepest_first, Vec::new());
+    }
+    let newest = MAX_PREV_EVENTS / 2;
+    let oldest_from = deepest_first.len() - (MAX_PREV_EVENTS - newest);
+    let rest: Vec<T> = deepest_first.drain(newest..oldest_from).collect();
+    (deepest_first, rest)
 }
 
 impl RoomContext {
@@ -145,7 +165,11 @@ impl Services {
             .lock()
             .ok()
             .and_then(|mut c| c.get(room_id).cloned());
-        if let Some(c) = cached {
+        // A context that left extremities unreferenced is not reused: the next event has to
+        // pick up some of those, which takes loading them.
+        if let Some(c) = cached
+            && c.unreferenced.is_empty()
+        {
             let ext = self.store.forward_extremities(room_id).await?;
             if ext.len() == c.extremities.len() && ext.iter().all(|e| c.extremities.contains(e)) {
                 return Ok((*c).clone());
@@ -206,7 +230,11 @@ impl Services {
         } else {
             None
         };
-        let prev_pdus = self.store.get_events(&extremities).await?;
+        let mut prev_pdus = self.store.get_events(&extremities).await?;
+        prev_pdus.sort_by_key(|e| std::cmp::Reverse(u64::from(e.pdu.depth())));
+        let (prev_pdus, left) = choose_prev_events(prev_pdus);
+        let unreferenced: Vec<OwnedEventId> =
+            left.iter().map(|e| e.pdu.event_id().to_owned()).collect();
         let next_depth = prev_pdus
             .iter()
             .map(|e| u64::from(e.pdu.depth()))
@@ -229,6 +257,7 @@ impl Services {
             extremities,
             prev_refs,
             next_depth,
+            unreferenced,
         })
     }
 
@@ -394,7 +423,11 @@ impl Services {
                 backfilled: false,
                 stream_ordering: None,
                 current_state_delta: delta,
-                forward_extremities: Some(vec![pdu.event_id().to_owned()]),
+                forward_extremities: Some(
+                    std::iter::once(pdu.event_id().to_owned())
+                        .chain(ctx.unreferenced.iter().cloned())
+                        .collect(),
+                ),
             })
             .await?;
 
@@ -403,7 +436,9 @@ impl Services {
             ctx.state.insert((ty, key.to_owned()), pdu.clone());
         }
         ctx.state_group = persisted.state_group;
-        ctx.extremities = vec![pdu.event_id().to_owned()];
+        ctx.extremities = std::iter::once(pdu.event_id().to_owned())
+            .chain(ctx.unreferenced.iter().cloned())
+            .collect();
         ctx.prev_refs = vec![asaroton_core::builder::EventRef {
             event_id: pdu.event_id().to_owned(),
             sha256: content_hash(pdu.raw()),
@@ -465,4 +500,36 @@ fn content_hash(raw: &CanonicalJsonObject) -> Option<String> {
         .get("sha256")?
         .as_str()
         .map(str::to_owned)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_PREV_EVENTS, choose_prev_events};
+
+    #[test]
+    fn an_event_names_at_most_twenty_prev_events() {
+        // Up to the limit, all of them.
+        let (chosen, rest) = choose_prev_events((0..20).collect::<Vec<u32>>());
+        assert_eq!(chosen.len(), 20);
+        assert_eq!(rest, Vec::<u32>::new());
+
+        // Beyond it: the ten deepest and the ten shallowest; the middle waits its turn.
+        let (chosen, rest) = choose_prev_events((0..45).collect::<Vec<u32>>());
+        assert_eq!(chosen.len(), MAX_PREV_EVENTS);
+        assert_eq!(chosen[..10], (0..10).collect::<Vec<u32>>());
+        assert_eq!(chosen[10..], (35..45).collect::<Vec<u32>>());
+        assert_eq!(rest, (10..35).collect::<Vec<u32>>());
+
+        // Each event leaves fewer behind, so a pile is worked off: the new event replaces the
+        // twenty it named.
+        let mut ends = 45usize;
+        let mut events = 0;
+        while ends > 1 {
+            let (chosen, rest) = choose_prev_events((0..ends).collect::<Vec<usize>>());
+            assert!(chosen.len() <= MAX_PREV_EVENTS);
+            ends = rest.len() + 1;
+            events += 1;
+        }
+        assert_eq!(events, 3);
+    }
 }

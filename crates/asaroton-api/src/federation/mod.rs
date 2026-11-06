@@ -587,6 +587,7 @@ pub async fn state(
         state_and_auth_at(&app, &req.body.room_id, &req.body.event_id).await?;
     let pdus = app.store.get_events(&state_ids).await?;
     let chain = app.store.get_events(&chain_ids).await?;
+    asaroton_federation::warn_if_chain_incomplete(&req.body.room_id, "state", &chain_ids, &chain);
     Ok(get_room_state::v1::Response::new(
         chain
             .iter()
@@ -684,6 +685,12 @@ pub async fn event_auth(
         chain_ids.push(create_id);
     }
     let chain = app.store.get_events(&chain_ids).await?;
+    asaroton_federation::warn_if_chain_incomplete(
+        &req.body.room_id,
+        "event_auth",
+        &chain_ids,
+        &chain,
+    );
     Ok(get_event_authorization::v1::Response::new(
         chain
             .iter()

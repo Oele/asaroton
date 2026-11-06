@@ -120,6 +120,17 @@ pub struct StoredEvent {
     pub redacted: bool,
 }
 
+/// An event waiting for auth events that could not be obtained when it arrived.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AwaitingAuth {
+    pub event_id: OwnedEventId,
+    pub room_id: OwnedRoomId,
+    /// The server that delivered the event.
+    pub origin: OwnedServerName,
+    pub first_ts: Ts,
+    pub tries: i32,
+}
+
 impl StoredEvent {
     /// The event ID.
     pub fn event_id(&self) -> &ruma::EventId {

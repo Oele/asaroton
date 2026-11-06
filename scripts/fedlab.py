@@ -198,8 +198,11 @@ class Peer:
 
 
 class Homeserver:
-    def __init__(self, work, peers):
+    def __init__(self, work, peers, federation_extra=""):
         self.work = work
+        # Lines for the [federation] section that every start of this lab gets, unless a
+        # start names its own.
+        self.federation_extra = federation_extra
         self.client_port, self.fed_port = free_port(), free_port()
         self.url = f"http://127.0.0.1:{self.client_port}"
         self.fed = f"http://127.0.0.1:{self.fed_port}"
@@ -207,7 +210,9 @@ class Homeserver:
         self.log = os.path.join(work, "server.log")
         self.proc = None
 
-    def start(self, federation_extra=""):
+    def start(self, federation_extra=None):
+        if federation_extra is None:
+            federation_extra = self.federation_extra
         names = ", ".join(f'"{p.name}"' for p in self.peers)
         base, _, _ = ADMIN_DB.rpartition("/")
         config = os.path.join(self.work, "asaroton.toml")
@@ -296,6 +301,35 @@ def psql(statement):
     subprocess.run(["psql", "-q", ADMIN_DB, "-c", statement], check=True, stdout=subprocess.DEVNULL)
 
 
+def query(statement):
+    """Rows of a query on the homeserver's database, each a list of column texts."""
+    base, _, _ = ADMIN_DB.rpartition("/")
+    out = subprocess.run(["psql", "-q", "-At", "-F", "\t", f"{base}/{DATABASE}", "-c", statement], check=True, capture_output=True, text=True).stdout
+    return [line.split("\t") for line in out.splitlines()]
+
+
+# What redaction keeps of an event in room version 11: the form that is signed and hashed.
+KEPT_CONTENT = {
+    "m.room.create": None,  # everything
+    "m.room.member": ("membership", "join_authorised_via_users_server"),
+    "m.room.join_rules": ("join_rule", "allow"),
+    "m.room.power_levels": ("ban", "events", "events_default", "invite", "kick", "redact", "state_default", "users", "users_default"),
+}
+KEPT_TOP = ("type", "room_id", "sender", "state_key", "content", "hashes", "depth", "prev_events", "auth_events", "origin_server_ts")
+
+
+def signed_event(server, key, key_id, event):
+    """Add the content hash and the signature of `server` to a room version 11 event; return
+    (event_id, event)."""
+    bare = {k: v for k, v in event.items() if k not in ("unsigned", "signatures", "hashes")}
+    event["hashes"] = {"sha256": b64(hashlib.sha256(canonical(bare)).digest())}
+    redacted = {k: v for k, v in event.items() if k in KEPT_TOP}
+    keep = KEPT_CONTENT.get(event["type"], ())
+    redacted["content"] = event["content"] if keep is None else {k: v for k, v in event["content"].items() if k in keep}
+    event["signatures"] = {server: {key_id: b64(key.sign(canonical(redacted)).signature)}}
+    return "$" + b64(hashlib.sha256(canonical(redacted)).digest(), urlsafe=True), event
+
+
 
 
 def run_lab(labels, scenario, federation_extra=""):
@@ -305,10 +339,10 @@ def run_lab(labels, scenario, federation_extra=""):
         raise SystemExit(f"{BINARY} missing: run cargo build first")
     work = tempfile.mkdtemp(prefix="fedlab-")
     peers = {label: Peer(label) for label in labels}
-    hs = Homeserver(work, list(peers.values()))
+    hs = Homeserver(work, list(peers.values()), federation_extra)
     psql(f"CREATE DATABASE {DATABASE}")
     try:
-        hs.start(federation_extra)
+        hs.start()
         scenario(hs, peers)
     finally:
         hs.stop()

@@ -28,6 +28,9 @@ bind = "0.0.0.0:8448"
 # URL previews, push gateways and media redirects only reach public internet addresses.
 # Exempt ranges here, for example a push gateway on the local network:
 # allowed_internal_ranges = ["192.168.2.0/24"]
+# An event that cannot be checked because an event it depends on cannot be obtained is set
+# aside and tried again: first after this many seconds, then after ever longer waits.
+# unchecked_event_retry_secs = 120
 
 [registration]
 enabled = false

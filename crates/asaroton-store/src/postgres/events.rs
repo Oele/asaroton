@@ -1,13 +1,13 @@
 use asaroton_core::Pdu;
 use async_trait::async_trait;
-use ruma::{EventId, OwnedEventId, OwnedRoomId, RoomId, UserId};
+use ruma::{EventId, OwnedEventId, OwnedRoomId, OwnedServerName, RoomId, ServerName, UserId};
 use sqlx::{FromRow, PgConnection, Row};
 
 use super::{EVENT_COLUMNS, EventRow, PostgresStore, strings};
 use crate::{
-    Direction, Error, EventState, EventStore, PersistEvent, PersistedEvent, RelationRow, Result,
-    SearchHit, SearchMode, SearchQuery, StoredEvent, StreamOrdering, ThreadSummary, now_ts,
-    parse_ids, uint_to_i64,
+    AwaitingAuth, Direction, Error, EventState, EventStore, PersistEvent, PersistedEvent,
+    RelationRow, Result, SearchHit, SearchMode, SearchQuery, StoredEvent, StreamOrdering,
+    ThreadSummary, now_ts, parse_ids, uint_to_i64,
 };
 
 async fn persist_one(
@@ -19,20 +19,36 @@ async fn persist_one(
     let room_id = pdu.room_id();
 
     // Idempotency: an event we already have is not written twice.
-    if let Some(row) =
-        sqlx::query("SELECT stream_ordering, state_group, outlier FROM events WHERE event_id = $1")
-            .bind(pdu.event_id().as_str())
-            .fetch_optional(&mut *conn)
-            .await?
+    if let Some(row) = sqlx::query(
+        "SELECT stream_ordering, state_group, outlier, rejected FROM events WHERE event_id = $1",
+    )
+    .bind(pdu.event_id().as_str())
+    .fetch_optional(&mut *conn)
+    .await?
     {
         let existing = PersistedEvent {
             event_id: pdu.event_id().to_owned(),
             stream_ordering: row.get("stream_ordering"),
             state_group: row.get("state_group"),
         };
+        let placed = !matches!(ev.state, EventState::Outlier);
+        let (was_outlier, was_rejected): (bool, bool) = (row.get("outlier"), row.get("rejected"));
+        // Stored as rejected, and passing its checks on this later look: what it depends on
+        // could not be obtained or verified the first time.
+        let accepted_after_all = was_rejected && !pdu.rejected();
+        // The other way round: an outlier that was accepted on the strength of its auth
+        // events alone, and now fails against the room's state. It is not given a place in
+        // the timeline, where clients would be shown an event that failed its checks. Its row
+        // is not turned into a rejection either: this later check may be working from less
+        // (the state at a gap, as another server reports it), and other events rest on the
+        // outlier as an auth event.
+        if placed && was_outlier && !was_rejected && pdu.rejected() {
+            return Ok(existing);
+        }
         // An outlier being persisted again with state is "de-outliered"; it takes its place in
-        // the timeline at the given (or next backfill) position.
-        if row.get::<bool, _>("outlier") && !matches!(ev.state, EventState::Outlier) {
+        // the timeline at the given (or next backfill) position. So does an event whose
+        // rejection is taken back.
+        if placed && (was_outlier || accepted_after_all) {
             let group = resolve_state_group(&mut *conn, room_id, &ev.state).await?;
             let new_ordering: i64 = match ev.stream_ordering {
                 Some(so) => so,
@@ -41,22 +57,27 @@ async fn persist_one(
                     .await?
                     .get(0),
                 // A fresh position: sync tokens handed out meanwhile are already past the
-                // one the outlier was given, so keeping it would hide the event from them.
+                // one the event was given, so keeping it would hide the event from them.
                 None => sqlx::query("SELECT nextval('events_stream_seq')")
                     .fetch_one(&mut *conn)
                     .await?
                     .get(0),
             };
             sqlx::query(
-                "UPDATE events SET outlier = FALSE, state_group = $2, soft_failed = $3, stream_ordering = $4
+                "UPDATE events SET outlier = FALSE, state_group = $2, soft_failed = $3, stream_ordering = $4,
+                        rejected = $5
                  WHERE event_id = $1",
             )
             .bind(pdu.event_id().as_str())
             .bind(group)
             .bind(ev.soft_failed)
             .bind(new_ordering)
+            .bind(pdu.rejected())
             .execute(&mut *conn)
             .await?;
+            if accepted_after_all {
+                index_event(&mut *conn, pdu, new_ordering, keep_plaintext).await?;
+            }
             let existing = PersistedEvent {
                 stream_ordering: new_ordering,
                 ..existing
@@ -162,6 +183,47 @@ async fn persist_one(
         stream_ordering,
         state_group,
     })
+}
+
+/// Write the relation and search index rows of an event. They are left out while an event is
+/// rejected, so an event whose rejection is taken back gets them here.
+async fn index_event(
+    conn: &mut PgConnection,
+    pdu: &Pdu,
+    stream_ordering: i64,
+    keep_plaintext: bool,
+) -> Result<()> {
+    if let Some((target, rel_type)) = relation_of(pdu) {
+        sqlx::query(
+            "INSERT INTO event_relations (event_id, room_id, relates_to, rel_type, event_type, sender, origin_server_ts, stream_ordering)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT DO NOTHING",
+        )
+        .bind(pdu.event_id().as_str())
+        .bind(pdu.room_id().as_str())
+        .bind(target)
+        .bind(rel_type)
+        .bind(pdu.event_type().to_string())
+        .bind(pdu.sender().as_str())
+        .bind(uint_to_i64(pdu.origin_server_ts().0))
+        .bind(stream_ordering)
+        .execute(&mut *conn)
+        .await?;
+    }
+    if let Some(text) = search_text_of(pdu) {
+        sqlx::query(
+            "INSERT INTO event_search (event_id, room_id, stream_ordering, origin_server_ts, vector, value)
+             VALUES ($1, $2, $3, $4, to_tsvector('english', $5), $6) ON CONFLICT DO NOTHING",
+        )
+        .bind(pdu.event_id().as_str())
+        .bind(pdu.room_id().as_str())
+        .bind(stream_ordering)
+        .bind(uint_to_i64(pdu.origin_server_ts().0))
+        .bind(&text)
+        .bind(keep_plaintext.then_some(text.as_str()))
+        .execute(&mut *conn)
+        .await?;
+    }
+    Ok(())
 }
 
 /// `(target, rel_type)` of the event's `m.relates_to`, when it points at a valid event ID.
@@ -476,24 +538,129 @@ impl EventStore for PostgresStore {
         if event_ids.is_empty() {
             return Ok(0);
         }
-        let done =
-            sqlx::query("UPDATE events SET rejected = FALSE WHERE event_id = ANY($1) AND rejected")
-                .bind(strings(event_ids))
-                .execute(&self.pool)
-                .await?;
-        Ok(done.rows_affected())
+        let rows = sqlx::query(
+            "UPDATE events SET rejected = FALSE WHERE event_id = ANY($1) AND rejected RETURNING event_id",
+        )
+        .bind(strings(event_ids))
+        .fetch_all(&self.pool)
+        .await?;
+        // What was left out of the indexes while the events were rejected.
+        let restored = ids_from_rows(rows);
+        let keep = self
+            .search_plaintext
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let mut conn = self.pool.acquire().await?;
+        for ev in self.get_events(&restored).await? {
+            index_event(&mut conn, &ev.pdu, ev.stream_ordering, keep).await?;
+        }
+        Ok(restored.len() as u64)
     }
 
-    async fn rejected_timeline_events(&self, room_id: &RoomId) -> Result<Vec<StoredEvent>> {
+    async fn rejected_timeline_events(
+        &self,
+        room_id: &RoomId,
+        received_since: i64,
+    ) -> Result<Vec<StoredEvent>> {
         let rows: Vec<EventRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "SELECT {EVENT_COLUMNS} FROM events e JOIN rooms r ON r.room_id = e.room_id
-             WHERE e.room_id = $1 AND e.rejected AND NOT e.outlier
+             WHERE e.room_id = $1 AND e.rejected AND NOT e.outlier AND e.received_ts >= $2
              ORDER BY e.stream_ordering LIMIT 10000"
+        )))
+        .bind(room_id.as_str())
+        .bind(received_since)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(StoredEvent::try_from).collect()
+    }
+
+    async fn await_auth(
+        &self,
+        event_id: &EventId,
+        room_id: &RoomId,
+        origin: &ServerName,
+        now: i64,
+        next_try_ts: i64,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO events_awaiting_auth (event_id, room_id, origin, first_ts, next_try_ts)
+             VALUES ($1, $2, $3, $4, $5) ON CONFLICT (event_id) DO NOTHING",
+        )
+        .bind(event_id.as_str())
+        .bind(room_id.as_str())
+        .bind(origin.as_str())
+        .bind(now)
+        .bind(next_try_ts)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn events_awaiting_auth_due(&self, now: i64, limit: i64) -> Result<Vec<AwaitingAuth>> {
+        let rows = sqlx::query(
+            "SELECT event_id, room_id, origin, first_ts, tries FROM events_awaiting_auth
+             WHERE next_try_ts <= $1 ORDER BY first_ts LIMIT $2",
+        )
+        .bind(now)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                let corrupt = |what: &str| Error::Corrupt(format!("events_awaiting_auth.{what}"));
+                Ok(AwaitingAuth {
+                    event_id: OwnedEventId::try_from(row.get::<String, _>("event_id"))
+                        .map_err(|_| corrupt("event_id"))?,
+                    room_id: OwnedRoomId::try_from(row.get::<String, _>("room_id"))
+                        .map_err(|_| corrupt("room_id"))?,
+                    origin: OwnedServerName::try_from(row.get::<String, _>("origin"))
+                        .map_err(|_| corrupt("origin"))?,
+                    first_ts: row.get("first_ts"),
+                    tries: row.get("tries"),
+                })
+            })
+            .collect()
+    }
+
+    async fn reschedule_awaiting_auth(&self, event_id: &EventId, next_try_ts: i64) -> Result<()> {
+        sqlx::query(
+            "UPDATE events_awaiting_auth SET tries = tries + 1, next_try_ts = $2 WHERE event_id = $1",
+        )
+        .bind(event_id.as_str())
+        .bind(next_try_ts)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn events_set_aside(&self, room_id: &RoomId) -> Result<Vec<StoredEvent>> {
+        let rows: Vec<EventRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT {EVENT_COLUMNS} FROM events_awaiting_auth a
+             JOIN events e ON e.event_id = a.event_id JOIN rooms r ON r.room_id = e.room_id
+             WHERE a.room_id = $1 ORDER BY a.first_ts, e.depth LIMIT 10000"
         )))
         .bind(room_id.as_str())
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter().map(StoredEvent::try_from).collect()
+    }
+
+    async fn hasten_awaiting_auth(&self, room_id: &RoomId, now: i64) -> Result<()> {
+        sqlx::query(
+            "UPDATE events_awaiting_auth SET next_try_ts = $2 WHERE room_id = $1 AND next_try_ts > $2",
+        )
+        .bind(room_id.as_str())
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn forget_awaiting_auth(&self, event_id: &EventId) -> Result<()> {
+        sqlx::query("DELETE FROM events_awaiting_auth WHERE event_id = $1")
+            .bind(event_id.as_str())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     async fn have_events(&self, event_ids: &[OwnedEventId]) -> Result<Vec<OwnedEventId>> {
@@ -502,6 +669,18 @@ impl EventStore for PostgresStore {
             .fetch_all(&self.pool)
             .await?;
         Ok(ids_from_rows(rows))
+    }
+
+    async fn has_accepted_child(&self, event_id: &EventId) -> Result<bool> {
+        let found: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                SELECT 1 FROM event_edges ee JOIN events c ON c.event_id = ee.event_id
+                 WHERE ee.prev_event_id = $1 AND NOT c.outlier AND NOT c.rejected)",
+        )
+        .bind(event_id.as_str())
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(found)
     }
 
     async fn redact_event(&self, event_id: &EventId, redacted: &Pdu) -> Result<()> {

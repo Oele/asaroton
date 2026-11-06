@@ -994,3 +994,256 @@ async fn queued_typing_notices_are_replaced_per_user_and_room(pool: PgPool) {
         ]
     );
 }
+
+/// An event stored as rejected because it could not be checked takes its place once it passes:
+/// a fresh position in the stream, its rows in the relation and search indexes, and the
+/// rejection gone. The reverse never happens here: an accepted event stays accepted.
+#[sqlx::test(migrations = "./migrations")]
+async fn a_rejection_is_taken_back_when_the_event_passes_later(pool: PgPool) {
+    let store = PostgresStore::from_pool(pool.clone());
+    let d = build_room(&store, &RoomVersionId::V10).await;
+    let room_id = d.room_id.clone().unwrap();
+    let group = d.state_group.unwrap();
+    let bob = user_id!("@bob:example.org");
+    let auth_ids: Vec<OwnedEventId> = d
+        .events
+        .iter()
+        .take(3)
+        .map(|e| e.event_id().to_owned())
+        .collect();
+    let message = |body: &str, relates_to: Option<&OwnedEventId>| {
+        let mut content = json!({ "msgtype": "m.text", "body": body });
+        if let Some(target) = relates_to {
+            content["m.relates_to"] = json!({ "rel_type": "m.thread", "event_id": target });
+        }
+        PduBuilder::new(bob.to_owned(), TimelineEventType::RoomMessage)
+            .room_id(room_id.clone())
+            .content(&content)
+            .unwrap()
+            .prev_events(d.last.clone())
+            .auth_events(auth_ids.clone())
+            .depth(UInt::from(50u32))
+            .build(&d.rules, &d.key, server_name!("example.org"))
+            .unwrap()
+    };
+    let persist = |pdu: Pdu, state: EventState| {
+        let store = store.clone();
+        async move {
+            store
+                .persist_event(PersistEvent {
+                    pdu,
+                    state,
+                    soft_failed: false,
+                    backfilled: false,
+                    stream_ordering: None,
+                    current_state_delta: None,
+                    forward_extremities: None,
+                })
+                .await
+                .unwrap()
+        }
+    };
+    let count = |table: &'static str, id: OwnedEventId| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(format!(
+                "SELECT count(*) FROM {table} WHERE event_id = $1"
+            )))
+            .bind(id.as_str())
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+
+    // Set aside: stored as a rejected outlier, and listed.
+    let aside = message("could not be checked at first", None);
+    persist(aside.with_rejected(true), EventState::Outlier).await;
+    let now = now_ts();
+    let origin = server_name!("remote.example");
+    store
+        .await_auth(aside.event_id(), &room_id, origin, now, now + 120_000)
+        .await
+        .unwrap();
+    // Listing it again changes nothing.
+    store
+        .await_auth(aside.event_id(), &room_id, origin, now + 5, now + 5)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .events_awaiting_auth_due(now + 1000, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let due = store
+        .events_awaiting_auth_due(now + 120_000, 10)
+        .await
+        .unwrap();
+    assert_eq!(due.len(), 1);
+    assert_eq!(
+        (
+            &due[0].event_id,
+            &due[0].room_id,
+            due[0].first_ts,
+            due[0].tries
+        ),
+        (&aside.event_id().to_owned(), &room_id, now, 0)
+    );
+    assert_eq!(due[0].origin, origin);
+    store
+        .reschedule_awaiting_auth(aside.event_id(), now + 600_000)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .events_awaiting_auth_due(now + 120_000, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        store
+            .events_awaiting_auth_due(now + 600_000, 10)
+            .await
+            .unwrap()[0]
+            .tries,
+        1
+    );
+
+    // An event that cites it was rejected in the timeline meanwhile.
+    let reply = message("a reply in a thread", Some(&aside.event_id().to_owned()));
+    let first = persist(reply.with_rejected(true), EventState::Existing(group)).await;
+    let listed = store.rejected_timeline_events(&room_id, 0).await.unwrap();
+    assert_eq!(
+        listed.iter().map(|e| e.event_id()).collect::<Vec<_>>(),
+        vec![reply.event_id()],
+        "the outlier is not part of the timeline"
+    );
+    assert!(
+        store
+            .rejected_timeline_events(&room_id, now_ts() + 60_000)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        count("event_relations", reply.event_id().to_owned()).await,
+        0
+    );
+    assert_eq!(count("event_search", aside.event_id().to_owned()).await, 0);
+
+    // The event that was set aside passes now.
+    let placed = persist(aside.clone(), EventState::Existing(group)).await;
+    let stored = store.get_event(aside.event_id()).await.unwrap().unwrap();
+    assert!(!stored.outlier && !stored.pdu.rejected());
+    assert!(placed.stream_ordering > first.stream_ordering);
+    assert_eq!(count("event_search", aside.event_id().to_owned()).await, 1);
+
+    // And so does the one that cited it: a new position, since sync has moved past the old.
+    let again = persist(reply.clone(), EventState::Existing(group)).await;
+    let stored = store.get_event(reply.event_id()).await.unwrap().unwrap();
+    assert!(!stored.outlier && !stored.pdu.rejected());
+    assert!(again.stream_ordering > placed.stream_ordering);
+    assert_eq!(
+        count("event_relations", reply.event_id().to_owned()).await,
+        1
+    );
+    assert!(
+        store
+            .rejected_timeline_events(&room_id, 0)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let timeline = store
+        .room_events_in_range(&room_id, 0, None, Direction::Forwards, 100)
+        .await
+        .unwrap();
+    for pdu in [&aside, &reply] {
+        assert!(timeline.iter().any(|e| e.event_id() == pdu.event_id()));
+    }
+
+    // Persisting an accepted event again as rejected does not reject it, in the timeline...
+    let unchanged = persist(reply.with_rejected(true), EventState::Existing(group)).await;
+    assert_eq!(unchanged.stream_ordering, again.stream_ordering);
+    assert!(
+        !store
+            .get_event(reply.event_id())
+            .await
+            .unwrap()
+            .unwrap()
+            .pdu
+            .rejected()
+    );
+    // ...and an accepted outlier that fails when it is to be placed stays what it was: not
+    // in the timeline, and not rejected (other events may rest on it as an auth event).
+    let outlier = message("an accepted outlier", None);
+    persist(outlier.clone(), EventState::Outlier).await;
+    persist(outlier.with_rejected(true), EventState::Existing(group)).await;
+    let stored = store.get_event(outlier.event_id()).await.unwrap().unwrap();
+    assert!(stored.outlier && !stored.pdu.rejected() && stored.state_group.is_none());
+
+    // Who has an accepted event building on it is known: `reply` names the room's last
+    // event as its prev event, and nothing names `reply`.
+    assert!(store.has_accepted_child(&d.last[0]).await.unwrap());
+    assert!(!store.has_accepted_child(reply.event_id()).await.unwrap());
+    // A rejected event that builds on one does not count.
+    let rejected_child = PduBuilder::new(bob.to_owned(), TimelineEventType::RoomMessage)
+        .room_id(room_id.clone())
+        .content(&json!({ "msgtype": "m.text", "body": "builds on the reply" }))
+        .unwrap()
+        .prev_events(vec![reply.event_id().to_owned()])
+        .auth_events(auth_ids.clone())
+        .depth(UInt::from(51u32))
+        .build(&d.rules, &d.key, server_name!("example.org"))
+        .unwrap();
+    persist(
+        rejected_child.with_rejected(true),
+        EventState::Existing(group),
+    )
+    .await;
+    assert!(!store.has_accepted_child(reply.event_id()).await.unwrap());
+
+    // Taking a rejection back by ID writes the index rows too.
+    let third = message("another reply", Some(&aside.event_id().to_owned()));
+    persist(third.with_rejected(true), EventState::Existing(group)).await;
+    assert_eq!(
+        count("event_relations", third.event_id().to_owned()).await,
+        0
+    );
+    assert_eq!(
+        store
+            .clear_rejected(&[third.event_id().to_owned(), reply.event_id().to_owned()])
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        count("event_relations", third.event_id().to_owned()).await,
+        1
+    );
+    assert_eq!(count("event_search", third.event_id().to_owned()).await, 1);
+
+    // The room's listed events can be read with their events, and made due at once.
+    let set_aside = store.events_set_aside(&room_id).await.unwrap();
+    assert_eq!(
+        set_aside.iter().map(|e| e.event_id()).collect::<Vec<_>>(),
+        vec![aside.event_id()]
+    );
+    store.hasten_awaiting_auth(&room_id, now).await.unwrap();
+    assert_eq!(
+        store.events_awaiting_auth_due(now, 10).await.unwrap().len(),
+        1
+    );
+
+    store.forget_awaiting_auth(aside.event_id()).await.unwrap();
+    assert!(
+        store
+            .events_awaiting_auth_due(i64::MAX, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}

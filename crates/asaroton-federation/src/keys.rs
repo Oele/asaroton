@@ -94,7 +94,7 @@ impl Federation {
     /// server's keys" finds the current one and leaves the old event unverifiable. When a
     /// named key is not cached, the server itself is asked first and then the notaries,
     /// which keep the keys they have seen, also of servers that no longer publish them or
-    /// no longer exist. A key that had expired before `min_valid_until` is not returned.
+    /// no longer exist. A key that was no longer valid at `min_valid_until` is not returned.
     pub async fn public_keys_for(
         &self,
         server_name: &ServerName,
@@ -111,27 +111,38 @@ impl Federation {
         }
         let wanted: Vec<String> = key_ids.iter().map(ToString::to_string).collect();
         let mut cached = self.cached_keys(server_name, &wanted).await?;
-        let satisfied = |keys: &[RemoteVerifyKey]| {
-            !keys.is_empty()
-                && wanted
-                    .iter()
-                    .all(|id| keys.iter().any(|k| k.key_id.as_str() == id))
-                && keys
-                    .iter()
-                    .all(|k| k.valid_until_ts >= min_valid_until || k.expired_ts.is_some())
+        // A copy whose stated validity has run out for this purpose: asking again may bring a
+        // fresh one. (A retired key does not change any more.)
+        let stale =
+            |k: &RemoteVerifyKey| k.expired_ts.is_none() && k.valid_until_ts < min_valid_until;
+        // The named keys that a fetch could still supply or refresh.
+        let lacking = |keys: &[RemoteVerifyKey]| -> Vec<String> {
+            wanted
+                .iter()
+                .filter(|id| !keys.iter().any(|k| k.key_id.as_str() == *id && !stale(k)))
+                .cloned()
+                .collect()
         };
-        if !satisfied(&cached) && !self.gave_up_recently(server_name, &wanted, &cached) {
+        let need = lacking(&cached);
+        let fetch = if wanted.is_empty() {
+            cached.is_empty() || cached.iter().any(stale)
+        } else {
+            !need.is_empty() && !self.gave_up_recently(server_name, &need)
+        };
+        if fetch {
             let fetched = self
                 .fetch_server_keys(server_name, &wanted, min_valid_until)
                 .await;
             cached = self.cached_keys(server_name, &wanted).await?;
+            let still = lacking(&cached);
             for id in &wanted {
                 let key = (server_name.to_owned(), id.clone());
-                if cached.iter().any(|k| k.key_id.as_str() == id) {
+                if !still.contains(id) {
                     self.key_misses.remove(&key);
                 } else if fetched.is_ok() {
-                    // Somebody answered and the key was not among what they have. (When
-                    // nobody could be reached the next event simply tries again.)
+                    // Somebody answered, and the key was not among what they have or their
+                    // copy is no fresher than ours. (When nobody could be reached the next
+                    // event simply tries again.)
                     self.key_misses.insert(key, std::time::Instant::now());
                 }
             }
@@ -139,11 +150,10 @@ impl Federation {
                 fetched?;
             }
         }
-        // A retired key only vouches for what was signed while it was in use.
-        cached.retain(|k| {
-            k.expired_ts
-                .is_none_or(|expired| expired >= min_valid_until)
-        });
+        // A key only vouches for what was signed while it was valid: a retired key up to
+        // the moment it was retired, any other key up to the end of the validity its server
+        // last stated for it. (A caller that does not hold the signature to a time passes 0.)
+        cached.retain(|k| vouches_at(k, min_valid_until));
         if cached.is_empty() {
             return Err(Error::NoKeys(server_name.to_owned()));
         }
@@ -171,21 +181,12 @@ impl Federation {
         })
     }
 
-    /// Whether the keys still missing were all looked for a moment ago without success.
+    /// Whether the keys still lacking were all asked for a moment ago without success.
     /// Without this every event signed with an unobtainable key would start a round of
     /// requests to its server and the notaries.
-    fn gave_up_recently(
-        &self,
-        server_name: &ServerName,
-        wanted: &[String],
-        cached: &[RemoteVerifyKey],
-    ) -> bool {
-        let mut missing = wanted
-            .iter()
-            .filter(|id| !cached.iter().any(|k| k.key_id.as_str() == *id))
-            .peekable();
-        missing.peek().is_some()
-            && missing.all(|id| {
+    fn gave_up_recently(&self, server_name: &ServerName, lacking: &[String]) -> bool {
+        !lacking.is_empty()
+            && lacking.iter().all(|id| {
                 self.key_misses
                     .get(&(server_name.to_owned(), id.clone()))
                     .is_some_and(|at| at.elapsed() < KEY_MISS_TTL)
@@ -222,7 +223,7 @@ impl Federation {
                 self.store_fetched_keys(server_name, server_name, keys)
                     .await?;
                 found_any = true;
-                if self.has_keys(server_name, wanted).await? {
+                if self.has_keys(server_name, wanted, min_valid_until).await? {
                     return Ok(());
                 }
                 tracing::debug!(server = %server_name, ?wanted, "the server does not publish this key any more, asking notaries");
@@ -264,7 +265,7 @@ impl Federation {
                             }
                         }
                     }
-                    if found_any && self.has_keys(server_name, wanted).await? {
+                    if found_any && self.has_keys(server_name, wanted, min_valid_until).await? {
                         return Ok(());
                     }
                 }
@@ -274,8 +275,16 @@ impl Federation {
         if found_any { Ok(()) } else { Err(last_err) }
     }
 
-    /// Whether every key in `wanted` is cached (trivially so when none is named).
-    async fn has_keys(&self, server_name: &ServerName, wanted: &[String]) -> Result<bool> {
+    /// Whether every key in `wanted` is cached in a copy that vouches for a signature made at
+    /// `min_valid_until` (trivially so when none is named). A server that has replaced a key
+    /// without listing the old one leaves us with a copy that has run out; a notary may hold
+    /// one that reaches further.
+    async fn has_keys(
+        &self,
+        server_name: &ServerName,
+        wanted: &[String],
+        min_valid_until: i64,
+    ) -> Result<bool> {
         if wanted.is_empty() {
             return Ok(true);
         }
@@ -284,9 +293,11 @@ impl Federation {
             .store
             .remote_verify_keys_for(server_name, wanted)
             .await?;
-        Ok(wanted
-            .iter()
-            .all(|id| cached.iter().any(|k| k.key_id.as_str() == id)))
+        Ok(wanted.iter().all(|id| {
+            cached
+                .iter()
+                .any(|k| k.key_id.as_str() == id && vouches_at(k, min_valid_until))
+        }))
     }
 
     async fn fetch_keys_direct(&self, server_name: &ServerName) -> Result<CanonicalJsonObject> {
@@ -457,4 +468,71 @@ pub fn event_signature_servers(event: &CanonicalJsonObject) -> Vec<OwnedServerNa
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Seven days: a key document vouches for its keys no longer than this past the moment it was
+/// fetched, whatever it states (the specification's bound).
+const MAX_VOUCHED_MS: i64 = 7 * 24 * 3600 * 1000;
+
+/// Until when a cached key is vouched for by the document it came in: what the server stated,
+/// bounded as the specification says. This is not `valid_until_ts`, which is when the copy is
+/// due for a refresh (half the stated validity).
+fn vouched_until(key: &RemoteVerifyKey) -> i64 {
+    serde_json::from_str::<serde_json::Value>(&key.key_json)
+        .ok()
+        .and_then(|doc| doc.get("valid_until_ts")?.as_i64())
+        .map_or(key.valid_until_ts, |stated| {
+            stated
+                .min(key.fetched_ts.saturating_add(MAX_VOUCHED_MS))
+                .max(key.valid_until_ts)
+        })
+}
+
+/// Whether the key vouches for a signature made at `at`: a retired key up to the moment it
+/// was retired, any other key to the end of its stated validity.
+fn vouches_at(key: &RemoteVerifyKey, at: i64) -> bool {
+    key.expired_ts.unwrap_or_else(|| vouched_until(key)) >= at
+}
+
+#[cfg(test)]
+mod validity_tests {
+    use super::*;
+
+    fn key(stated: i64, refresh_at: i64, fetched: i64, expired: Option<i64>) -> RemoteVerifyKey {
+        RemoteVerifyKey {
+            server_name: ruma::server_name!("example.org").to_owned(),
+            key_id: "ed25519:k".try_into().unwrap_or_else(|_| unreachable!()),
+            verify_key_b64: String::new(),
+            valid_until_ts: refresh_at,
+            expired_ts: expired,
+            fetched_ts: fetched,
+            fetched_from: ruma::server_name!("example.org").to_owned(),
+            key_json: format!(r#"{{"server_name":"example.org","valid_until_ts":{stated}}}"#),
+        }
+    }
+
+    #[test]
+    fn a_key_vouches_to_the_end_of_its_stated_validity() {
+        const DAY: i64 = 24 * 3600 * 1000;
+        // Fetched at 100 days with a stated validity of one more day; due for a refresh at
+        // half of that. It vouches for the whole day, not just the half.
+        let fresh = key(101 * DAY, 100 * DAY + DAY / 2, 100 * DAY, None);
+        assert!(vouches_at(&fresh, 100 * DAY + DAY / 2 + 1));
+        assert!(vouches_at(&fresh, 101 * DAY));
+        assert!(!vouches_at(&fresh, 101 * DAY + 1));
+        // A server that states a year is believed for seven days.
+        let generous = key(465 * DAY, 100 * DAY + DAY, 100 * DAY, None);
+        assert!(vouches_at(&generous, 107 * DAY));
+        assert!(!vouches_at(&generous, 107 * DAY + 1));
+        // A retired key vouches up to its retirement, whatever its document states.
+        let retired = key(101 * DAY, 100 * DAY, 100 * DAY, Some(50 * DAY));
+        assert!(vouches_at(&retired, 50 * DAY));
+        assert!(!vouches_at(&retired, 50 * DAY + 1));
+        // A caller that does not tie the signature to a time asks about time zero.
+        assert!(vouches_at(&retired, 0) && vouches_at(&fresh, 0));
+        // A document that cannot be read leaves the stored value.
+        let mut unreadable = key(0, 100 * DAY, 100 * DAY, None);
+        unreadable.key_json = "not json".into();
+        assert!(vouches_at(&unreadable, 100 * DAY) && !vouches_at(&unreadable, 100 * DAY + 1));
+    }
 }

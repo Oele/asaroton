@@ -16,6 +16,8 @@ rests on a leave signed with the old key). A mock notary may or may not know the
   2. Once the notary serves the old key, leaving and joining again makes the member appear,
      restores the message of theirs that had been rejected in the meantime, and their new
      messages arrive.
+  3. A signature counts only while its key was valid: an event dated after the validity its
+     server states for the key is refused.
 
 Needs what scripts/fedlab.py needs. Takes about twenty seconds.
 
@@ -25,27 +27,9 @@ import hashlib, json, re, time, urllib.parse, uuid
 
 from nacl.signing import SigningKey
 
-from fedlab import SERVER_NAME, b64, canonical, check, run_lab, wait_for
+from fedlab import SERVER_NAME, b64, canonical, check, run_lab, signed_event, wait_for
 
 DAY = 86_400_000
-KEPT_CONTENT = {
-    "m.room.create": None,  # everything (room version 11)
-    "m.room.member": ("membership", "join_authorised_via_users_server"),
-    "m.room.join_rules": ("join_rule", "allow"),
-    "m.room.power_levels": ("ban", "events", "events_default", "invite", "kick", "redact", "state_default", "users", "users_default"),
-}
-KEPT_TOP = ("type", "room_id", "sender", "state_key", "content", "hashes", "depth", "prev_events", "auth_events", "origin_server_ts")
-
-
-def signed_event(server, key, key_id, event):
-    """Add the content hash and the signature of `server`; return (event_id, event)."""
-    bare = {k: v for k, v in event.items() if k not in ("unsigned", "signatures", "hashes")}
-    event["hashes"] = {"sha256": b64(hashlib.sha256(canonical(bare)).digest())}
-    redacted = {k: v for k, v in event.items() if k in KEPT_TOP}
-    keep = KEPT_CONTENT.get(event["type"], ())
-    redacted["content"] = event["content"] if keep is None else {k: v for k, v in event["content"].items() if k in keep}
-    event["signatures"] = {server: {key_id: b64(key.sign(canonical(redacted)).signature)}}
-    return "$" + b64(hashlib.sha256(canonical(redacted)).digest(), urlsafe=True), event
 
 
 class Room:
@@ -90,10 +74,10 @@ class Room:
                     todo.append(a)
         return seen
 
-    def message(self, body, prev):
+    def message(self, body, prev, ts=None):
         event = {"type": "m.room.message", "room_id": self.id, "sender": self.member, "content": {"msgtype": "m.text", "body": body},
                  "auth_events": [self.create, self.power, self.second_join], "prev_events": [prev], "depth": len(self.order) + 5,
-                 "origin_server_ts": int(time.time() * 1000)}
+                 "origin_server_ts": ts or int(time.time() * 1000)}
         event_id, event = signed_event(self.rotated.name, self.rotated.key, "ed25519:k1", event)
         self.events[event_id] = event
         return event_id, event
@@ -236,8 +220,22 @@ def run(hs, peers):
     st, r = hs.req("PUT", f"/_matrix/client/v3/rooms/{q(room.id)}/send/m.room.message/{uuid.uuid4().hex}", {"msgtype": "m.text", "body": "reply"}, token)
     wait_for(lambda: len([x for x in rotated.requests() if x["body"].get("pdus")]) > len(sent_to_rotated), 5)
     check(len([x for x in rotated.requests() if x["body"].get("pdus")]) > len(sent_to_rotated), "and our own messages are sent to that member's server")
+
+    # ---- 4. a signature counts only while its key was valid (room versions 5 and later)
+    # The mock states a validity of one day for its key. An event dated within it passes...
+    now = int(time.time() * 1000)
+    m3_id, m3 = room.message("dated an hour ahead", m2_id, now + 3_600_000)
+    st, r = send(m3)
+    wait_for(lambda: "dated an hour ahead" in bodies(), 5)
+    check(st == 200 and r.get("pdus", {}).get(m3_id) == {} and "dated an hour ahead" in bodies(), f"an event dated within its key's validity is accepted ({st} {r.get('pdus')})")
+    # ...and one dated beyond it does not: nothing says the key was (or will be) the server's then.
+    m4_id, m4 = room.message("dated after the key runs out", m2_id, now + 2 * DAY)
+    st, r = send(m4)
+    verdict = r.get("pdus", {}).get(m4_id, {})
+    time.sleep(1)
+    check(st == 200 and "no keys" in verdict.get("error", "") and "dated after the key runs out" not in bodies(), f"an event dated after its key's validity is refused ({st} {verdict})")
     check(hs.proc.poll() is None, "the server is still running")
 
 
 if __name__ == "__main__":
-    run_lab(["notary", "resident", "rotated"], run)
+    run_lab(["notary", "resident", "rotated"], run, "unchecked_event_retry_secs = 2")

@@ -136,6 +136,7 @@ impl Services {
             state: std::collections::HashMap::default(),
             state_group: None,
             extremities: Vec::new(),
+            unreferenced: Vec::new(),
             prev_refs: Vec::new(),
             next_depth: 1,
         };

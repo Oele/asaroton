@@ -52,6 +52,21 @@ proxy; asaroton answers them with an error when delegation is on. Clients discov
   asks; only a `400` or `403` answer discards it. Once an hour asaroton forgets inbound
   transactions older than a day and, for destinations that have been failing for a week,
   drops queued EDUs and all but the newest queued event per room.
+- Inbound federation: an event is checked against the events it cites as its authorisation.
+  When one of those cannot be obtained (the server that has to hand it over is down, or it
+  is signed with a key that nobody can produce at the moment) the event cannot be checked.
+  It is then set aside: kept, but not shown, and logged as a warning ("an event could not be
+  checked and is set aside"). It is tried again after `federation.unchecked_event_retry_secs`
+  (120 by default), then after ever longer waits up to six hours, for a week. Once the
+  missing event can be had, the event gets its normal checks and reaches clients as a
+  message that arrived late, together with the events that were rejected meanwhile only
+  because they cite it. A warning "giving up on an event that was set aside a week ago"
+  means it never could be checked. Leaving and rejoining a room has asaroton fetch the
+  room's state afresh and looks at its set-aside and rejected messages again; that is the
+  way to repair a room by hand.
+- A signature on an event counts only while its key was valid: in room versions 5 and later
+  an event dated after the validity its server states for the signing key is refused, as
+  the specification requires.
 - URLs that somebody else chose only lead to the public internet: URL previews (the page,
   its redirects and its image), the gateways of users' pushers, and media that another
   homeserver redirects to. Loopback, private, link-local and similar addresses are refused,

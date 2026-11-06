@@ -42,6 +42,10 @@ pub struct ImportArgs {
     /// Import into a database that already holds users (for re-runs on a rehearsal copy).
     #[arg(long)]
     pub force: bool,
+    /// Copy nothing but Synapse's cache of other servers' signing keys. This is safe on a
+    /// database that is in use: a key this server already holds is left as it is.
+    #[arg(long)]
+    pub only_server_keys: bool,
 }
 
 struct Importer {
@@ -67,7 +71,7 @@ pub async fn run(config: Config, args: ImportArgs) -> anyhow::Result<()> {
         .fetch_one(&dst)
         .await?
         .get(0);
-    if existing > 0 && !args.force {
+    if existing > 0 && !args.force && !args.only_server_keys {
         anyhow::bail!(
             "the asaroton database already holds {existing} users; use --force to import anyway"
         );
@@ -82,6 +86,11 @@ pub async fn run(config: Config, args: ImportArgs) -> anyhow::Result<()> {
         rooms: Vec::new(),
         rules: HashMap::new(),
     };
+    if args.only_server_keys {
+        imp.server_keys().await?;
+        println!("import finished");
+        return Ok(());
+    }
     imp.select().await?;
     imp.users().await?;
     imp.sessions().await?;
@@ -95,12 +104,35 @@ pub async fn run(config: Config, args: ImportArgs) -> anyhow::Result<()> {
     imp.memberships_and_extremities().await?;
     imp.receipts().await?;
     imp.media(args.media_src.as_deref()).await?;
+    imp.server_keys().await?;
     if let Some(path) = &args.signing_key {
         imp.signing_key(path).await?;
     }
     imp.sequences().await?;
     println!("import finished");
     Ok(())
+}
+
+/// What a signed key document of `server` says about `key_id`: the public key (unpadded
+/// base64, 32 bytes) and, when the document lists the key as replaced, since when. `None`
+/// when the document is not that server's, does not list the key, or the key is malformed.
+fn key_in_document(json: &str, server: &str, key_id: &str) -> Option<(String, Option<i64>)> {
+    let doc: Value = serde_json::from_str(json).ok()?;
+    if doc.get("server_name")?.as_str()? != server
+        || !key_id.starts_with("ed25519:")
+        || <&ruma::ServerName>::try_from(server).is_err()
+    {
+        return None;
+    }
+    let (entry, expired_ts) = match doc.get("verify_keys").and_then(|k| k.get(key_id)) {
+        Some(current) => (current, None),
+        None => {
+            let old = doc.get("old_verify_keys")?.get(key_id)?;
+            (old, Some(old.get("expired_ts")?.as_i64()?))
+        }
+    };
+    let key: ruma::serde::Base64 = ruma::serde::Base64::parse(entry.get("key")?.as_str()?).ok()?;
+    (key.as_bytes().len() == 32).then(|| (key.encode(), expired_ts))
 }
 
 /// Synapse stores JSON as text; a few rows carry a NUL escape PostgreSQL's jsonb rejects.
@@ -1171,6 +1203,76 @@ impl Importer {
         Ok(())
     }
 
+    /// Synapse's cache of other servers' signing keys. Every event in the database was
+    /// verified with one of them, and many can no longer be fetched: servers replace their
+    /// keys, and servers disappear. Without the cache a migrated server depends on notaries
+    /// whenever it has to verify an old event again (when it hands a room's state to a
+    /// joining server's question, or looks at history it did not hold), and has nothing to
+    /// offer as a notary itself.
+    ///
+    /// `server_keys_json` holds the signed key documents as they were fetched, one row for
+    /// every key a document lists. The newest document for a key says what the key is, until
+    /// when the document vouches for it and, for a key the server had replaced by then, when
+    /// it was retired. A key the destination already holds is not touched.
+    async fn server_keys(&self) -> anyhow::Result<()> {
+        let table: Option<String> =
+            sqlx::query_scalar("SELECT to_regclass('server_keys_json')::text")
+                .fetch_one(&self.src)
+                .await?;
+        if table.is_none() {
+            println!("server keys: the source has no server_keys_json table, nothing copied");
+            return Ok(());
+        }
+        let rows = sqlx::query(
+            "SELECT DISTINCT ON (server_name, key_id)
+                    server_name, key_id, from_server, ts_added_ms, ts_valid_until_ms, key_json
+               FROM server_keys_json
+              WHERE server_name <> $1
+              ORDER BY server_name, key_id, ts_added_ms DESC",
+        )
+        .bind(&self.server_name)
+        .fetch_all(&self.src)
+        .await?;
+        let (mut added, mut held, mut unusable) = (0usize, 0usize, 0usize);
+        let mut tx = self.dst.begin().await?;
+        for row in &rows {
+            let server: String = row.get("server_name");
+            let key_id: String = row.get("key_id");
+            let json = String::from_utf8_lossy(&row.get::<Vec<u8>, _>("key_json")).into_owned();
+            let Some((key, expired_ts)) = key_in_document(&json, &server, &key_id) else {
+                unusable += 1;
+                continue;
+            };
+            let done = sqlx::query(
+                "INSERT INTO remote_server_keys
+                     (server_name, key_id, verify_key_b64, valid_until_ts, expired_ts, fetched_ts, fetched_from, key_json)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                 ON CONFLICT (server_name, key_id) DO NOTHING",
+            )
+            .bind(&server)
+            .bind(&key_id)
+            .bind(&key)
+            .bind(row.get::<i64, _>("ts_valid_until_ms"))
+            .bind(expired_ts)
+            .bind(row.get::<i64, _>("ts_added_ms"))
+            .bind(row.get::<String, _>("from_server"))
+            .bind(&json)
+            .execute(&mut *tx)
+            .await?;
+            if done.rows_affected() == 0 {
+                held += 1;
+            } else {
+                added += 1;
+            }
+        }
+        tx.commit().await?;
+        println!(
+            "server keys: {added} added, {held} already held, {unusable} unusable (of {})",
+            rows.len()
+        );
+        Ok(())
+    }
+
     async fn signing_key(&self, path: &Path) -> anyhow::Result<()> {
         let text =
             std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
@@ -1231,4 +1333,41 @@ fn safe_component(s: &str) -> String {
 #[allow(dead_code)]
 fn _room_id_check(s: &str) -> Option<OwnedRoomId> {
     OwnedRoomId::try_from(s).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::key_in_document;
+
+    #[test]
+    fn reads_a_key_out_of_a_key_document() {
+        let key = "Noi6WqcDj0QmPxCNQqgezwTlBKrfqehY1u2FyWP9uYw";
+        let doc = serde_json::json!({
+            "server_name": "example.org",
+            "valid_until_ts": 1_700_000_000_000_i64,
+            "verify_keys": { "ed25519:now": { "key": key } },
+            "old_verify_keys": { "ed25519:then": { "key": format!("{key}="), "expired_ts": 1_600_000_000_000_i64 } },
+            "signatures": {},
+        })
+        .to_string();
+        assert_eq!(
+            key_in_document(&doc, "example.org", "ed25519:now"),
+            Some((key.to_owned(), None))
+        );
+        // A replaced key comes with the time it was retired; padding is dropped.
+        assert_eq!(
+            key_in_document(&doc, "example.org", "ed25519:then"),
+            Some((key.to_owned(), Some(1_600_000_000_000)))
+        );
+        // Not listed, another server's document, not an ed25519 key, not a key at all.
+        assert_eq!(key_in_document(&doc, "example.org", "ed25519:other"), None);
+        assert_eq!(key_in_document(&doc, "elsewhere.org", "ed25519:now"), None);
+        assert_eq!(key_in_document(&doc, "example.org", "rsa:now"), None);
+        let short = doc.replace(key, "c2hvcnQ");
+        assert_eq!(key_in_document(&short, "example.org", "ed25519:now"), None);
+        assert_eq!(
+            key_in_document("not json", "example.org", "ed25519:now"),
+            None
+        );
+    }
 }

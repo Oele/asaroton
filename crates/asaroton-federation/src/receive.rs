@@ -37,6 +37,13 @@ use crate::{Error, Federation, Result};
 const MAX_MISSING_EVENTS: u32 = 10;
 /// Bound on recursive auth-event fetching.
 const MAX_AUTH_FETCH_DEPTH: u32 = 50;
+/// How a rejection starts when the event could not be checked at all: an auth event it cites
+/// could not be obtained. That says nothing about the event, and it is looked at again
+/// (see `recheck`).
+pub(crate) const AUTH_UNAVAILABLE: &str = "auth events unavailable";
+/// How long a server is not asked again for an auth event it could not give us, when it is
+/// an incoming event that needs it.
+pub(crate) const AUTH_MISS_TTL: std::time::Duration = std::time::Duration::from_mins(10);
 
 /// Outcome of processing one PDU.
 #[derive(Debug)]
@@ -45,6 +52,49 @@ pub enum Outcome {
     Rejected(String),
     SoftFailed,
     AlreadyKnown,
+}
+
+/// The events an event has to be checked against: the auth events it names, and in room
+/// versions that leave the create event out of those, the create event.
+pub(crate) fn auth_event_ids(
+    pdu: &Pdu,
+    room_id: &RoomId,
+    rules: &RoomVersionRules,
+) -> Vec<OwnedEventId> {
+    let mut ids: Vec<OwnedEventId> = pdu.auth_events().to_vec();
+    if !rules.event_format.allow_room_create_in_auth_events
+        && !pdu.is_create()
+        && let Ok(create_id) = asaroton_core::pdu::create_event_id_for_room(room_id)
+    {
+        ids.push(create_id);
+    }
+    ids
+}
+
+/// The events of another server's answer that were left out because they could not be
+/// parsed or verified. One line per answer says so; the cause of the first is the example.
+#[derive(Default)]
+pub(crate) struct LeftOut {
+    count: usize,
+    example: Option<String>,
+}
+
+impl LeftOut {
+    pub(crate) fn note(&mut self, error: &Error) {
+        self.count += 1;
+        if self.example.is_none() {
+            self.example = Some(error.to_string());
+        }
+    }
+
+    pub(crate) fn report(&self, origin: &ServerName, room_id: &RoomId, request: &str) {
+        if self.count > 0 {
+            tracing::info!(
+                %origin, %room_id, request, left_out = self.count, example = self.example.as_deref().unwrap_or_default(),
+                "events in another server's answer could not be verified and were left out"
+            );
+        }
+    }
 }
 
 impl Federation {
@@ -117,7 +167,7 @@ impl Federation {
                     // implementation); only events we could not take at all are errors.
                     Ok((event_id, Outcome::Rejected(reason)))
                         if reason.starts_with("event failed authorization")
-                            || reason.starts_with("auth events unavailable") =>
+                            || reason.starts_with(AUTH_UNAVAILABLE) =>
                     {
                         results.insert(event_id, Ok(()));
                     }
@@ -305,7 +355,14 @@ impl Federation {
         }
         let servers = signing::required_signing_servers(pdu.raw(), rules)
             .map_err(|e| Error::Rejected(format!("cannot determine signing servers: {e}")))?;
-        let min_valid = i64::try_from(u64::from(pdu.origin_server_ts().0)).unwrap_or(0);
+        // Room versions 5 and later hold a signature to the key's validity: the key must
+        // have been valid at the time the event states. Earlier versions accept any key the
+        // server has ever published.
+        let min_valid = if rules.enforce_key_validity {
+            i64::try_from(u64::from(pdu.origin_server_ts().0)).unwrap_or(0)
+        } else {
+            0
+        };
         let mut keys = ruma::signatures::PublicKeyMap::new();
         for server in servers {
             // The keys this event names for the server. Servers change keys; an event from
@@ -391,7 +448,7 @@ impl Federation {
             .map(|_| new_membership))
     }
 
-    async fn we_are_in_room(&self, room_id: &RoomId) -> Result<bool> {
+    pub(crate) async fn we_are_in_room(&self, room_id: &RoomId) -> Result<bool> {
         let members = self.services.store.members(room_id, Some("join")).await?;
         Ok(members.iter().any(|m| self.services.is_local(&m.user_id)))
     }
@@ -475,29 +532,16 @@ impl Federation {
             }
         }
 
-        // 3b. auth events. An event whose auth events cannot be obtained is rejected but
-        // kept, so that later events referring to it can still be processed.
+        // 3b. auth events. An event whose auth events cannot be obtained cannot be checked. It
+        // is kept, as rejected, so that later events referring to it can still be processed,
+        // and set aside to be looked at again.
         if let Err(e) = self
-            .ensure_auth_events(origin, &room_id, &pdu, rules, 0)
+            .ensure_auth_events(origin, &room_id, &pdu, rules, 0, AUTH_MISS_TTL)
             .await
         {
-            let reason = format!("auth events unavailable: {e}");
-            tracing::info!(event_id = %pdu.event_id(), %reason, "rejecting event");
-            let stored = pdu.with_rejected(true);
-            services
-                .store
-                .persist_event(PersistEvent {
-                    pdu: stored.clone(),
-                    state: EventState::Outlier,
-                    soft_failed: false,
-                    backfilled,
-                    stream_ordering: None,
-                    current_state_delta: None,
-                    forward_extremities: None,
-                })
-                .await?;
-            self.event_cache.insert(pdu.event_id().to_owned(), stored);
-            return Ok(Outcome::Rejected(reason));
+            return self
+                .set_aside_unchecked(origin, &pdu, backfilled, &e.to_string())
+                .await;
         }
 
         // 4. state before the event
@@ -505,22 +549,33 @@ impl Federation {
             .state_before_event(origin, &room_id, &pdu, rules)
             .await?;
 
-        // 5. authorisation
-        let fetch = |id: &ruma::EventId| self.cached_event(id);
+        // 5. authorisation. The auth events are read from the store when the cache no longer
+        // holds them (it is emptied when it grows large, and working out the state above can
+        // take a while): a check that cannot find them must never pass for one that succeeded.
+        let auth_pdus = self
+            .events_by_id(&auth_event_ids(&pdu, &room_id, rules))
+            .await?;
+        if let Some(lost) = pdu
+            .auth_events()
+            .iter()
+            .find(|id| !auth_pdus.contains_key(*id))
+        {
+            return Err(Error::Rejected(format!(
+                "auth event {lost} is no longer stored"
+            )));
+        }
+        let fetch =
+            |id: &ruma::EventId| auth_pdus.get(id).cloned().or_else(|| self.cached_event(id));
         let mut rejected_reason: Option<String> = None;
         if let Err(e) = auth::check_state_independent(&pdu, rules, fetch) {
             rejected_reason = Some(e.to_string());
-        } else if self.auth_events_rejected(&pdu) {
-            rejected_reason = Some("event references a rejected auth event".into());
         } else if pdu
             .auth_events()
             .iter()
-            .any(|id| self.cached_event(id).is_none())
+            .any(|id| auth_pdus.get(id).is_some_and(Pdu::rejected))
         {
-            tracing::warn!(event_id = %pdu.event_id(), "auth event missing from cache after fetch");
-        } else if let Err(e) =
-            auth::check_against_auth_events(&pdu, rules, |id| self.cached_event(id))
-        {
+            rejected_reason = Some("event references a rejected auth event".into());
+        } else if let Err(e) = auth::check_against_auth_events(&pdu, rules, fetch) {
             rejected_reason = Some(e.to_string());
         } else if let Err(e) = auth::check_against_state(&pdu, rules, &state_before) {
             rejected_reason = Some(e.to_string());
@@ -660,25 +715,127 @@ impl Federation {
         Ok(())
     }
 
+    /// The verdict on an event that is kept outside the timeline (an auth or state event
+    /// fetched from another server): whether it is to be stored as rejected, going by the
+    /// events it has to be checked against. `Err` names one of those that is not stored, in
+    /// which case there is no verdict: the event cannot be checked.
+    ///
+    /// The events are read from the store when the cache does not hold them, with the create
+    /// event that newer room versions do not list among the auth events.
+    async fn outlier_is_rejected(
+        &self,
+        pdu: &Pdu,
+        room_id: &RoomId,
+        rules: &RoomVersionRules,
+    ) -> Result<std::result::Result<bool, OwnedEventId>> {
+        let cited = self
+            .events_by_id(&auth_event_ids(pdu, room_id, rules))
+            .await?;
+        if let Some(lacking) = pdu.auth_events().iter().find(|id| !cited.contains_key(*id)) {
+            return Ok(Err(lacking.clone()));
+        }
+        Ok(Ok(pdu
+            .auth_events()
+            .iter()
+            .any(|id| cited.get(id).is_some_and(Pdu::rejected))
+            || auth::check_against_auth_events(pdu, rules, |id| {
+                cited.get(id).cloned()
+            })
+            .is_err()))
+    }
+
+    /// The given events, from the cache or else the store. Events that are not stored are
+    /// left out.
+    pub(crate) async fn events_by_id(
+        &self,
+        ids: &[OwnedEventId],
+    ) -> Result<HashMap<OwnedEventId, Pdu>> {
+        let mut out: HashMap<OwnedEventId, Pdu> = HashMap::new();
+        let mut absent: Vec<OwnedEventId> = Vec::new();
+        for id in ids {
+            match self.cached_event(id) {
+                Some(p) => {
+                    out.insert(id.clone(), p);
+                }
+                None => absent.push(id.clone()),
+            }
+        }
+        if !absent.is_empty() {
+            for ev in self.services.store.get_events(&absent).await? {
+                self.event_cache
+                    .insert(ev.pdu.event_id().to_owned(), ev.pdu.clone());
+                out.insert(ev.pdu.event_id().to_owned(), ev.pdu);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Keep an event that could not be checked: stored as a rejected outlier, which lets
+    /// later events build on it, and listed to be tried again. History that a client asked
+    /// for is not listed; the next request for it tries again by itself.
+    async fn set_aside_unchecked(
+        &self,
+        origin: &ServerName,
+        pdu: &Pdu,
+        backfilled: bool,
+        why: &str,
+    ) -> Result<Outcome> {
+        let services = &self.services;
+        let reason = format!("{AUTH_UNAVAILABLE}: {why}");
+        let stored = pdu.with_rejected(true);
+        services
+            .store
+            .persist_event(PersistEvent {
+                pdu: stored.clone(),
+                state: EventState::Outlier,
+                soft_failed: false,
+                backfilled,
+                stream_ordering: None,
+                current_state_delta: None,
+                forward_extremities: None,
+            })
+            .await?;
+        self.event_cache.insert(pdu.event_id().to_owned(), stored);
+        if backfilled {
+            tracing::info!(event_id = %pdu.event_id(), %reason, "an event of the room's history could not be checked");
+        } else {
+            let now = asaroton_store::now_ts();
+            services
+                .store
+                .await_auth(
+                    pdu.event_id(),
+                    pdu.room_id(),
+                    origin,
+                    now,
+                    self.next_recheck_ts(0),
+                )
+                .await?;
+            tracing::warn!(
+                event_id = %pdu.event_id(), room_id = %pdu.room_id(), sender = %pdu.sender(), %origin, %reason,
+                "an event could not be checked and is set aside: an auth event it cites could not be obtained. It will be tried again"
+            );
+        }
+        Ok(Outcome::Rejected(reason))
+    }
+
     /// Make sure every auth event (transitively) is stored, fetching from `origin` if needed.
-    async fn ensure_auth_events(
+    ///
+    /// A server that could not hand over an event is not asked for it again within
+    /// `miss_ttl`: the events of a busy room would otherwise each start a round of requests
+    /// for the same unobtainable event.
+    pub(crate) async fn ensure_auth_events(
         &self,
         origin: &ServerName,
         room_id: &RoomId,
         pdu: &Pdu,
         rules: &RoomVersionRules,
         depth: u32,
+        miss_ttl: std::time::Duration,
     ) -> Result<()> {
         if depth > MAX_AUTH_FETCH_DEPTH {
             return Err(Error::Rejected("auth chain too deep".into()));
         }
-        let mut needed: Vec<OwnedEventId> = pdu.auth_events().to_vec();
-        if !rules.event_format.allow_room_create_in_auth_events
-            && !pdu.is_create()
-            && let Ok(create_id) = asaroton_core::pdu::create_event_id_for_room(room_id)
-        {
-            needed.push(create_id);
-        }
+        let needed = auth_event_ids(pdu, room_id, rules);
         self.warm_cache(&needed).await?;
         let mut have: HashSet<OwnedEventId> = self
             .services
@@ -703,12 +860,53 @@ impl Federation {
             if have.contains(&id) {
                 continue;
             }
-            let fetched = self.fetch_event(origin, &id, rules).await?;
+            let miss = (origin.to_owned(), id.clone());
+            if self
+                .auth_misses
+                .get(&miss)
+                .is_some_and(|at| at.elapsed() < miss_ttl)
+            {
+                return Err(Error::Rejected(format!(
+                    "{id} could not be obtained from {origin} a moment ago"
+                )));
+            }
+            let fetched = match self.fetch_event(origin, &id, rules).await {
+                Ok(p) if p.room_id() == room_id => p,
+                Ok(_) => {
+                    return Err(Error::Rejected(format!(
+                        "{origin} gave an event of another room for {id}"
+                    )));
+                }
+                Err(e) => {
+                    self.auth_misses.insert(miss, std::time::Instant::now());
+                    return Err(Error::Rejected(format!(
+                        "{id} could not be obtained from {origin}: {e}"
+                    )));
+                }
+            };
             // Recurse first so its own auth events exist, then persist as an outlier.
-            Box::pin(self.ensure_auth_events(origin, room_id, &fetched, rules, depth + 1)).await?;
-            let rejected = self.auth_events_rejected(&fetched)
-                || auth::check_against_auth_events(&fetched, rules, |i| self.cached_event(i))
-                    .is_err();
+            if let Err(e) = Box::pin(self.ensure_auth_events(
+                origin,
+                room_id,
+                &fetched,
+                rules,
+                depth + 1,
+                miss_ttl,
+            ))
+            .await
+            {
+                self.auth_misses.insert(miss, std::time::Instant::now());
+                return Err(e);
+            }
+            self.auth_misses.remove(&miss);
+            let rejected = match self.outlier_is_rejected(&fetched, room_id, rules).await? {
+                Ok(rejected) => rejected,
+                Err(lost) => {
+                    return Err(Error::Rejected(format!(
+                        "{lost}, cited by {id}, is no longer stored"
+                    )));
+                }
+            };
             self.services
                 .store
                 .persist_event(PersistEvent {
@@ -750,14 +948,17 @@ impl Federation {
             }
         };
         let mut chain: Vec<Pdu> = Vec::new();
+        let mut left_out = LeftOut::default();
         for raw in resp.auth_chain {
-            if let Ok(obj) = asaroton_core::canonical::from_str(raw.get())
-                && let Ok(p) = self.parse_and_verify(origin, obj, rules).await
-                && p.room_id() == room_id
+            match self
+                .verified_event_of_room(origin, raw.get(), room_id, rules)
+                .await
             {
-                chain.push(p);
+                Ok(p) => chain.push(p),
+                Err(e) => left_out.note(&e),
             }
         }
+        left_out.report(origin, room_id, "event_auth");
         chain.sort_by_key(|p| u64::from(p.depth()));
         let ids: Vec<OwnedEventId> = chain.iter().map(|p| p.event_id().to_owned()).collect();
         let mut referenced: Vec<OwnedEventId> = chain
@@ -780,8 +981,19 @@ impl Federation {
             if have.contains(p.event_id()) {
                 continue;
             }
-            let rejected = self.auth_events_rejected(&p)
-                || auth::check_against_auth_events(&p, rules, |i| self.cached_event(i)).is_err();
+            // An event whose own auth events are not to be had cannot be checked. It is left
+            // unstored: a stored rejection would be passed on to everything citing it.
+            let rejected = match self.outlier_is_rejected(&p, room_id, rules).await {
+                Ok(Ok(rejected)) => rejected,
+                Ok(Err(lacking)) => {
+                    tracing::info!(event_id = %p.event_id(), auth_event = %lacking, %origin, "not storing an auth chain event: an auth event it cites is unavailable, so it cannot be checked");
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(event_id = %p.event_id(), error = %e, "checking an auth chain event failed");
+                    continue;
+                }
+            };
             tracing::info!(event_id = %p.event_id(), rejected, auth = ?p.auth_events(), "auth chain event");
             let stored = p.with_rejected(rejected);
             if let Err(e) = self
@@ -805,11 +1017,24 @@ impl Federation {
         }
     }
 
-    /// Whether any of an event's auth events is itself rejected (which rejects the event).
-    fn auth_events_rejected(&self, pdu: &Pdu) -> bool {
-        pdu.auth_events()
-            .iter()
-            .any(|id| self.cached_event(id).is_some_and(|e| e.rejected()))
+    /// One event out of another server's answer: parsed, verified, and of the room asked
+    /// about.
+    pub(crate) async fn verified_event_of_room(
+        &self,
+        origin: &ServerName,
+        raw: &str,
+        room_id: &RoomId,
+        rules: &RoomVersionRules,
+    ) -> Result<Pdu> {
+        let obj = asaroton_core::canonical::from_str(raw)?;
+        let pdu = self.parse_and_verify(origin, obj, rules).await?;
+        if pdu.room_id() != room_id {
+            return Err(Error::Rejected(format!(
+                "{} is an event of another room",
+                pdu.event_id()
+            )));
+        }
+        Ok(pdu)
     }
 
     /// `GET /event/{id}` from a server, verified.
@@ -880,17 +1105,22 @@ impl Federation {
             };
             let mut progress = false;
             let mut next_frontier: Vec<OwnedEventId> = Vec::new();
+            let mut left_out = LeftOut::default();
             for raw in resp.events {
-                if let Ok(obj) = asaroton_core::canonical::from_str(raw.get())
-                    && let Ok(p) = self.parse_and_verify(origin, obj, rules).await
-                    && p.room_id() == room_id
-                    && !fetched.contains_key(p.event_id())
+                match self
+                    .verified_event_of_room(origin, raw.get(), room_id, rules)
+                    .await
                 {
-                    progress = true;
-                    next_frontier.extend(p.prev_events().iter().cloned());
-                    fetched.insert(p.event_id().to_owned(), p);
+                    Ok(p) if !fetched.contains_key(p.event_id()) => {
+                        progress = true;
+                        next_frontier.extend(p.prev_events().iter().cloned());
+                        fetched.insert(p.event_id().to_owned(), p);
+                    }
+                    Ok(_) => {}
+                    Err(e) => left_out.note(&e),
                 }
             }
+            left_out.report(origin, room_id, "get_missing_events");
             if !progress {
                 break;
             }
@@ -1004,10 +1234,10 @@ impl Federation {
         };
         let group = if groups.len() == 1 { groups[0] } else { None };
         let ids: Vec<OwnedEventId> = resolved.values().cloned().collect();
-        self.warm_cache(&ids).await?;
+        let mut events = self.events_by_id(&ids).await?;
         let mut out = HashMap::new();
         for ((ty, key), id) in resolved {
-            if let Some(p) = self.cached_event(&id) {
+            if let Some(p) = events.remove(&id) {
                 out.insert((ty, key), p);
             }
         }
@@ -1045,15 +1275,17 @@ impl Federation {
             }
         }
         // Persist in dependency order (auth events first) as outliers. An event whose auth
-        // events are missing or themselves rejected is rejected too.
+        // events are rejected is rejected too; one whose auth events are not to be had cannot
+        // be checked and is left unstored (and so out of the state map below).
         fetched.sort_by_key(|p| u64::from(p.depth()));
         for p in fetched {
-            self.warm_cache(p.auth_events()).await?;
-            let rejected = self.auth_events_rejected(&p)
-                || p.auth_events()
-                    .iter()
-                    .any(|id| self.cached_event(id).is_none())
-                || auth::check_against_auth_events(&p, rules, |i| self.cached_event(i)).is_err();
+            let rejected = match self.outlier_is_rejected(&p, room_id, rules).await? {
+                Ok(rejected) => rejected,
+                Err(lacking) => {
+                    tracing::info!(event_id = %p.event_id(), auth_event = %lacking, %origin, "not storing a state event: an auth event it cites is unavailable, so it cannot be checked");
+                    continue;
+                }
+            };
             self.event_cache
                 .insert(p.event_id().to_owned(), p.with_rejected(rejected));
             self.services
@@ -1194,6 +1426,29 @@ impl Federation {
         state_before: &HashMap<(StateEventType, String), Pdu>,
     ) -> Result<(Option<CurrentStateDelta>, Option<Vec<OwnedEventId>>)> {
         let old_ext = self.services.store.forward_extremities(room_id).await?;
+        // An event that is accepted late (it had been stored as an outlier or as rejected) may
+        // have accepted events building on it already. Then it is no tip of the room. A
+        // message in that position changes nothing: making it an extremity would only add a
+        // loose end that no other server's events ever tie up, and a room can carry just so
+        // many of those (a new event names at most twenty prev events). A state event in that
+        // position does become an extremity: the events after it were given their state
+        // without it, and resolving it against the other tips is what brings it into the
+        // room's state.
+        if !pdu.is_state()
+            && self
+                .services
+                .store
+                .get_event(pdu.event_id())
+                .await?
+                .is_some()
+            && self
+                .services
+                .store
+                .has_accepted_child(pdu.event_id())
+                .await?
+        {
+            return Ok((None, None));
+        }
         let mut new_ext: Vec<OwnedEventId> = old_ext
             .iter()
             .filter(|e| !pdu.prev_events().contains(e))

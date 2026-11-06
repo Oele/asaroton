@@ -254,9 +254,39 @@ pub trait EventStore: Send + Sync {
     /// had been rejected because something they depend on could not be obtained or verified
     /// at the time. Returns how many rows changed.
     async fn clear_rejected(&self, event_ids: &[OwnedEventId]) -> Result<u64>;
-    /// The rejected events in a room's timeline (outliers are not part of it), oldest first.
-    async fn rejected_timeline_events(&self, room_id: &RoomId) -> Result<Vec<StoredEvent>>;
+    /// The rejected events in a room's timeline (outliers are not part of it) that were
+    /// received at or after `received_since`, oldest first.
+    async fn rejected_timeline_events(
+        &self,
+        room_id: &RoomId,
+        received_since: Ts,
+    ) -> Result<Vec<StoredEvent>>;
+    /// Note that an event was stored as rejected only because an auth event it cites could
+    /// not be obtained, so that the check is tried again from `next_try_ts` on. An event
+    /// that is listed already keeps its entry.
+    async fn await_auth(
+        &self,
+        event_id: &EventId,
+        room_id: &RoomId,
+        origin: &ServerName,
+        now: Ts,
+        next_try_ts: Ts,
+    ) -> Result<()>;
+    /// The listed events whose next try is due, the longest waiting first.
+    async fn events_awaiting_auth_due(&self, now: Ts, limit: i64) -> Result<Vec<AwaitingAuth>>;
+    /// Count a failed try and set the time of the next one.
+    async fn reschedule_awaiting_auth(&self, event_id: &EventId, next_try_ts: Ts) -> Result<()>;
+    /// The listed events of a room, oldest first.
+    async fn events_set_aside(&self, room_id: &RoomId) -> Result<Vec<StoredEvent>>;
+    /// Make the listed events of a room due now: something happened that may let them pass
+    /// (the room was joined again, which brings in its state afresh).
+    async fn hasten_awaiting_auth(&self, room_id: &RoomId, now: Ts) -> Result<()>;
+    /// Take an event off the list: it has been checked, or is given up on.
+    async fn forget_awaiting_auth(&self, event_id: &EventId) -> Result<()>;
     async fn have_events(&self, event_ids: &[OwnedEventId]) -> Result<Vec<OwnedEventId>>;
+    /// Whether an accepted event in the room's timeline names this event as a prev event:
+    /// then it is no tip of the room, however late it is accepted itself.
+    async fn has_accepted_child(&self, event_id: &EventId) -> Result<bool>;
     /// Replace the stored JSON with its redacted form (keeps the original in `redacted_json`).
     async fn redact_event(&self, event_id: &EventId, redacted: &Pdu) -> Result<()>;
     /// Mark an outlier as a normal event with the given state group.

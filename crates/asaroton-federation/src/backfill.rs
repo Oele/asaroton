@@ -43,14 +43,17 @@ impl Federation {
                 }
             };
             let mut pdus: Vec<Pdu> = Vec::new();
+            let mut left_out = crate::receive::LeftOut::default();
             for raw in resp.pdus {
-                if let Ok(obj) = asaroton_core::canonical::from_str(raw.get())
-                    && let Ok(p) = self.parse_and_verify(&server, obj, &rules).await
-                    && p.room_id() == room_id
+                match self
+                    .verified_event_of_room(&server, raw.get(), room_id, &rules)
+                    .await
                 {
-                    pdus.push(p);
+                    Ok(p) => pdus.push(p),
+                    Err(e) => left_out.note(&e),
                 }
             }
+            left_out.report(&server, room_id, "backfill");
             let ids: Vec<OwnedEventId> = pdus.iter().map(|p| p.event_id().to_owned()).collect();
             let have: std::collections::HashSet<OwnedEventId> = services
                 .store

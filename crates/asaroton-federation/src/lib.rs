@@ -23,6 +23,7 @@ pub mod keys;
 pub mod outbound;
 pub mod push;
 pub mod receive;
+mod recheck;
 pub mod sender;
 pub mod url_preview;
 
@@ -47,6 +48,30 @@ pub struct FederationConfig {
     /// Address ranges (CIDR) that URL previews, push gateways and media redirects may reach
     /// although they are not on the public internet.
     pub allowed_internal_ranges: Vec<String>,
+    /// Seconds before an event that could not be checked for want of its auth events is tried
+    /// again for the first time (the waits double from there). Zero selects the default.
+    pub unchecked_event_retry_secs: u32,
+}
+
+/// Say so when an auth chain we are about to hand to another server is not complete: events
+/// that the chain names and this server does not hold are simply absent from the answer, and
+/// the other side then cannot check what cites them.
+pub fn warn_if_chain_incomplete(
+    room_id: &ruma::RoomId,
+    request: &str,
+    wanted: &[ruma::OwnedEventId],
+    found: &[asaroton_store::StoredEvent],
+) {
+    if found.len() >= wanted.len() {
+        return;
+    }
+    let example = wanted
+        .iter()
+        .find(|id| !found.iter().any(|e| e.pdu.event_id() == *id));
+    tracing::warn!(
+        %room_id, request, missing = wanted.len() - found.len(), of = wanted.len(), example = ?example,
+        "the auth chain handed to another server is incomplete: this server does not hold all of its events"
+    );
 }
 
 /// The federation subsystem handle.
@@ -69,6 +94,8 @@ pub struct Federation {
         ruma::OwnedEventId,
         (asaroton_core::state::StateMap, Vec<ruma::OwnedEventId>),
     >,
+    /// Auth events a server could not give us, and when that was last tried.
+    auth_misses: dashmap::DashMap<(ruma::OwnedServerName, ruma::OwnedEventId), std::time::Instant>,
     /// Signing keys that could not be obtained, and when that was last tried.
     key_misses: dashmap::DashMap<(ruma::OwnedServerName, String), std::time::Instant>,
     /// Weak handle to ourselves, for code paths that need an `Arc<Federation>`.
@@ -99,12 +126,14 @@ impl Federation {
             sender,
             event_cache: dashmap::DashMap::new(),
             state_at_cache: dashmap::DashMap::new(),
+            auth_misses: dashmap::DashMap::new(),
             key_misses: dashmap::DashMap::new(),
             weak_self: std::sync::OnceLock::new(),
         });
         let _ = fed.weak_self.set(Arc::downgrade(&fed));
         sender::start(Arc::clone(&fed));
         housekeeping::start(Arc::clone(&fed.services));
+        recheck::start(&fed);
         appservice::start(&fed);
         push::start(&fed);
         // Keep the event cache bounded.
@@ -116,6 +145,9 @@ impl Federation {
                     cache_owner.event_cache.clear();
                 }
                 cache_owner.state_at_cache.clear();
+                cache_owner
+                    .auth_misses
+                    .retain(|_, at| at.elapsed() < receive::AUTH_MISS_TTL);
             }
         });
         Ok(fed)

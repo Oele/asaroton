@@ -40,6 +40,7 @@ end decide some details.
 | Relations, threads, search | `event_relations`, `threads`, `event_search` | rebuilt | Derived from the event JSON by asaroton's own indexer after the import (`search-backfill` plus a relations pass). |
 | Media | `local_media_repository`, `local_media_repository_thumbnails`, files under `media_store_path/local_content/<xx>/<yy>/<rest>` | `media` table, files under `data_dir/media/<server>/<id>` | Files are copied and renamed; thumbnails are regenerated on demand. Remote media cache is dropped (refetched when needed). Quarantine flags carry over. |
 | Server keys | `signing.key` file, `old_signing_keys` config | `server_signing_keys` | Same key id and seed. |
+| Other servers' keys | `server_keys_json` | `remote_server_keys` | The signed key documents Synapse fetched over the years, newest per key. Every imported event was verified with one of these keys, and many can no longer be fetched from their servers. `import-synapse --only-server-keys` copies just this table into a database that is already in use (keys it holds are left alone), for a server migrated before the importer did this. |
 | Appservices | registration YAML files, `appservice_stream_position` | config `appservices`, `appservice_positions` | Bridges keep their tokens; their stream position is set to the imported maximum so nothing is replayed. |
 | Registration tokens, server notices room, retention policies | `registration_tokens`, config, `room_retention` | config / tables | Small; by hand or in the importer. |
 
@@ -288,6 +289,22 @@ matrix.enimatek.nl queued during the window were delivered; the only failed inbo
 (503) fall inside the window. The rollback script and Synapse's database, config and files stay
 untouched until 2026-11-05; after that the `asaroton_rehearsal` database, /var/lib/asaroton-rehearsal,
 the `asaroton-rehearsal` unit and the SSH write permission on the desktop can go.
+
+## The key cache, after the fact
+
+The first import did not carry over Synapse's cache of other servers' signing keys. That went
+unnoticed until a server had to verify old events of a member whose server had replaced its key
+since (issue #22): asaroton then depends on notaries for every key that is no longer published.
+The importer copies the cache now. For a server that was migrated earlier, while the Synapse
+database still exists:
+
+```
+sudo -u postgres asaroton --config /etc/asaroton/asaroton.toml import-synapse \
+    --from 'postgres:///synapse?host=/var/run/postgresql' --only-server-keys
+```
+
+It adds the keys asaroton does not hold yet and changes nothing else; the server can stay up,
+and running it twice does no harm. The Synapse database has to be kept until this has been done.
 
 ## Open questions
 
