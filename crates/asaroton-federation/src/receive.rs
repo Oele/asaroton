@@ -1675,6 +1675,21 @@ impl Federation {
                 if d.user_id.server_name() != origin {
                     return Ok(());
                 }
+                // A device without keys, of which no keys are held here either, is nothing a
+                // client can act on: it is in no answer to a key query, before or after. Such
+                // an update comes when a user joins a room and their server announces all
+                // their devices; reporting it would only make clients ask again for keys
+                // that are the same.
+                if d.keys.is_none()
+                    && d.deleted != Some(true)
+                    && services
+                        .store
+                        .get_device_keys(&d.user_id, &d.device_id)
+                        .await?
+                        .is_none()
+                {
+                    return Ok(());
+                }
                 // Record the change; clients refetch keys over federation on demand.
                 if let Some(keys) = d.keys
                     && let Ok(v) = serde_json::to_value(&keys)

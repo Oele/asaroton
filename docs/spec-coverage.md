@@ -35,7 +35,7 @@ implemented, 3 deliberate deviations (see the end of this page).
 Known deviations (Complement): UIA accepts an `auth` dict without a session like Synapse does
 (TestRegistration's strictness subtest, skipped for Synapse too); TestIsDirectFlagFederation sends
 a room-version-12 invite without `m.room.create` in `invite_room_state`, which v1.16 (MSC4311)
-requires receivers to reject (it passes on servers that still default to room version 11);
-TestDeviceListsUpdateOverFederationOnRoomJoin is skipped for Synapse as well. Experimental Complement packages
+requires receivers to reject (it passes on servers that still default to room version 11).
+Experimental Complement packages
 still not targeted: faster joins (MSC3902), owned state (MSC3757, needs the `org.matrix.msc3757.10`
 room version), MSC2836, MSC3389, MSC4242.

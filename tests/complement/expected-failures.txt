@@ -20,4 +20,3 @@ TestMSC4242RejoinMergesOldAndNewStateDAGBranches        state DAG room version (
 # Deliberate deviations (see docs/spec-coverage.md).
 TestRegistration/parallel/Registration_without_a_session_fails    UIA accepts an auth dict without a session, as Synapse does; skipped for Synapse too
 TestIsDirectFlagFederation                              the test sends a room version 12 invite without m.room.create in invite_room_state, which receivers must reject since v1.16
-TestDeviceListsUpdateOverFederationOnRoomJoin           skipped for Synapse as well

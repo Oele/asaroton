@@ -113,8 +113,12 @@ impl Services {
     }
 
     /// Housekeeping once a local user has joined a room: push rules for an upgraded room's
-    /// predecessor carry over.
+    /// predecessor carry over, and the servers the user now shares a room with for the first
+    /// time are told the user's devices.
     pub async fn after_user_joined(&self, user: &UserId, room_id: &RoomId) {
+        if let Err(e) = self.announce_devices_to_new_servers(user, room_id).await {
+            tracing::debug!(error = %e, %user, %room_id, "announcing devices to new servers failed");
+        }
         if let Ok(Some(create)) = self
             .state_content(room_id, &StateEventType::RoomCreate, "")
             .await
@@ -127,6 +131,47 @@ impl Services {
         {
             tracing::debug!(error = %e, "copying push rules from predecessor failed");
         }
+    }
+
+    /// Sends the user's device list to the servers in `room_id` that share no other room with
+    /// them. The specification asks for it: such a server was not sent the user's device
+    /// changes so far, and a copy it kept from an earlier shared room may be out of date.
+    ///
+    /// Not for a room that brings more than a handful of new servers. That would be a burst
+    /// of traffic to servers that mostly never look at this user, and those that do ask for
+    /// the devices when they need them (which is all that Synapse and Dendrite rely on).
+    async fn announce_devices_to_new_servers(&self, user: &UserId, room_id: &RoomId) -> Result<()> {
+        /// The most servers a join announces the user's devices to.
+        const MOST_NEW_SERVERS: usize = 20;
+        /// A room with more servers than this is not looked at: working out which of them
+        /// are new costs a query for every other room of the user.
+        const MOST_SERVERS_LOOKED_AT: usize = 500;
+        if !self.is_local(user) {
+            return Ok(());
+        }
+        let mut new = self.remote_servers_in_room(room_id).await?;
+        if new.is_empty() || new.len() > MOST_SERVERS_LOOKED_AT {
+            return Ok(());
+        }
+        for other in self.store.rooms_for_user(user, "join").await? {
+            if other == room_id {
+                continue;
+            }
+            let known: std::collections::HashSet<_> = self
+                .remote_servers_in_room(&other)
+                .await?
+                .into_iter()
+                .collect();
+            new.retain(|s| !known.contains(s));
+            if new.is_empty() {
+                return Ok(());
+            }
+        }
+        if new.len() > MOST_NEW_SERVERS {
+            tracing::debug!(%user, %room_id, servers = new.len(), "too many new servers to announce devices to");
+            return Ok(());
+        }
+        self.send_device_lists_to(user, new).await
     }
 
     /// Knock on a room this server is in (join rule `knock` or `knock_restricted`).
