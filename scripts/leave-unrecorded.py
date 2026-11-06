@@ -30,12 +30,16 @@ it. What comes of it is one of:
 
 Outcomes are appended to the `--done` file (default: LIST + ".done") with what each server
 answered. Only a `failed` membership is tried again by a later run, so a run can be
-interrupted and repeated. Within a run, a server that could not be reached three times in a
-row is not asked again, and neither is a server about a room it said it no longer has.
+interrupted and repeated. Within a run, a server that could not be reached or that refused
+three times in a row is not asked again, and neither is a server about a room it said it no
+longer has.
 
 `--parallel N` works on N memberships at a time, each of them pausing `--pace` seconds
-between its leaves. Most of a slow run is spent waiting for servers that do not answer, which
-this shortens; the servers that do answer get N requests at a time, so keep it modest.
+between its leaves. A server is still asked for one leave at a time: it handles the events of a
+room one after the other, and a leave in a room with thousands of members takes it a second or
+more, so several at once only queue up there until they time out. What N buys is that the
+waiting for servers that do not answer overlaps, that rooms are worked on side by side, and
+that the leaves of one room are spread over the servers that accept them.
 
 Uses the server's own client listener and the registration shared secret from its
 configuration file, hence sudo. Run it on the server's host.
@@ -45,7 +49,8 @@ import urllib.error, urllib.request
 
 SETTLED = ("left", "nothing-to-leave", "room-gone", "server-banned")
 PREFIX = "No server completed the leave: "
-GIVE_UP_AFTER = 3  # times in a row that a server could not be reached
+GIVE_UP_AFTER = 3  # times in a row that a server could not be reached, or refused
+FINAL = ("left", "not-a-member", "server-banned", "turned-down")  # answers after which no other server is asked
 
 # How a server's answer is read; the first kind with a matching marker wins. The texts are
 # Synapse's, and this server's own for a server it cannot reach or that has no federation API.
@@ -176,36 +181,68 @@ def main():
         return kind_of(status, error), " ".join(said.split())[:160]
 
     unreachable = collections.Counter()  # server -> times in a row it could not be reached
+    refusing = collections.Counter()  # server -> times in a row it refused
     without_room = set()  # (server, room): the server said it does not have the room
+    turns = collections.defaultdict(threading.Lock)  # server -> held while it is asked something
     lock = threading.Lock()
     stop = threading.Event()
 
-    def settle(membership):
-        """Ask the servers of one membership in turn; what each of them answered."""
-        room, user, via = membership
-        answers = []
-        for server in via:
-            if stop.is_set():
-                return None
-            with lock:
-                given_up = unreachable[server] >= GIVE_UP_AFTER
-                said_so = (server, room) in without_room
-            if given_up:
-                answers.append((server, "unreachable", "not asked: it could not be reached earlier in this run"))
-                continue
-            if said_so:
-                answers.append((server, "room-unknown", "not asked: it said so for another account"))
-                continue
+    def spared(server, room):
+        """Why a server is not asked, if what it would say is known already."""
+        with lock:
+            if unreachable[server] >= GIVE_UP_AFTER:
+                return "unreachable", "not asked: it could not be reached earlier in this run"
+            if refusing[server] >= GIVE_UP_AFTER:
+                return "refused", "not asked: it refused earlier in this run"
+            if (server, room) in without_room:
+                return "room-unknown", "not asked: it said so for another account"
+        return None
+
+    def consult(room, user, server, wait):
+        """One server's answer for a membership, or None when it is busy and `wait` is false."""
+        known = spared(server, room)
+        if known:
+            return known
+        with lock:
+            turn = turns[server]
+        if not turn.acquire(blocking=wait):
+            return None
+        try:
+            # What it told the membership that was ahead may make asking pointless.
+            known = spared(server, room)
+            if known:
+                return known
             kind, said = ask(room, user, server)
-            answers.append((server, kind, said))
-            with lock:
-                unreachable[server] = unreachable[server] + 1 if kind == "unreachable" else 0
-                if kind == "room-unknown":
-                    without_room.add((server, room))
-            if kind in ("left", "not-a-member", "server-banned", "turned-down"):
+        finally:
+            turn.release()
+        with lock:
+            unreachable[server] = unreachable[server] + 1 if kind == "unreachable" else 0
+            refusing[server] = refusing[server] + 1 if kind == "refused" else 0
+            if kind == "room-unknown":
+                without_room.add((server, room))
+        return kind, said
+
+    def settle(membership):
+        """Ask the servers of one membership until one settles it; what each of them answered."""
+        room, user, via = membership
+        answers, busy = {}, []
+        # The servers in the order listed, passing over one that is busy with another
+        # membership; then those, waiting for each.
+        for wait, servers in ((False, via), (True, busy)):
+            for server in servers:
+                if stop.is_set():
+                    return None
+                answer = consult(room, user, server, wait)
+                if answer is None:
+                    busy.append(server)
+                    continue
+                answers[server] = answer
+                if answer[0] in FINAL:
+                    break
+            if any(kind in FINAL for kind, _ in answers.values()):
                 break
         time.sleep(args.pace)
-        return answers
+        return [(server, *answers[server]) for server in via if server in answers]
 
     counts = collections.Counter()
     fatal = None
@@ -229,7 +266,7 @@ def main():
                 detail = "; ".join(f"{server}: {kind}" + (f" ({said})" if said else "") for server, kind, said in answers)
                 record.write("\t".join([room, user, outcome, summary, detail]) + "\n")
                 record.flush()
-                through = f"  through {answers[-1][0]}" if outcome == "left" else f"  ({summary})"
+                through = "  through " + next(server for server, kind, _ in answers if kind == "left") if outcome == "left" else f"  ({summary})"
                 print(f"{outcome:17} {room} {user}{through}", flush=True)
         except KeyboardInterrupt:
             stop.set()

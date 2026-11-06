@@ -14,7 +14,7 @@ Needs what scripts/fedlab.py needs. Takes a few seconds.
 
 Usage: scripts/remoteleavetest.py [--keep]
 """
-import base64, hashlib, hmac, json, os, re, subprocess, sys, time, urllib.parse, urllib.request, uuid
+import base64, collections, hashlib, hmac, json, os, re, subprocess, sys, threading, time, urllib.parse, urllib.request, uuid
 
 from nacl.signing import VerifyKey
 
@@ -50,6 +50,35 @@ def run(hs, peers):
 
     mock.routes.append((re.compile(r"/_matrix/federation/v1/make_leave/([^/]+)/([^/?]+)"), make_leave))
     mock.put_routes.append((re.compile(r"/_matrix/federation/v2/send_leave/([^/]+)/([^/?]+)"), send_leave))
+
+    # A big room that both mocks are in. Each takes a while over a leave, and notes how many it
+    # was working on at a time.
+    big_room = f"!big:{mock.name}"
+    at_work, most_at_work, taken = collections.Counter(), collections.Counter(), collections.Counter()
+    counting = threading.Lock()
+
+    def slow_make_leave(peer):
+        def serve(handler, m):
+            with counting:
+                at_work[peer.name] += 1
+                most_at_work[peer.name] = max(most_at_work[peer.name], at_work[peer.name])
+            time.sleep(0.3)
+            handler.answer(200, {"room_version": "11", "event": {
+                "type": "m.room.member", "room_id": unq(m.group(1)), "sender": unq(m.group(2)), "state_key": unq(m.group(2)), "content": {"membership": "leave"},
+                "auth_events": ["$" + "a" * 43], "prev_events": ["$" + "c" * 43], "depth": 7, "origin_server_ts": int(time.time() * 1000)}})
+        return serve
+
+    def slow_send_leave(peer):
+        def serve(handler, m, body):
+            with counting:
+                at_work[peer.name] -= 1
+                taken[peer.name] += 1
+            handler.answer(200, {})
+        return serve
+
+    for peer in (mock, silent):
+        peer.routes.insert(0, (re.compile(r"/_matrix/federation/v1/make_leave/((?:%21|!)big[^/]+)/([^/?]+)"), slow_make_leave(peer)))
+        peer.put_routes.insert(0, (re.compile(r"/_matrix/federation/v2/send_leave/((?:%21|!)big[^/]+)/([^/?]+)"), slow_send_leave(peer)))
 
     def post(body, token=None):
         return hs.req("POST", "/_asaroton/admin/v1/remote_leave", body, token)
@@ -174,6 +203,17 @@ def run(hs, peers):
     check(ran.returncode == 0 and "nothing to leave: 12" in ran.stdout and len({row[0] for row in rows}) == 12 and all(row[2] == "nothing-to-leave" for row in rows),
           f"four at a time settle twelve memberships, each recorded once ({ran.returncode} {len(rows)} rows {ran.stderr.strip()[-200:]})")
     check(took < 4.5, f"in less time than one at a time would take ({took:.1f} s; the pauses alone are 6 s in sequence)")
+    check(all(silent.name + ": refused (not asked" in row[4] for row in rows[-4:]), "a server that keeps refusing is no longer asked")
+
+    # The leaves of one room: one at a time for each server, spread over those that take them.
+    users = [hs.register(f"bulk{n}")[0] for n in range(8)]
+    bulk = os.path.join(work, "bulk.tsv")
+    with open(bulk, "w") as f:
+        f.write("".join(f"{big_room}\t{user}\t{mock.name},{silent.name}\n" for user in users))
+    ran = run_script(bulk, "--parallel", "4")
+    check(ran.returncode == 0 and "left: 8," in ran.stdout, f"eight accounts leave a room that two servers are in ({ran.returncode} {ran.stdout.strip().splitlines()[-1:]} {ran.stderr.strip()[-200:]})")
+    check(most_at_work[mock.name] == 1 and most_at_work[silent.name] == 1, f"neither server is asked for two leaves at once ({dict(most_at_work)})")
+    check(taken[mock.name] >= 2 and taken[silent.name] >= 2 and sum(taken.values()) == 8, f"and both take their share ({dict(taken)})")
 
     print("-- events that still arrive for such a room")
     _, stray = signed_event(mock.name, mock.key, "ed25519:k1", {
