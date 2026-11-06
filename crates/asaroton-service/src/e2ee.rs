@@ -37,7 +37,7 @@ impl Services {
         one_time_keys: &BTreeMap<String, Value>,
         fallback_keys: &BTreeMap<String, Value>,
     ) -> Result<BTreeMap<String, u64>> {
-        if let Some(dk) = device_keys {
+        if let Some(dk) = &device_keys {
             let uid = dk.get("user_id").and_then(|v| v.as_str());
             let did = dk.get("device_id").and_then(|v| v.as_str());
             if uid != Some(user_id.as_str()) || did != Some(device_id.as_str()) {
@@ -52,13 +52,11 @@ impl Services {
             if !valid {
                 return Err(Error::bad_json("Device keys are missing required fields."));
             }
-            let existing = self.store.get_device_keys(user_id, device_id).await?;
-            if existing.as_ref() != Some(&dk) {
-                self.store.set_device_keys(user_id, device_id, &dk).await?;
-                self.notify_device_list_change(user_id, Some(device_id))
-                    .await?;
-            }
         }
+        // One-time and fallback keys go in before the device keys. Storing the device keys
+        // is what makes the device visible to others, and whoever sees it will try to claim
+        // a one-time key at once: with none there yet they cannot set up a session, and the
+        // message they were about to send stays unreadable on the new device.
         if !one_time_keys.is_empty() {
             let rows = one_time_keys
                 .iter()
@@ -90,6 +88,14 @@ impl Services {
             self.store
                 .set_fallback_keys(user_id, device_id, &rows)
                 .await?;
+        }
+        if let Some(dk) = device_keys {
+            let existing = self.store.get_device_keys(user_id, device_id).await?;
+            if existing.as_ref() != Some(&dk) {
+                self.store.set_device_keys(user_id, device_id, &dk).await?;
+                self.notify_device_list_change(user_id, Some(device_id))
+                    .await?;
+            }
         }
         self.one_time_key_counts(user_id, device_id).await
     }
