@@ -1,6 +1,14 @@
 #!/bin/bash
 # ui.sh NAME [tap X Y | text STR | key KEYCODE]... : perform actions, then wait, screenshot to NAME.png and list UI nodes
 . "${ANDROID_ENV:-$HOME/android-sdk/env.sh}"
+# This lab drives its own emulator on its own adb server (see README.md). Without these two a
+# bare `adb` talks to the default server, where another emulator lives that is not ours.
+: "${ANDROID_ADB_SERVER_PORT:?not set: use 5038, the calltest emulator's adb server (see README.md)}"
+: "${ANDROID_SERIAL:?not set: use emulator-5600, the calltest emulator (see README.md)}"
+if [ "$ANDROID_ADB_SERVER_PORT" = 5037 ] || [ "$ANDROID_SERIAL" = emulator-5554 ]; then
+  echo "ui.sh: refusing to drive the emulator on the default adb server; it is not this lab's" >&2
+  exit 1
+fi
 name=$1; shift
 while [ $# -gt 0 ]; do
   case $1 in

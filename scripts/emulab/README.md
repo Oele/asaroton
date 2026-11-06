@@ -10,7 +10,7 @@ were reproduced and verified.
 - Android SDK under `~/android-sdk`: unpack an OpenJDK 21 tarball to `jdk/` and the
   command-line tools to `cmdline-tools/latest/`, then
   `sdkmanager platform-tools emulator "system-images;android-35;google_apis;x86_64"` and
-  `avdmanager create avd -n ex -k "system-images;android-35;google_apis;x86_64" -d pixel_6`;
+  `avdmanager create avd -n calltest -k "system-images;android-35;google_apis;x86_64" -d pixel_6`;
   add `hw.camera.back=emulated`, `hw.camera.front=emulated`, `hw.ramSize=4096` to the AVD's
   `config.ini`. Write an `env.sh` exporting `JAVA_HOME`, `ANDROID_HOME` and the tool paths;
   `ui.sh` sources it (`ANDROID_ENV` overrides the location).
@@ -27,9 +27,16 @@ were reproduced and verified.
 
 ## Running
 
+This lab has its own emulator, `calltest`, on its own adb server. Another emulator (`ex`, on
+the default adb server, port 5037) belongs to other work on this machine and must never be
+started, driven, reset or stopped from here. So every shell that touches the emulator starts
+with the first two lines below, and no `adb` command is ever run without them: a bare `adb`
+talks to the default server. `ui.sh` refuses to run otherwise.
+
 ```sh
 . ~/android-sdk/env.sh
-QT_QPA_PLATFORM=offscreen emulator -avd ex -no-window -no-audio -gpu swiftshader_indirect \
+export ANDROID_AVD_HOME=~/.config/.android/avd ANDROID_ADB_SERVER_PORT=5038 ANDROID_SERIAL=emulator-5600
+QT_QPA_PLATFORM=offscreen emulator -avd calltest -port 5600 -no-window -no-audio -gpu swiftshader_indirect \
     -no-boot-anim -no-snapshot -camera-back emulated -camera-front emulated &
 adb wait-for-device; adb reverse tcp:8008 tcp:8008; adb reverse tcp:7890 tcp:7890
 adb install -r app-fdroid-x86_64-release-signed.apk
