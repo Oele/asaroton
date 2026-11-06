@@ -49,6 +49,13 @@ proxy; tessera answers them with an error when delegation is on. Clients discove
   never starts tessera again by itself. It counts transactions in tessera's log, so it needs
   `RUST_LOG` to include `tessera_federation=debug`. Thresholds go in
   `/etc/default/tessera-watchdog`.
+- `deploy/systemd/tessera-deploy.sh` installs a new binary on a host: it compares the
+  checksum with the one announced, runs `--version` as the service user, restarts, waits for
+  the client API to answer and puts the previous binary back when it does not (unless the new
+  build changed the database schema, which needs a person). `install-deploy.sh` sets it up and
+  can admit an ssh key that is allowed to run only this tool. `scripts/deploy.sh` drives it:
+  it deploys what is on `origin/main` after `scripts/check.sh` passes, the building machine
+  first and the remote host half a minute later.
 - `scripts/loadtest.py` is a synthetic client swarm for capacity checks and
   `scripts/fuzz.sh` runs the fuzz targets under `fuzz/` (needs the nightly toolchain).
 

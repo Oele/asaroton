@@ -37,6 +37,7 @@ scripts/fedpresencetest.py LAB   # presence fan-out over federation stays bounde
 scripts/ssinvitetest.py URL      # a pending invite does not stop sliding sync from long-polling (test server with open registration)
 scripts/syncaccesstest.py URL    # sync shows a user only what they may read: knocks, bans, declined invites, history visibility
 scripts/syncwaketest.py URL      # a waiting sync wakes for an invitation or a room created on another device
+scripts/deploy.sh [status]      # check, build and deploy: this machine first, then the remote host (see docs/deployment.md)
 watch/                          # weekly watch job: spec, Synapse, tests and server logs become issues, see its README
 ```
 
