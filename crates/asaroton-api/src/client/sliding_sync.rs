@@ -79,6 +79,9 @@ async fn room_json(services: &AppState, user: &ruma::UserId, r: &RoomResult) -> 
         v.insert("prev_batch".into(), json!(pb));
     }
     v.insert("limited".into(), json!(r.limited));
+    if r.expanded_timeline {
+        v.insert("expanded_timeline".into(), json!(true));
+    }
     v.insert("num_live".into(), json!(r.num_live));
     v.insert("joined_count".into(), json!(r.joined_count));
     v.insert("invited_count".into(), json!(r.invited_count));

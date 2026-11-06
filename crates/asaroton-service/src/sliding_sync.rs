@@ -129,6 +129,8 @@ pub struct RoomResult {
     pub timeline: Vec<StoredEvent>,
     pub prev_batch: Option<String>,
     pub limited: bool,
+    /// The timeline holds older events again because the client raised its `timeline_limit`.
+    pub expanded_timeline: bool,
     pub joined_count: u64,
     pub invited_count: u64,
     pub num_live: u64,
@@ -632,7 +634,11 @@ impl Services {
                 RoomTrack {
                     timeline_upto: now.events,
                     required_state: sel.required_state.clone(),
-                    timeline_limit: sel.timeline_limit,
+                    // The longest timeline the connection was given, so that dropping a
+                    // subscription and taking it again does not send the same events twice.
+                    timeline_limit: sel
+                        .timeline_limit
+                        .max(track.map_or(0, |t| t.timeline_limit)),
                     membership: sel.membership.membership.clone(),
                     notification_count: r.notification_count,
                     highlight_count: r.highlight_count,
@@ -877,7 +883,16 @@ impl Services {
         let user = &req.user_id;
         let room_id = &sel.room_id;
         let m = &sel.membership;
-        let initial = track.is_none();
+        // A room this connection has only been sent as an invitation or a knock starts over
+        // when the user joins: all it got was stripped state, and now there is history to
+        // read. Sent as an ordinary update, the join would look like the start of the room
+        // and the client would have no token to page back with.
+        let initial = track.is_none_or(|t| {
+            matches!(
+                t.membership,
+                MembershipState::Invite | MembershipState::Knock
+            ) && m.membership == MembershipState::Join
+        });
         let mut out = RoomResult {
             membership: m.membership.clone(),
             initial,
@@ -889,6 +904,7 @@ impl Services {
             timeline: Vec::new(),
             prev_batch: None,
             limited: false,
+            expanded_timeline: false,
             joined_count: 0,
             invited_count: 0,
             num_live: 0,
@@ -919,9 +935,16 @@ impl Services {
         } else {
             track.map(|t| t.timeline_upto)
         };
-
-        // Timeline: the newest `limit` events in (lower, upper], oldest first.
+        // The client now asks for a longer timeline than this connection was given for the
+        // room (typically a subscription to a room it knows from a list): send the newest
+        // events again, up to the new limit, instead of only what is new.
         let limit = sel.timeline_limit.min(MAX_TIMELINE_LIMIT);
+        let widened = !initial
+            && !left
+            && track.is_some_and(|t| limit > t.timeline_limit.min(MAX_TIMELINE_LIMIT));
+        let timeline_lower = if widened { None } else { lower };
+
+        // Timeline: the newest `limit` events in (timeline_lower, upper], oldest first.
         let mut events: Vec<StoredEvent> = Vec::new();
         let mut more = false;
         if limit > 0 {
@@ -930,13 +953,13 @@ impl Services {
                 .room_events_in_range(
                     room_id,
                     upper + 1,
-                    lower.map(|l| l + 1),
+                    timeline_lower.map(|l| l + 1),
                     Direction::Backwards,
                     limit + 1,
                 )
                 .await?;
             for ev in batch {
-                if let Some(l) = lower
+                if let Some(l) = timeline_lower
                     && ev.stream_ordering <= l
                 {
                     break;
@@ -948,7 +971,7 @@ impl Services {
             more = events.len() > limit;
             events.truncate(limit);
             events.reverse();
-            if let Some(l) = lower
+            if let Some(l) = timeline_lower
                 && let Some(g) = self.store.gap_position_since(room_id, l).await?
             {
                 events.retain(|e| e.stream_ordering >= g);
@@ -970,14 +993,16 @@ impl Services {
             }
         }
         out.limited = more;
-        if (initial || more)
+        out.expanded_timeline = widened && !events.is_empty();
+        if (initial || more || widened)
             && let Some(first) = events.first()
         {
             out.prev_batch = Some(StreamToken(first.stream_ordering - 1).to_string());
         }
-        if let Some(s) = since
-            && !initial
-        {
+        // Events newer than the client's position are live, also in a room that is sent in
+        // full: a room that enters a list because of a new message carries that message next
+        // to older ones.
+        if let Some(s) = since {
             out.num_live = events
                 .iter()
                 .filter(|e| e.stream_ordering > s.events)
