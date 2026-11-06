@@ -611,8 +611,11 @@ impl Federation {
                         upsert: vec![((t, k.to_owned()), leave.event_id().to_owned())],
                         remove: vec![],
                     });
+                    // The wake-up waits until a sync can be told about the leave's position
+                    // (see `wake_when_reportable`); without a stored event there is none.
+                    let mut at = 0;
                     if services.store.room_exists(room_id).await? {
-                        services
+                        at = services
                             .store
                             .persist_event(PersistEvent {
                                 pdu: leave.clone(),
@@ -623,13 +626,16 @@ impl Federation {
                                 current_state_delta: delta,
                                 forward_extremities: None,
                             })
-                            .await?;
+                            .await?
+                            .stream_ordering;
                     }
-                    services
-                        .notifier
-                        .notify(asaroton_service::Notification::User {
+                    services.wake_when_reportable(
+                        asaroton_store::SyncStream::Events,
+                        at,
+                        vec![asaroton_service::Notification::User {
                             user_id: user_id.to_owned(),
-                        });
+                        }],
+                    );
                     self.fan_out_own_event(room_id, leave.event_id(), server)
                         .await;
                     return Ok(());
@@ -726,7 +732,7 @@ impl Federation {
                         remove: vec![],
                     });
                     let participating = self.we_are_in_room_pub(room_id).await?;
-                    services
+                    let at = services
                         .store
                         .persist_event(PersistEvent {
                             pdu: knock.clone(),
@@ -737,7 +743,8 @@ impl Federation {
                             current_state_delta: if participating { None } else { delta },
                             forward_extremities: None,
                         })
-                        .await?;
+                        .await?
+                        .stream_ordering;
                     let stripped: Vec<Value> = resp
                         .knock_room_state
                         .iter()
@@ -747,11 +754,13 @@ impl Federation {
                         .store
                         .set_invite_state(room_id, user_id, &stripped)
                         .await?;
-                    services
-                        .notifier
-                        .notify(asaroton_service::Notification::User {
+                    services.wake_when_reportable(
+                        asaroton_store::SyncStream::Events,
+                        at,
+                        vec![asaroton_service::Notification::User {
                             user_id: user_id.to_owned(),
-                        });
+                        }],
+                    );
                     self.fan_out_own_event(room_id, knock.event_id(), server)
                         .await;
                     return Ok(());
@@ -1261,7 +1270,7 @@ impl Federation {
         // Only let the invite drive current state if we are not already participating.
         let participating = self.we_are_in_room_pub(room_id).await?;
         tracing::info!(%room_id, invitee = %invitee, participating, "federation invite received");
-        services
+        let at = services
             .store
             .persist_event(PersistEvent {
                 pdu: pdu.clone(),
@@ -1272,16 +1281,21 @@ impl Federation {
                 current_state_delta: if participating { None } else { delta },
                 forward_extremities: None,
             })
-            .await?;
+            .await?
+            .stream_ordering;
         services
             .store
             .set_invite_state(room_id, &invitee, &stripped_state.unwrap_or_default())
             .await?;
-        services
-            .notifier
-            .notify(asaroton_service::Notification::User {
+        // The invitation's number is what the invited user's sync goes by: the wake-up waits
+        // until a sync can be told about it.
+        services.wake_when_reportable(
+            asaroton_store::SyncStream::Events,
+            at,
+            vec![asaroton_service::Notification::User {
                 user_id: invitee.clone(),
-            });
+            }],
+        );
         Ok(signed)
     }
 

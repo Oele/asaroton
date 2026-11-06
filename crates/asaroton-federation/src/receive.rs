@@ -330,7 +330,7 @@ impl Federation {
                 || (ruma::events::StateEventType::RoomMember, String::new()),
                 |(t, k)| (t, k.to_owned()),
             );
-            services
+            let at = services
                 .store
                 .persist_event(PersistEvent {
                     pdu: pdu.clone(),
@@ -344,12 +344,15 @@ impl Federation {
                     }),
                     forward_extremities: None,
                 })
-                .await?;
+                .await?
+                .stream_ordering;
             if let Ok(user) = ruma::OwnedUserId::try_from(key.as_str()) {
                 let _ = services.store.delete_invite_state(room_id, &user).await;
-                services
-                    .notifier
-                    .notify(Notification::User { user_id: user });
+                services.wake_when_reportable(
+                    asaroton_store::SyncStream::Events,
+                    at,
+                    vec![Notification::User { user_id: user }],
+                );
             }
             tracing::debug!(event_id = %pdu.event_id(), %new_membership, "stored membership change for invited user");
             return Ok((pdu.event_id().to_owned(), Outcome::Accepted));

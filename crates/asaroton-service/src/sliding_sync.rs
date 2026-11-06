@@ -796,7 +796,17 @@ impl Services {
             tracks.insert(
                 room_id.clone(),
                 RoomTrack {
-                    timeline_upto: now.events,
+                    // A room the user is out of was read up to their leave, which may lie
+                    // above this answer's position; reading on from the position would send
+                    // the last events before the leave a second time.
+                    timeline_upto: if matches!(
+                        sel.membership.membership,
+                        MembershipState::Leave | MembershipState::Ban
+                    ) {
+                        now.events.max(sel.membership.stream_ordering)
+                    } else {
+                        now.events
+                    },
                     membership_at: sel.membership.stream_ordering,
                     required_state: sel.required_state.clone(),
                     // The longest timeline the connection was given, so that dropping a

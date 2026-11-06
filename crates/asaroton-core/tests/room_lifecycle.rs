@@ -403,4 +403,27 @@ fn a_redaction_served_to_clients_names_its_target_in_both_places() {
         // Any other event is left alone.
         assert!(msg.to_client_json().get("redacts").is_none());
     }
+
+    // An event from another server may name one event where its room version looks and
+    // another where it does not. Clients are told the one that counts, in both places.
+    let room = build_room(&RoomVersionId::V10);
+    let msg = room
+        .events
+        .values()
+        .find(|p| *p.event_type() == TimelineEventType::RoomMessage)
+        .unwrap();
+    let two_faced = PduBuilder::new(
+        user_id!("@alice:example.org").to_owned(),
+        TimelineEventType::RoomRedaction,
+    )
+    .room_id(msg.room_id().to_owned())
+    .content(&json!({ "redacts": "$somebody_elses_event" }))
+    .unwrap()
+    .redacts(msg.event_id().to_owned())
+    .depth(UInt::from(51u32))
+    .build(&room.rules, &room.key, server_name!("example.org"))
+    .unwrap();
+    let served = two_faced.to_client_json();
+    assert_eq!(served["redacts"], json!(msg.event_id()));
+    assert_eq!(served["content"]["redacts"], json!(msg.event_id()));
 }

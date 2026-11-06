@@ -281,7 +281,8 @@ async fn push_pending(
         }
         let mut by_room: HashMap<ruma::OwnedRoomId, Vec<asaroton_store::Receipt>> = HashMap::new();
         for r in services.store.receipts_since(cursor.receipts, 1000).await? {
-            if r.receipt_type == "m.read.private" {
+            // Not past the position the cursor moves to: what lies above it comes next time.
+            if r.receipt_type == "m.read.private" || r.stream_id > receipts_now {
                 continue;
             }
             by_room.entry(r.room_id.clone()).or_default().push(r);

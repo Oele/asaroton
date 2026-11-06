@@ -252,8 +252,8 @@ def run(hs, peers):
     def picture():
         return sorted((room_id, len(hs.req("GET", f"/_matrix/client/v3/rooms/{urllib.parse.quote(room_id)}/state", None, creator)[1])) for room_id in rooms_now())
 
-    last, since = None, time.monotonic()
-    while time.monotonic() - since < 1.5 and time.monotonic() - since < 30:
+    last, since, give_up = None, time.monotonic(), time.monotonic() + 30
+    while time.monotonic() - since < 1.5 and time.monotonic() < give_up:
         now = picture()
         if now != last:
             last, since = now, time.monotonic()

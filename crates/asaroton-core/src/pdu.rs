@@ -352,12 +352,13 @@ impl Pdu {
         // top level, clients on the Rust SDK in `content`), so they are given both, as the
         // specification asks of servers. Without it a deletion in a newer room is not
         // applied by the clients that look in the old place.
+        // Both get the target this server went by, also where the other place holds
+        // something of its own: an event from another server may name one event where its
+        // room version looks and another where it does not.
         if let Some(target) = &self.inner.redacts {
             obj.insert("redacts".into(), target.as_str().into());
             if let Some(CanonicalJsonValue::Object(content)) = obj.get_mut("content") {
-                content
-                    .entry("redacts".into())
-                    .or_insert_with(|| target.as_str().into());
+                content.insert("redacts".into(), target.as_str().into());
             }
         }
         canonical::to_json_value(obj)

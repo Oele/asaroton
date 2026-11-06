@@ -437,21 +437,19 @@ impl Services {
         // before the change. And so does a leave: the room's last events before it have to
         // come with it, now or never.
         let mut still_as_before: HashSet<OwnedRoomId> = HashSet::new();
+        // The rooms that are left to the next answer.
+        let mut next_time: HashSet<OwnedRoomId> = HashSet::new();
         let mut kept = Vec::with_capacity(memberships.len());
         for m in memberships {
             if m.stream_ordering > now.events {
                 match m.membership {
-                    MembershipState::Invite | MembershipState::Knock => continue,
+                    MembershipState::Invite | MembershipState::Knock => {
+                        next_time.insert(m.room_id);
+                        continue;
+                    }
                     MembershipState::Join => {
-                        let was_joined = match self.store.get_event(&m.event_id).await? {
-                            Some(ev) => {
-                                self.membership_before(user, &ev, &mut HashMap::new())
-                                    .await?
-                                    == "join"
-                            }
-                            None => false,
-                        };
-                        if !was_joined {
+                        if !self.joined_at(&m.room_id, user, now.events).await? {
+                            next_time.insert(m.room_id);
                             continue;
                         }
                         still_as_before.insert(m.room_id.clone());
@@ -566,6 +564,17 @@ impl Services {
         }
         for ad in self.store.account_data_since(user, ad_since).await? {
             if ad.stream_id > now.account_data || (since.is_none() && ad.is_deleted()) {
+                continue;
+            }
+            // Account data of a room that is left to the next answer waits with it: this
+            // answer's position for account data stops short of it. What lies between is
+            // sent again next time, which does no harm: account data replaces itself.
+            if ad.room_id.as_ref().is_some_and(|r| next_time.contains(r)) {
+                out.next_batch.account_data = out
+                    .next_batch
+                    .account_data
+                    .min(ad.stream_id - 1)
+                    .max(ad_since);
                 continue;
             }
             let ev = json!({ "type": ad.data_type, "content": ad.content });
@@ -969,7 +978,10 @@ impl Services {
         // Ephemeral: receipts and typing (joined rooms only).
         if leave_at.is_none() {
             let rc_since = since.map_or(0, |s| s.receipts);
-            let receipts = self.store.receipts_for_room(room_id, rc_since).await?;
+            // Up to this answer's position and no further: what lies above it comes with
+            // the next answer, and would come twice otherwise.
+            let mut receipts = self.store.receipts_for_room(room_id, rc_since).await?;
+            receipts.retain(|r| r.stream_id <= now.receipts);
             if !receipts.is_empty() {
                 let content = receipts_content(receipts, user);
                 room.ephemeral
@@ -1400,6 +1412,34 @@ impl Services {
             }
         }
         Ok((changed, left))
+    }
+
+    /// Whether `user` was joined to the room as of stream position `position`: the membership
+    /// in the state of the room's newest event at or below it.
+    async fn joined_at(&self, room_id: &RoomId, user: &UserId, position: i64) -> Result<bool> {
+        let newest = self
+            .store
+            .room_events_in_range(room_id, position + 1, None, Direction::Backwards, 1)
+            .await?;
+        let Some(group) = newest.first().and_then(|e| e.state_group) else {
+            return Ok(false);
+        };
+        let key = [(StateEventType::RoomMember, user.to_string())];
+        let Some(entry) = self
+            .store
+            .state_at_group_filtered(group, &key)
+            .await?
+            .into_iter()
+            .next()
+        else {
+            return Ok(false);
+        };
+        Ok(self
+            .store
+            .get_event(&entry.event_id)
+            .await?
+            .and_then(|ev| serde_json::from_str::<Value>(ev.pdu.content().get()).ok())
+            .is_some_and(|c| c.get("membership").and_then(Value::as_str) == Some("join")))
     }
 
     /// `GET /keys/changes`: whose device lists `user` has to fetch again, and whose they can

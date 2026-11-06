@@ -166,9 +166,11 @@ impl PostgresStore {
     {
         let store = self.clone();
         tokio::spawn(async move {
-            // The connection first: waiting for one is no part of the write.
+            // The streams before the connection: setting them up needs the pool itself. The
+            // connection before the registration: waiting for one is no part of the write.
+            let streams = store.streams().await?;
             let mut conn = store.pool.acquire().await?;
-            let mut writing = store.streams().await?.writing(stream);
+            let mut writing = streams.writing(stream);
             let position = statement(&mut conn).await?;
             if let Some(position) = position {
                 writing.wrote(position);

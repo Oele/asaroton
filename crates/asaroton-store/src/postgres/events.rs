@@ -364,34 +364,35 @@ impl EventStore for PostgresStore {
     }
 
     async fn persist_events(&self, events: Vec<PersistEvent>) -> Result<Vec<PersistedEvent>> {
-        let store = self.clone();
-        // In a task of its own, so that a request that is dropped does not end the
-        // registration while the transaction is still with the database (see `streams`).
-        tokio::spawn(async move {
-            let keep = store
-                .search_plaintext
-                .load(std::sync::atomic::Ordering::Relaxed);
-            // The connection first: waiting for one is no part of the write.
-            let mut tx = store.pool.begin().await?;
-            let mut writing = if events.iter().any(takes_a_place_in_the_stream) {
-                Some(store.streams().await?.writing(Stream::Events))
-            } else {
-                None
-            };
-            let mut out = Vec::with_capacity(events.len());
-            for ev in events {
-                out.push(persist_one(&mut tx, ev, keep).await?);
+        // Unlike the single-row writers, this is not moved into a task of its own. An event
+        // comes with steps that follow its write (the room's context, the wake-ups, sending
+        // it on, the transaction ID it answers), done by the caller under the room's lock.
+        // A request that is dropped halfway has to take the write down with it, which the
+        // transaction does: nothing is stored, and the number it took stays unused. (Dropped
+        // in the very moment of the commit, the event is stored and its registration ends a
+        // moment early. That has always left the follow-up steps undone.)
+        let keep = self
+            .search_plaintext
+            .load(std::sync::atomic::Ordering::Relaxed);
+        // The streams before the connection: setting them up needs the pool itself.
+        let streams = self.streams().await?;
+        // The connection before the registration: waiting for one is no part of the write.
+        let mut tx = self.pool.begin().await?;
+        let mut writing = events
+            .iter()
+            .any(takes_a_place_in_the_stream)
+            .then(|| streams.writing(Stream::Events));
+        let mut out = Vec::with_capacity(events.len());
+        for ev in events {
+            out.push(persist_one(&mut tx, ev, keep).await?);
+        }
+        tx.commit().await?;
+        if let Some(writing) = &mut writing {
+            for stored in &out {
+                writing.wrote(stored.stream_ordering);
             }
-            tx.commit().await?;
-            if let Some(writing) = &mut writing {
-                for stored in &out {
-                    writing.wrote(stored.stream_ordering);
-                }
-            }
-            Ok(out)
-        })
-        .await
-        .map_err(|e| Error::Interrupted(e.to_string()))?
+        }
+        Ok(out)
     }
 
     fn stream_position_reportable(&self, stream: crate::SyncStream, position: i64) -> bool {
