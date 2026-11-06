@@ -241,6 +241,14 @@ def complement(ctx):
     results, output = parse_go_test(raw)
     if not results:
         raise RuntimeError("Complement produced no results: " + (ctx["run_dir"] / "complement.stderr").read_text()[-800:])
+    # A run whose homeserver containers vanished (a second Complement run on the same Docker
+    # daemon removes them) fails dozens of tests for no reason of tessera's. Reporting those as
+    # regressions, or keeping them as the next baseline, would be worse than reporting nothing.
+    broken = [t for t, r in results.items() if r == "fail" and "/" not in t and any(
+        "connection refused" in line or "No such container" in line for line in output.get(t, []))]
+    if len(broken) >= 10:
+        raise RuntimeError(f"the Complement run itself broke: {len(broken)} tests could not reach their homeserver "
+                           f"(for example {', '.join(broken[:3])}). Was another Complement run active at the same time?")
     tessera = run(["git", "rev-parse", "--short", "HEAD"], cwd=REPO).stdout.strip()
     (ctx["run_dir"] / "complement-results.json").write_text(json.dumps({"complement": after, "tessera": tessera, "results": results}))
     count = lambda rs, a, top: sum(1 for t, r in rs.items() if r == a and (("/" not in t) == top))
