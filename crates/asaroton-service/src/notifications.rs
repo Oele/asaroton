@@ -48,6 +48,18 @@ pub struct UnreadCacheEntry {
 }
 
 impl Services {
+    /// Report that a room's unread counts could not be computed: loudly the first time,
+    /// quietly after that, as every sync of every member runs into the same failure.
+    pub(crate) fn unread_counts_failed(&self, room_id: &ruma::RoomId, error: &crate::Error) {
+        if self.unread_failures.insert(room_id.to_owned()) {
+            tracing::warn!(%room_id, %error, "unread counts failed (reported once per room)");
+        } else {
+            tracing::debug!(%room_id, %error, "unread counts failed");
+        }
+    }
+}
+
+impl Services {
     /// Unread counts for `user` in `room_id`, considering events up to `upto` (inclusive).
     pub async fn unread_counts(
         &self,

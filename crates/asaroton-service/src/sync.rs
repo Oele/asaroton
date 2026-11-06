@@ -815,7 +815,7 @@ impl Services {
                         room.unread_highlights = counts.total.highlight_count;
                     }
                 }
-                Err(e) => tracing::warn!(%room_id, error = %e, "unread counts failed"),
+                Err(e) => self.unread_counts_failed(room_id, &e),
             }
             // Summary.
             let members = self.store.members(room_id, None).await?;

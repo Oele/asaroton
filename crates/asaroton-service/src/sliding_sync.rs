@@ -1135,7 +1135,7 @@ impl Services {
                 out.notification_count = c.total.notification_count;
                 out.highlight_count = c.total.highlight_count;
             }
-            Err(e) => tracing::warn!(%room_id, error = %e, "unread counts failed"),
+            Err(e) => self.unread_counts_failed(room_id, &e),
         }
         out.timeline = events;
         Ok(out)

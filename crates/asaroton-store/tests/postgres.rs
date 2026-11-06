@@ -926,3 +926,28 @@ async fn outbox_puts_events_and_urgent_edus_first(pool: PgPool) {
     let items = store.outbox_for(&dest[0], 0, 3, &[]).await.unwrap();
     assert_eq!(order(items), ["0", "1", "2"]);
 }
+
+/// A room row whose creator cannot be read (Synapse's empty string, copied by an early import)
+/// still loads; the creator is simply unknown.
+#[sqlx::test(migrations = "./migrations")]
+async fn a_room_with_an_unreadable_creator_still_loads(pool: PgPool) {
+    let store = PostgresStore::from_pool(pool.clone());
+    for (room, creator) in [
+        ("!empty:example.org", Some("")),
+        ("!odd:example.org", Some("not a user id")),
+        ("!none:example.org", None),
+        ("!fine:example.org", Some("@alice:example.org")),
+    ] {
+        sqlx::query("INSERT INTO rooms (room_id, room_version, creator, created_ts) VALUES ($1, '11', $2, 1)")
+            .bind(room)
+            .bind(creator)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let room_id: OwnedRoomId = room.try_into().unwrap();
+        let info = store.get_room(&room_id).await.unwrap().unwrap();
+        let expected =
+            (room == "!fine:example.org").then(|| user_id!("@alice:example.org").to_owned());
+        assert_eq!(info.creator, expected, "{room}");
+    }
+}

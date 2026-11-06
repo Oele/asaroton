@@ -23,14 +23,14 @@ impl TryFrom<RoomRow> for RoomInfo {
     type Error = Error;
     fn try_from(r: RoomRow) -> Result<Self> {
         Ok(RoomInfo {
-            room_id: OwnedRoomId::try_from(r.room_id).map_err(|e| Error::Corrupt(e.to_string()))?,
+            room_id: OwnedRoomId::try_from(r.room_id)
+                .map_err(|e| Error::Corrupt(format!("rooms.room_id: {e}")))?,
             room_version: RoomVersionId::try_from(r.room_version.as_str())
-                .map_err(|e| Error::Corrupt(e.to_string()))?,
-            creator: r
-                .creator
-                .map(OwnedUserId::try_from)
-                .transpose()
-                .map_err(|e| Error::Corrupt(e.to_string()))?,
+                .map_err(|e| Error::Corrupt(format!("rooms.room_version: {e}")))?,
+            // Informational, and not always known: Synapse stores an empty string for a room
+            // it first heard of through an invite, and the importer used to copy that. A
+            // creator that cannot be read must not make the room unloadable.
+            creator: r.creator.and_then(|c| OwnedUserId::try_from(c).ok()),
             is_public: r.is_public,
             created_ts: r.created_ts,
         })
@@ -53,13 +53,15 @@ pub(crate) struct MembershipRow {
 impl TryFrom<MembershipRow> for Membership {
     type Error = Error;
     fn try_from(r: MembershipRow) -> Result<Self> {
-        let corrupt = |e: ruma::IdParseError| Error::Corrupt(e.to_string());
+        let corrupt = |field: &'static str| {
+            move |e: ruma::IdParseError| Error::Corrupt(format!("room_memberships.{field}: {e}"))
+        };
         Ok(Membership {
-            room_id: OwnedRoomId::try_from(r.room_id).map_err(corrupt)?,
-            user_id: OwnedUserId::try_from(r.user_id).map_err(corrupt)?,
+            room_id: OwnedRoomId::try_from(r.room_id).map_err(corrupt("room_id"))?,
+            user_id: OwnedUserId::try_from(r.user_id).map_err(corrupt("user_id"))?,
             membership: MembershipState::from(r.membership),
-            event_id: OwnedEventId::try_from(r.event_id).map_err(corrupt)?,
-            sender: OwnedUserId::try_from(r.sender).map_err(corrupt)?,
+            event_id: OwnedEventId::try_from(r.event_id).map_err(corrupt("event_id"))?,
+            sender: OwnedUserId::try_from(r.sender).map_err(corrupt("sender"))?,
             display_name: r.display_name,
             avatar_url: r.avatar_url,
             stream_ordering: r.stream_ordering,

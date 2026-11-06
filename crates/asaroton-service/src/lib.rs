@@ -90,6 +90,9 @@ pub struct Services {
         std::sync::Mutex<lru::LruCache<ruma::OwnedRoomId, Arc<rooms::pipeline::RoomContext>>>,
     /// Parsed push rulesets with their stream id, dropped when the user changes them.
     pub push_rules_cache: dashmap::DashMap<ruma::OwnedUserId, Arc<(ruma::push::Ruleset, i64)>>,
+    /// Rooms whose unread counts could not be computed, so that each is reported once and
+    /// not on every sync.
+    pub(crate) unread_failures: dashmap::DashSet<ruma::OwnedRoomId>,
     /// Counts changes to the set of pushers, so the push worker knows when its picture of
     /// who has one is out of date.
     pub pushers_generation: std::sync::atomic::AtomicU64,
@@ -151,6 +154,7 @@ impl Services {
             delayed: delayed_events::DelayedEvents::default(),
             rtc: rtc::RtcState::new(config.rtc.as_ref()),
             push_rules_cache: dashmap::DashMap::new(),
+            unread_failures: dashmap::DashSet::new(),
             pushers_generation: std::sync::atomic::AtomicU64::new(0),
             room_ctx_cache: std::sync::Mutex::new(lru::LruCache::new(
                 std::num::NonZeroUsize::new(256).unwrap_or(std::num::NonZeroUsize::MIN),

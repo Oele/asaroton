@@ -666,7 +666,10 @@ impl Importer {
                 .map_err(|e| anyhow::anyhow!("{room_id}: {e}"))?;
             self.rules.insert(room_id.clone(), rules);
             n += sqlx::query("INSERT INTO rooms (room_id, room_version, creator, is_public, has_auth_chain_index, created_ts) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING")
-                .bind(&room_id).bind(&version).bind(r.get::<Option<String>, _>("creator")).bind(r.get::<bool, _>("is_public")).bind(r.get::<bool, _>("hac")).bind(self.now)
+                .bind(&room_id).bind(&version)
+                // Synapse stores '' for a room it first heard of through an invite.
+                .bind(r.get::<Option<String>, _>("creator").filter(|c| !c.is_empty()))
+                .bind(r.get::<bool, _>("is_public")).bind(r.get::<bool, _>("hac")).bind(self.now)
                 .execute(&self.dst).await?.rows_affected() as usize;
         }
         let rows = sqlx::query(
