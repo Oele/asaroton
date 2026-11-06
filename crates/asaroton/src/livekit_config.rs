@@ -3,7 +3,7 @@
 
 use std::{fmt::Write as _, path::Path};
 
-use crate::config::{Config, LivekitConfig};
+use crate::config::{Config, LivekitConfig, SfuConfig};
 
 const WEBHOOK_PATH: &str = "/_matrix/client/unstable/io.element.msc4195/rtc/livekit/sfu_webhook";
 
@@ -36,11 +36,7 @@ pub fn print(config: &Config, config_path: &Path) -> anyhow::Result<()> {
     if sfu.bind != "0.0.0.0" && sfu.bind != "::" {
         writeln!(out, "bind_addresses:\n  - {}", yaml_str(&sfu.bind))?;
     }
-    writeln!(
-        out,
-        "rtc:\n  tcp_port: {}\n  port_range_start: {}\n  port_range_end: {}\n  use_external_ip: {}",
-        sfu.tcp_port, sfu.udp_ports.0, sfu.udp_ports.1, sfu.external_ip
-    )?;
+    out.push_str(&rtc_section(sfu));
     writeln!(
         out,
         "keys:\n  {}: {}",
@@ -96,4 +92,72 @@ pub fn print(config: &Config, config_path: &Path) -> anyhow::Result<()> {
 /// A double-quoted YAML scalar.
 fn yaml_str(s: &str) -> String {
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+/// The `rtc` section: media ports, and how the SFU learns the address to tell clients.
+fn rtc_section(sfu: &SfuConfig) -> String {
+    let mut out = format!(
+        "rtc:\n  tcp_port: {}\n  port_range_start: {}\n  port_range_end: {}\n",
+        sfu.tcp_port, sfu.udp_ports.0, sfu.udp_ports.1
+    );
+    match sfu.public_ip {
+        // A fixed public address is advertised as given, next to the machine's own
+        // addresses so that clients on the same network still connect directly. Nothing is
+        // discovered or checked at start, so what clients are told does not vary.
+        Some(ip) => {
+            let _ = writeln!(
+                out,
+                "  use_external_ip: false\n  node_ip: {ip}\n  advertise_internal_ip: true"
+            );
+        }
+        None => {
+            let _ = writeln!(out, "  use_external_ip: {}", sfu.external_ip);
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_sfu_discovers_its_address_unless_one_is_given() {
+        let mut sfu = SfuConfig::default();
+        assert_eq!(
+            rtc_section(&sfu),
+            "rtc:\n  tcp_port: 7881\n  port_range_start: 50000\n  port_range_end: 60000\n  \
+             use_external_ip: true\n"
+        );
+        sfu.external_ip = false;
+        assert!(rtc_section(&sfu).ends_with("  use_external_ip: false\n"));
+        assert!(!rtc_section(&sfu).contains("node_ip"));
+
+        sfu.external_ip = true;
+        sfu.public_ip = Some(std::net::Ipv4Addr::new(203, 0, 113, 7));
+        assert_eq!(
+            rtc_section(&sfu),
+            "rtc:\n  tcp_port: 7881\n  port_range_start: 50000\n  port_range_end: 60000\n  \
+             use_external_ip: false\n  node_ip: 203.0.113.7\n  advertise_internal_ip: true\n"
+        );
+    }
+
+    #[test]
+    fn a_public_address_in_the_configuration_has_to_be_an_ipv4_address() {
+        let parse = |value: &str| {
+            toml::from_str::<SfuConfig>(&format!("public_ip = {value}")).map(|sfu| sfu.public_ip)
+        };
+        assert_eq!(
+            parse("\"62.131.54.100\"").ok(),
+            Some(Some(std::net::Ipv4Addr::new(62, 131, 54, 100)))
+        );
+        assert!(parse("\"asaroton.example.org\"").is_err());
+        assert!(parse("\"2001:db8::1\"").is_err());
+        assert_eq!(
+            toml::from_str::<SfuConfig>("")
+                .map(|sfu| sfu.public_ip)
+                .ok(),
+            Some(None)
+        );
+    }
 }

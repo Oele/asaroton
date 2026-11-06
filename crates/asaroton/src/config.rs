@@ -318,6 +318,13 @@ pub struct SfuConfig {
     /// Let the SFU discover its public address (needed behind NAT / cloud 1:1 NAT).
     #[serde(default = "default_true")]
     pub external_ip: bool,
+    /// The SFU's public IPv4 address, when it is fixed. The SFU then advertises this address
+    /// next to its own ones instead of discovering it at every start, and `external_ip` is
+    /// ignored. Discovery includes a check that the address leads back to the SFU through
+    /// the router; when that check fails the SFU may advertise only local addresses, and
+    /// calls from outside the network get no media.
+    #[serde(default)]
+    pub public_ip: Option<std::net::Ipv4Addr>,
 }
 
 impl Default for SfuConfig {
@@ -328,6 +335,7 @@ impl Default for SfuConfig {
             tcp_port: default_sfu_tcp_port(),
             udp_ports: default_udp_ports(),
             external_ip: true,
+            public_ip: None,
         }
     }
 }

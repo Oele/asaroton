@@ -128,7 +128,11 @@ asaroton --config /etc/asaroton/asaroton.toml livekit-config > /etc/livekit/live
 produces the complete `livekit.yaml`: signalling and API on 127.0.0.1:7880, media on UDP
 50000–60000 and TCP 7881, the key, the webhook back to asaroton and the TURN section.
 `[rtc.livekit.sfu]` changes those ports and the bind address. Open UDP 50000–60000, TCP 7881
-and (with TURN) TCP 5349 to the world; nothing else. Clients open their LiveKit WebSocket on
+and (with TURN) TCP 5349 to the world; nothing else. Behind a router, forward the same ports
+and, when the public IPv4 address is fixed, state it with `public_ip = "203.0.113.7"` in
+`[rtc.livekit.sfu]`: the SFU otherwise discovers the address at every start and checks that
+it leads back to itself through the router, and when that check fails it may tell clients
+only its local addresses, so that calls work at home and nowhere else. Clients open their LiveKit WebSocket on
 asaroton's own URL, under `/_matrix/client/unstable/io.element.msc4195/rtc/livekit/signal`, and
 asaroton relays it to the SFU. The reverse proxy must let WebSocket upgrades through on
 `/_matrix`, which a proxy set up for Synapse does not do by default: Apache 2.4.47+ takes

@@ -60,7 +60,8 @@ mode = "word"
 # port = 7880
 # tcp_port = 7881
 # udp_ports = [50000, 60000]
-# external_ip = true
+# external_ip = true                        # discover the public address at start (NAT, cloud)
+# public_ip = "203.0.113.7"                 # or state it, when it is fixed: nothing to discover or fail
 # [rtc.livekit.turn]                        # relay over TLS for clients whose UDP is blocked
 # domain = "matrix.example.org"             # defaults to the host of public_base_url
 # tls_port = 5349
