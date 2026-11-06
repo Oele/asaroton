@@ -6,8 +6,8 @@
 //! forth. Before this aggregation every sync could flip the state, each flip woke the other
 //! client's long poll, which flipped it back, and every flip was pushed to every server sharing
 //! a room with the user: a feedback loop that flooded the federation. Devices that stop syncing
-//! drop out after [`DEVICE_TTL_MS`], and pushes to other servers are spaced at least
-//! [`FEDERATION_MIN_INTERVAL_MS`] apart per user, the latest state winning.
+//! drop out after [`DEVICE_TTL_MS`], and pushes to other servers are limited per user to a
+//! few at once and then one per [`FEDERATION_MIN_INTERVAL_MS`], the latest state winning.
 #![allow(clippy::option_option)] // `Some(None)` clears the status message, `None` keeps it
 
 use std::{
@@ -28,8 +28,32 @@ use crate::{Notification, Services};
 
 /// A device that has not synced for this long no longer counts towards its user's presence.
 pub const DEVICE_TTL_MS: i64 = 5 * 60 * 1000;
-/// Minimum spacing between presence pushes to other servers for one user.
+/// Long-run spacing between presence pushes to other servers for one user.
 pub const FEDERATION_MIN_INTERVAL_MS: i64 = 15_000;
+/// Pushes a user may make at once before the spacing applies. Ordinary use changes state a
+/// couple of times in a row (coming online, then going idle); only something that keeps
+/// flipping runs into the limit, and that is then held to the long-run rate.
+pub const FEDERATION_BURST: i64 = 3;
+
+/// A user's allowance of presence pushes to other servers.
+#[derive(Clone, Copy, Debug, Default)]
+struct PushSlot {
+    /// When the next push is due on the steady schedule (milliseconds).
+    next: i64,
+    /// A change is waiting for the allowance.
+    pending: bool,
+}
+
+impl PushSlot {
+    fn allowed(&self, now: i64) -> bool {
+        self.next - now <= FEDERATION_MIN_INTERVAL_MS * (FEDERATION_BURST - 1)
+    }
+
+    fn take(&mut self, now: i64) {
+        self.next = self.next.max(now) + FEDERATION_MIN_INTERVAL_MS;
+        self.pending = false;
+    }
+}
 
 /// A user's presence as clients and other servers see it.
 #[derive(Clone, Debug)]
@@ -55,9 +79,9 @@ pub struct PresenceMap {
     /// Per local user, the state each device asked for; the key is the device ID, or an empty
     /// string for a request without one.
     devices: DashMap<OwnedUserId, HashMap<String, DeviceState>>,
-    /// When each user's presence was last pushed to other servers, and whether a push is
-    /// already scheduled.
-    federation: DashMap<OwnedUserId, (i64, bool)>,
+    /// Each local user's allowance of pushes to other servers, and whether a change is
+    /// waiting for it.
+    federation: DashMap<OwnedUserId, PushSlot>,
     position: AtomicI64,
 }
 
@@ -200,24 +224,30 @@ impl PresenceMap {
     /// Whether a push to other servers may go out now (recorded as done if so); otherwise the
     /// push is marked pending for [`PresenceMap::due_pushes`].
     fn federation_slot(&self, user: &UserId) -> bool {
-        let now = now_ts();
-        let mut slot = self.federation.entry(user.to_owned()).or_insert((0, false));
-        if now - slot.0 >= FEDERATION_MIN_INTERVAL_MS {
-            *slot = (now, false);
+        self.federation_slot_at(user, now_ts())
+    }
+
+    fn federation_slot_at(&self, user: &UserId, now: i64) -> bool {
+        let mut slot = self.federation.entry(user.to_owned()).or_default();
+        if slot.allowed(now) {
+            slot.take(now);
             true
         } else {
-            slot.1 = true;
+            slot.pending = true;
             false
         }
     }
 
-    /// Users with a pending push whose spacing interval has passed; recorded as pushed now.
+    /// Users with a pending push that their allowance now covers; recorded as pushed now.
     fn due_pushes(&self) -> Vec<OwnedUserId> {
-        let now = now_ts();
+        self.due_pushes_at(now_ts())
+    }
+
+    fn due_pushes_at(&self, now: i64) -> Vec<OwnedUserId> {
         let mut due = Vec::new();
         for mut slot in self.federation.iter_mut() {
-            if slot.1 && now - slot.0 >= FEDERATION_MIN_INTERVAL_MS {
-                *slot.value_mut() = (now, false);
+            if slot.pending && slot.allowed(now) {
+                slot.take(now);
                 due.push(slot.key().clone());
             }
         }
@@ -354,15 +384,51 @@ mod tests {
     }
 
     #[test]
-    fn federation_pushes_are_spaced() {
+    fn federation_pushes_come_in_a_small_burst_and_then_spaced() {
         let map = PresenceMap::default();
         let user: OwnedUserId = "@a:example.org".try_into().unwrap();
-        assert!(map.federation_slot(&user));
-        assert!(!map.federation_slot(&user));
-        assert_eq!(map.due_pushes(), Vec::<OwnedUserId>::new());
-        map.federation
-            .insert(user.clone(), (now_ts() - FEDERATION_MIN_INTERVAL_MS, true));
-        assert_eq!(map.due_pushes(), vec![user.clone()]);
-        assert_eq!(map.due_pushes(), Vec::<OwnedUserId>::new());
+        let start = 1_793_000_000_000;
+        // Coming online and going idle right after both go out at once.
+        for _ in 0..FEDERATION_BURST {
+            assert!(map.federation_slot_at(&user, start));
+        }
+        // The next change waits, and is delivered once, when the allowance covers it.
+        assert!(!map.federation_slot_at(&user, start + 10));
+        assert_eq!(map.due_pushes_at(start + 20), Vec::<OwnedUserId>::new());
+        assert_eq!(
+            map.due_pushes_at(start + FEDERATION_MIN_INTERVAL_MS),
+            vec![user.clone()]
+        );
+        assert_eq!(
+            map.due_pushes_at(start + FEDERATION_MIN_INTERVAL_MS + 1),
+            Vec::<OwnedUserId>::new()
+        );
+
+        // Something that flips the state every 100 ms for ten minutes gets the burst and
+        // then one push per interval, however fast it flips.
+        let map = PresenceMap::default();
+        let mut pushes = 0;
+        let minutes = 10;
+        for tick in 0..minutes * 600 {
+            let now = start + tick * 100;
+            if map.federation_slot_at(&user, now) {
+                pushes += 1;
+            }
+            pushes += i64::try_from(map.due_pushes_at(now).len()).unwrap_or(0);
+        }
+        let steady = minutes * 60_000 / FEDERATION_MIN_INTERVAL_MS;
+        assert!(
+            pushes >= steady && pushes <= steady + FEDERATION_BURST,
+            "{pushes} pushes"
+        );
+
+        // After a quiet spell the burst is available again, and no more than the burst.
+        let later = start + 3_600_000;
+        let map = PresenceMap::default();
+        assert!(map.federation_slot_at(&user, start));
+        for _ in 0..FEDERATION_BURST {
+            assert!(map.federation_slot_at(&user, later));
+        }
+        assert!(!map.federation_slot_at(&user, later));
     }
 }
