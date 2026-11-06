@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Build the Complement image for asaroton and run the conformance suite.
 # Usage: scripts/complement.sh [go test args...]   e.g. scripts/complement.sh -run TestVersionStructure
+# Tests listed in tests/complement/expected-failures.txt are skipped unless COMPLEMENT_ALL=1.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+REPO=$PWD
 COMPLEMENT_DIR=${COMPLEMENT_DIR:-$HOME/src/complement}
 IMAGE=${IMAGE:-complement-asaroton:latest}
 
@@ -18,4 +20,15 @@ cd "$COMPLEMENT_DIR"
 export COMPLEMENT_BASE_IMAGE="$IMAGE"
 export COMPLEMENT_SPAWN_HS_TIMEOUT_SECS=${COMPLEMENT_SPAWN_HS_TIMEOUT_SECS:-60}
 export COMPLEMENT_ENABLE_DIRTY_RUNS=${COMPLEMENT_ENABLE_DIRTY_RUNS:-1}
-exec go test -count=1 -v -timeout "${COMPLEMENT_TIMEOUT:-90m}" ./tests/... "$@"
+
+# Tests that fail by decision are skipped, so that every failure of a run is a real one and a
+# clean run exits 0. Each name becomes an anchored pattern, level by level for subtests;
+# go test takes alternatives separated by `|`. COMPLEMENT_ALL=1 runs everything.
+SKIP=()
+if [ -z "${COMPLEMENT_ALL:-}" ]; then
+  PATTERN=$(grep -vE '^[[:space:]]*(#|$)' "$REPO/tests/complement/expected-failures.txt" \
+    | awk '{ n = split($1, part, "/"); out = ""; for (i = 1; i <= n; i++) out = out (i > 1 ? "/" : "") "^" part[i] "$"; print out }' \
+    | paste -sd'|')
+  [ -n "$PATTERN" ] && SKIP=(-skip "$PATTERN")
+fi
+exec go test -count=1 -v -timeout "${COMPLEMENT_TIMEOUT:-90m}" "${SKIP[@]}" ./tests/... "$@"

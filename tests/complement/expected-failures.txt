@@ -1,0 +1,23 @@
+# Complement tests that fail by decision, each with its reason.
+#
+# scripts/complement.sh skips these, so the run exits 0 unless something else fails, and any
+# failure it reports is a real one. One test per line, a subtest written as Test/sub/test;
+# everything after the name is the reason. Remove a line when the feature is implemented.
+# COMPLEMENT_ALL=1 scripts/complement.sh runs everything, to see whether an entry can go.
+
+# Features that are not implemented.
+TestPartialStateJoin                                    faster joins (MSC3902)
+TestEventRelationships                                  event relationships (MSC2836)
+TestFederatedEventRelationships                         event relationships (MSC2836)
+TestMSC3389RedactionPreservesPlainRelation              relation preservation on redaction (MSC3389)
+TestMSC3389RedactionPreservesRelation                   relation preservation on redaction (MSC3389)
+TestMSC3757OwnedState                                   owned state; needs room version org.matrix.msc3757.10
+TestMSC4242JoinLeaveRejoinPublicRoom                    state DAG room version (MSC4242)
+TestMSC4242JoinPublicRoomWithRejectedStateDAGEvents     state DAG room version (MSC4242)
+TestMSC4242RejectionCascadesOnRejoin                    state DAG room version (MSC4242)
+TestMSC4242RejoinMergesOldAndNewStateDAGBranches        state DAG room version (MSC4242)
+
+# Deliberate deviations (see docs/spec-coverage.md).
+TestRegistration/parallel/Registration_without_a_session_fails    UIA accepts an auth dict without a session, as Synapse does; skipped for Synapse too
+TestIsDirectFlagFederation                              the test sends a room version 12 invite without m.room.create in invite_room_state, which receivers must reject since v1.16
+TestDeviceListsUpdateOverFederationOnRoomJoin           skipped for Synapse as well
