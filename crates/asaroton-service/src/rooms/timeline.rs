@@ -380,7 +380,7 @@ impl Services {
             .store
             .get_event(event_id)
             .await?
-            .filter(|e| e.pdu.room_id() == room_id && !e.outlier)
+            .filter(|e| e.pdu.room_id() == room_id && !e.outlier && !e.soft_failed)
             .ok_or_else(|| Error::not_found("Event not found."))?;
         let half = limit.max(1).div_ceil(2);
         let before = self
@@ -424,7 +424,8 @@ impl Services {
         self.store
             .get_event(event_id)
             .await?
-            .filter(|e| e.pdu.room_id() == room_id && !e.pdu.rejected())
+            // A soft-failed event is not for clients (see `RoomStore::room_events_in_range`).
+            .filter(|e| e.pdu.room_id() == room_id && !e.pdu.rejected() && !e.soft_failed)
             .ok_or_else(|| Error::not_found("Event not found."))
     }
 

@@ -381,7 +381,11 @@ pub trait EventStore: Send + Sync {
     ) -> Result<Vec<StoredEvent>>;
 
     /// Timeline events in stream order within `(from, to]` (forwards) or `[to, from)`
-    /// (backwards), newest-first when backwards. Excludes rejected and outliers.
+    /// (backwards), newest-first when backwards. Excludes rejected events and outliers, and
+    /// soft-failed events: those are kept for state resolution and for other servers, but
+    /// are not shown to clients (a banned user's server can go on sending events that build
+    /// on the room as it was before the ban). The same holds for every other query here that
+    /// reads events for clients.
     async fn room_events_in_range(
         &self,
         room_id: &RoomId,

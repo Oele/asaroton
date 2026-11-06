@@ -394,12 +394,12 @@ impl EventStore for PostgresStore {
         let sql = match direction {
             Direction::Forwards => format!(
                 "SELECT {EVENT_COLUMNS} FROM events e JOIN rooms r ON r.room_id = e.room_id
-                  WHERE e.room_id = $1 AND e.origin_server_ts >= $2 AND NOT e.rejected AND NOT e.outlier
+                  WHERE e.room_id = $1 AND e.origin_server_ts >= $2 AND NOT e.rejected AND NOT e.outlier AND NOT e.soft_failed
                   ORDER BY e.origin_server_ts ASC, e.stream_ordering ASC LIMIT 1"
             ),
             Direction::Backwards => format!(
                 "SELECT {EVENT_COLUMNS} FROM events e JOIN rooms r ON r.room_id = e.room_id
-                  WHERE e.room_id = $1 AND e.origin_server_ts <= $2 AND NOT e.rejected AND NOT e.outlier
+                  WHERE e.room_id = $1 AND e.origin_server_ts <= $2 AND NOT e.rejected AND NOT e.outlier AND NOT e.soft_failed
                   ORDER BY e.origin_server_ts DESC, e.stream_ordering DESC LIMIT 1"
             ),
         };
@@ -414,7 +414,7 @@ impl EventStore for PostgresStore {
     async fn events_after(&self, after: StreamOrdering, limit: usize) -> Result<Vec<StoredEvent>> {
         let sql = format!(
             "SELECT {EVENT_COLUMNS} FROM events e JOIN rooms r ON r.room_id = e.room_id
-              WHERE e.stream_ordering > $1 AND NOT e.outlier AND NOT e.rejected
+              WHERE e.stream_ordering > $1 AND NOT e.outlier AND NOT e.rejected AND NOT e.soft_failed
               ORDER BY e.stream_ordering ASC LIMIT $2"
         );
         let rows: Vec<EventRow> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
@@ -438,7 +438,7 @@ impl EventStore for PostgresStore {
             Some(types) => {
                 sqlx::query(
                     "SELECT room_id, MAX(stream_ordering) FROM events
-                     WHERE room_id = ANY($1) AND event_type = ANY($2) AND NOT outlier AND NOT rejected
+                     WHERE room_id = ANY($1) AND event_type = ANY($2) AND NOT outlier AND NOT rejected AND NOT soft_failed
                      GROUP BY room_id",
                 )
                 .bind(&ids)
@@ -449,7 +449,7 @@ impl EventStore for PostgresStore {
             None => {
                 sqlx::query(
                     "SELECT room_id, MAX(stream_ordering) FROM events
-                     WHERE room_id = ANY($1) AND NOT outlier AND NOT rejected
+                     WHERE room_id = ANY($1) AND NOT outlier AND NOT rejected AND NOT soft_failed
                      GROUP BY room_id",
                 )
                 .bind(&ids)
@@ -504,7 +504,7 @@ impl EventStore for PostgresStore {
     async fn room_event_count_in_range(&self, room_id: &RoomId, from: i64, to: i64) -> Result<i64> {
         let row = sqlx::query(
             "SELECT count(*) FROM events WHERE room_id = $1 AND stream_ordering BETWEEN $2 AND $3
-             AND NOT rejected AND NOT outlier",
+             AND NOT rejected AND NOT outlier AND NOT soft_failed",
         )
         .bind(room_id.as_str())
         .bind(from)
@@ -736,7 +736,7 @@ impl EventStore for PostgresStore {
         let sql = format!(
             "SELECT {EVENT_COLUMNS} FROM ({source}) x
                JOIN events e ON e.event_id = x.event_id JOIN rooms r ON r.room_id = e.room_id
-              WHERE e.room_id = $1 AND NOT e.rejected
+              WHERE e.room_id = $1 AND NOT e.rejected AND NOT e.soft_failed
                 AND ($3::text IS NULL OR x.rel_type = $3)
                 AND ($4::text IS NULL OR x.event_type = $4)
                 AND ($5::bigint IS NULL OR x.stream_ordering {cmp_from} $5)
@@ -769,7 +769,7 @@ impl EventStore for PostgresStore {
         let rows = sqlx::query(
             "SELECT r.relates_to, r.event_id, r.rel_type, r.event_type, r.sender, r.origin_server_ts, r.stream_ordering
                FROM event_relations r JOIN events e ON e.event_id = r.event_id
-              WHERE r.relates_to = ANY($1) AND NOT e.rejected
+              WHERE r.relates_to = ANY($1) AND NOT e.rejected AND NOT e.soft_failed
               ORDER BY r.stream_ordering ASC",
         )
         .bind(&ids)
@@ -796,7 +796,7 @@ impl EventStore for PostgresStore {
         let rows = sqlx::query(
             "SELECT r.event_id, r.rel_type, r.event_type, r.sender, r.origin_server_ts, r.stream_ordering
                FROM event_relations r JOIN events e ON e.event_id = r.event_id
-              WHERE r.relates_to = $1 AND NOT e.rejected
+              WHERE r.relates_to = $1 AND NOT e.rejected AND NOT e.soft_failed
               ORDER BY r.stream_ordering ASC",
         )
         .bind(event_id.as_str())
@@ -927,7 +927,7 @@ impl EventStore for PostgresStore {
             "SELECT {EVENT_COLUMNS}, {rank} AS rank
                FROM event_search s JOIN events e ON e.event_id = s.event_id
                JOIN rooms r ON r.room_id = e.room_id
-              WHERE s.room_id = ANY($1) AND ({matching}) AND NOT e.rejected
+              WHERE s.room_id = ANY($1) AND ({matching}) AND NOT e.rejected AND NOT e.soft_failed
               ORDER BY {order} OFFSET $3 LIMIT $4"
         );
         let mut q = sqlx::query(sqlx::AssertSqlSafe(sql))
@@ -1056,7 +1056,7 @@ impl EventStore for PostgresStore {
             "SELECT MIN(e.stream_ordering) FROM event_edges g
                JOIN events e ON e.event_id = g.event_id
                LEFT JOIN events p ON p.event_id = g.prev_event_id
-              WHERE e.room_id = $1 AND e.stream_ordering > $2 AND NOT e.outlier AND NOT e.rejected
+              WHERE e.room_id = $1 AND e.stream_ordering > $2 AND NOT e.outlier AND NOT e.rejected AND NOT e.soft_failed
                 AND (p.event_id IS NULL OR p.outlier)",
         )
         .bind(room_id.as_str())
@@ -1176,13 +1176,13 @@ impl EventStore for PostgresStore {
             Direction::Forwards => format!(
                 "SELECT {EVENT_COLUMNS} FROM events e JOIN rooms r ON r.room_id = e.room_id
                  WHERE e.room_id = $1 AND e.stream_ordering > $2 AND ($3::bigint IS NULL OR e.stream_ordering <= $3)
-                   AND NOT e.rejected AND NOT e.outlier
+                   AND NOT e.rejected AND NOT e.outlier AND NOT e.soft_failed
                  ORDER BY e.stream_ordering ASC LIMIT $4"
             ),
             Direction::Backwards => format!(
                 "SELECT {EVENT_COLUMNS} FROM events e JOIN rooms r ON r.room_id = e.room_id
                  WHERE e.room_id = $1 AND e.stream_ordering < $2 AND ($3::bigint IS NULL OR e.stream_ordering >= $3)
-                   AND NOT e.rejected AND NOT e.outlier
+                   AND NOT e.rejected AND NOT e.outlier AND NOT e.soft_failed
                  ORDER BY e.stream_ordering DESC LIMIT $4"
             ),
         };
@@ -1204,7 +1204,7 @@ impl EventStore for PostgresStore {
     ) -> Result<Vec<StoredEvent>> {
         let sql = format!(
             "SELECT {EVENT_COLUMNS} FROM events e JOIN rooms r ON r.room_id = e.room_id
-             WHERE e.room_id = $1 AND e.stream_ordering <= $2 AND NOT e.rejected AND NOT e.outlier
+             WHERE e.room_id = $1 AND e.stream_ordering <= $2 AND NOT e.rejected AND NOT e.outlier AND NOT e.soft_failed
              ORDER BY e.depth DESC, e.stream_ordering DESC LIMIT $3"
         );
         let rows: Vec<EventRow> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
