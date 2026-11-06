@@ -7,19 +7,19 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.94"
 license = "AGPL-3.0-or-later"
-repository = "https://github.com/sanderoele/tessera"
+repository = "https://github.com/Oele/asaroton"
 authors = ["Sander Oele <sander@oele.net>"]
 
 [workspace.dependencies]
 html-escape = "0.3.0"
 percent-encoding = "2"
 # internal crates
-tessera-core = { path = "crates/tessera-core" }
-tessera-store = { path = "crates/tessera-store" }
-tessera-federation = { path = "crates/tessera-federation" }
-tessera-api = { path = "crates/tessera-api" }
-tessera-service = { path = "crates/tessera-service" }
-tessera-auth = { path = "crates/tessera-auth" }
+asaroton-core = { path = "crates/asaroton-core" }
+asaroton-store = { path = "crates/asaroton-store" }
+asaroton-federation = { path = "crates/asaroton-federation" }
+asaroton-api = { path = "crates/asaroton-api" }
+asaroton-service = { path = "crates/asaroton-service" }
+asaroton-auth = { path = "crates/asaroton-auth" }
 
 # Matrix protocol
 ruma = { version = "0.17.2", features = [

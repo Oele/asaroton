@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercises tessera's MSC4195 endpoints against a dev server (HS, registration open) and a local
+"""Exercises asaroton's MSC4195 endpoints against a dev server (HS, registration open) and a local
 LiveKit started with the lab key (LK_KEY/LK_SECRET), using the `lk` CLI (LK_CLI) for participants."""
 import base64, hashlib, hmac, json, os, subprocess, sys, time, urllib.request, urllib.error, urllib.parse
 

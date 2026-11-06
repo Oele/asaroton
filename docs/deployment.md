@@ -2,10 +2,10 @@
 
 ## Container
 
-`docker build -t tessera .` builds a distroless image with the release binary. It expects a
-configuration file at `/data/tessera.toml` and keeps signing keys and media under `/data`.
-`deploy/docker-compose.yml` runs it next to PostgreSQL 18; copy `deploy/tessera.example.toml`
-to `deploy/data/tessera.toml` and set `server_name` before `docker compose up -d`.
+`docker build -t asaroton .` builds a distroless image with the release binary. It expects a
+configuration file at `/data/asaroton.toml` and keeps signing keys and media under `/data`.
+`deploy/docker-compose.yml` runs it next to PostgreSQL 18; copy `deploy/asaroton.example.toml`
+to `deploy/data/asaroton.toml` and set `server_name` before `docker compose up -d`.
 
 ## Federation
 
@@ -24,12 +24,12 @@ server notices).
 
 ## Authentication service
 
-With `[mas] enabled = true` tessera validates access tokens through Matrix Authentication
+With `[mas] enabled = true` asaroton validates access tokens through Matrix Authentication
 Service and MAS provisions users and devices through `/_synapse/mas/*`. In the MAS
 configuration set `matrix.kind: synapse`, `matrix.homeserver` to the server name,
-`matrix.endpoint` to tessera's client listener and `matrix.secret` to the same value as
+`matrix.endpoint` to asaroton's client listener and `matrix.secret` to the same value as
 `mas.secret`. Route `/_matrix/client/*/login`, `/logout` and `/refresh` to MAS in the reverse
-proxy; tessera answers them with an error when delegation is on. Clients discover MAS through
+proxy; asaroton answers them with an error when delegation is on. Clients discover MAS through
 `/_matrix/client/v1/auth_metadata` and `/.well-known/matrix/client`.
 
 ## Operations
@@ -39,17 +39,17 @@ proxy; tessera answers them with an error when delegation is on. Clients discove
 - `retention`: a periodic job purges non-state events older than a room's
   `m.room.retention` `max_lifetime` (or the configured default).
 - Logs go to standard output; `RUST_LOG` selects the level (`info` by default,
-  `tessera_federation=debug` is useful when debugging federation).
-- `deploy/systemd/` holds a watchdog that runs beside tessera as its own service and stops
+  `asaroton_federation=debug` is useful when debugging federation).
+- `deploy/systemd/` holds a watchdog that runs beside asaroton as its own service and stops
   it when it sends more than 1000 federation transactions in a minute, queues more than 5000
   outbox rows, or stays above 60% CPU. A homeserver that misbehaves bothers every server it
   federates with, so it errs on the side of stopping; it logs the reason to
-  `/var/log/tessera-watchdog.log` and syslog and mails root. Install it with
+  `/var/log/asaroton-watchdog.log` and syslog and mails root. Install it with
   `deploy/systemd/install-watchdog.sh [UNIT [DBNAME]]` as root; it is enabled at boot and
-  never starts tessera again by itself. It counts transactions in tessera's log, so it needs
-  `RUST_LOG` to include `tessera_federation=debug`. Thresholds go in
-  `/etc/default/tessera-watchdog`.
-- `deploy/systemd/tessera-deploy.sh` installs a new binary on a host: it compares the
+  never starts asaroton again by itself. It counts transactions in asaroton's log, so it needs
+  `RUST_LOG` to include `asaroton_federation=debug`. Thresholds go in
+  `/etc/default/asaroton-watchdog`.
+- `deploy/systemd/asaroton-deploy.sh` installs a new binary on a host: it compares the
   checksum with the one announced, runs `--version` as the service user, restarts, waits for
   the client API to answer and puts the previous binary back when it does not (unless the new
   build changed the database schema, which needs a person). `install-deploy.sh` sets it up and
@@ -63,7 +63,7 @@ proxy; tessera answers them with an error when delegation is on. Clients discove
 
 Set `public_base_url = "https://matrix.example.org"` so `.well-known/matrix/client` and login
 responses carry the public URL, and `federation.well_known_server = "matrix.example.org:443"` so
-tessera serves `.well-known/matrix/server` and other servers reach it through the proxy instead
+asaroton serves `.well-known/matrix/server` and other servers reach it through the proxy instead
 of port 8448 (the federation listener can then be disabled). Proxy `/_matrix`, `/_synapse` and
 `/.well-known/matrix` to the client listener with `nocanon` and `AllowEncodedSlashes NoDecode`
 (Apache) or the equivalent, keep the proxy timeout above the longest `/sync` long-poll, let
@@ -78,7 +78,7 @@ so only whole words match and URLs, version strings and stop words are poor sear
 index, language-agnostic; `"both"` returns the union, ranked by the full-text rank with substring-
 only hits last. Terms shorter than `substring_min_length` (default 3) are ignored; double-quoted
 phrases are matched as one substring. The plain text is stored from the moment substring search is
-enabled; run `tessera --config ... search-backfill` once (safe while the server runs) to cover
+enabled; run `asaroton --config ... search-backfill` once (safe while the server runs) to cover
 older messages. Expect the text plus its trigram index to add roughly a third to the size of the
 search table.
 
@@ -86,7 +86,7 @@ search table.
 
 Calls (Element Call, in Element Web, Element X and the standalone app) use MatrixRTC over
 LiveKit: the clients exchange call membership as room events and send media through a LiveKit
-SFU. tessera implements the homeserver side of MSC4195 itself, relays the SFU's signalling, and
+SFU. asaroton implements the homeserver side of MSC4195 itself, relays the SFU's signalling, and
 writes the SFU's configuration, so the only extra service is `livekit-server` on the same host.
 
 ```toml
@@ -104,22 +104,22 @@ api_secret = "the-secret-from-livekit-server-generate-keys"
 ```
 
 ```sh
-tessera --config /etc/tessera/tessera.toml livekit-config > /etc/livekit/livekit.yaml
+asaroton --config /etc/asaroton/asaroton.toml livekit-config > /etc/livekit/livekit.yaml
 ```
 
 produces the complete `livekit.yaml`: signalling and API on 127.0.0.1:7880, media on UDP
-50000–60000 and TCP 7881, the key, the webhook back to tessera and the TURN section.
+50000–60000 and TCP 7881, the key, the webhook back to asaroton and the TURN section.
 `[rtc.livekit.sfu]` changes those ports and the bind address. Open UDP 50000–60000, TCP 7881
 and (with TURN) TCP 5349 to the world; nothing else. Clients open their LiveKit WebSocket on
-tessera's own URL, under `/_matrix/client/unstable/io.element.msc4195/rtc/livekit/signal`, and
-tessera relays it to the SFU. The reverse proxy must let WebSocket upgrades through on
+asaroton's own URL, under `/_matrix/client/unstable/io.element.msc4195/rtc/livekit/signal`, and
+asaroton relays it to the SFU. The reverse proxy must let WebSocket upgrades through on
 `/_matrix`, which a proxy set up for Synapse does not do by default: Apache 2.4.47+ takes
 `upgrade=websocket` on the existing `ProxyPass /_matrix ...` line, nginx needs
 `proxy_set_header Upgrade $http_upgrade;` and `proxy_set_header Connection "upgrade";` in the
 `/_matrix` location, Caddy and Traefik need nothing. If the SFU's WebSocket is exposed in some
 other way, set `url` to it instead.
 
-tessera advertises the SFU through `/rtc/transports` and the `org.matrix.msc4143.rtc_foci`
+asaroton advertises the SFU through `/rtc/transports` and the `org.matrix.msc4143.rtc_foci`
 entry of `.well-known/matrix/client`, checks room membership, signs the LiveKit access tokens,
 creates the LiveKit rooms, serves the federation endpoint through which users of other
 homeservers join calls hosted here (and asks the remote server for tokens when a local user
@@ -139,7 +139,7 @@ its first round of connectivity checks and connects at once. It is a listener of
 not a separate TURN server, and the relayed media never leaves the host.
 
 LiveKit tells clients to find that relay on port 443 whatever port it listens on (its
-maintainers assume a load balancer in front). tessera's signalling relay corrects the port in
+maintainers assume a load balancer in front). asaroton's signalling relay corrects the port in
 the SFU's answers, so the relay can use 5349 or any other free port, and 443 is only needed
 for the strictest networks, which allow nothing else: give it a second address then, or an
 SNI router in front of 443. The relay forwards only to the SFU itself, and LiveKit refuses to

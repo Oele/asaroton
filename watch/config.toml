@@ -1,8 +1,8 @@
-# Settings for the tessera watch job. Nothing secret lives here: the bot's access token, the
-# digest room and the ssh key are in ~/.config/tessera-watch/ (see README.md).
+# Settings for the asaroton watch job. Nothing secret lives here: the bot's access token, the
+# digest room and the ssh key are in ~/.config/asaroton-watch/ (see README.md).
 
 [issues]
-repo = "Oele/tessera"
+repo = "Oele/asaroton"
 max_new_per_run = 15          # further findings are listed in the digest, not filed
 
 [analyst]
@@ -60,7 +60,7 @@ dir = "~/src/complement"
 timeout_minutes = 150
 
 [hosts.cluephone]
-ssh = "root@cluephone.org"    # reached with the restricted key ~/.config/tessera-watch/id_ed25519
+ssh = "root@cluephone.org"    # reached with the restricted key ~/.config/asaroton-watch/id_ed25519
 database = true
 
 [hosts.local]

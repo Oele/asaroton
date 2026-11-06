@@ -1,0 +1,40 @@
+[package]
+name = "asaroton-api"
+description = "HTTP API surface (client-server, server-server, media, appservice, admin)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+rand.workspace = true
+asaroton-core.workspace = true
+asaroton-store.workspace = true
+asaroton-auth.workspace = true
+asaroton-service.workspace = true
+asaroton-federation.workspace = true
+ruma.workspace = true
+axum.workspace = true
+tokio-tungstenite.workspace = true
+reqwest.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+http.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+percent-encoding.workspace = true
+sha2.workspace = true
+dashmap.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+bytes.workspace = true
+futures.workspace = true
+hmac.workspace = true
+sha1.workspace = true
+hex.workspace = true

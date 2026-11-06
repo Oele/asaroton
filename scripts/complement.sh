@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# Build the Complement image for tessera and run the conformance suite.
+# Build the Complement image for asaroton and run the conformance suite.
 # Usage: scripts/complement.sh [go test args...]   e.g. scripts/complement.sh -run TestVersionStructure
 set -euo pipefail
 cd "$(dirname "$0")/.."
 COMPLEMENT_DIR=${COMPLEMENT_DIR:-$HOME/src/complement}
-IMAGE=${IMAGE:-complement-tessera:latest}
+IMAGE=${IMAGE:-complement-asaroton:latest}
 
 # Two Complement runs on one Docker daemon remove each other's homeserver containers and both
 # fail with "connection refused". Wait for a run that is already going instead. The lock is
 # inherited by go test and its test binaries, so it also covers a run whose parent was killed.
-exec 9>"/tmp/tessera-complement-$(id -u).lock"
+exec 9>"/tmp/asaroton-complement-$(id -u).lock"
 flock 9
 
 DOCKER_BUILDKIT=1 docker build -q -t "$IMAGE" -f tests/complement/Dockerfile . >/dev/null

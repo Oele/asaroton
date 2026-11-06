@@ -1,0 +1,28 @@
+[package]
+name = "asaroton-auth"
+description = "Legacy and OIDC (MSC3861) authentication for the asaroton homeserver"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+asaroton-core.workspace = true
+asaroton-store.workspace = true
+ruma.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+argon2.workspace = true
+bcrypt.workspace = true
+rand.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+dashmap.workspace = true
+reqwest.workspace = true

@@ -1,7 +1,7 @@
 # Emulator lab: Element X calls without a phone
 
 A headless Android emulator running the release Element X APK, a headless Element Web driven by
-Playwright, and a dev tessera with a lab LiveKit, all on one machine and all in user space.
+Playwright, and a dev asaroton with a lab LiveKit, all on one machine and all in user space.
 This is how the sliding-sync `required_state` bugs that showed up as grey call tiles on phones
 were reproduced and verified.
 
@@ -19,7 +19,7 @@ were reproduced and verified.
 - Element Web: a release tarball served with `python3 -m http.server 8089`, its `config.json`
   pointing `default_server_config` at the dev server. A Python venv with
   `pip install playwright && playwright install chromium`.
-- Dev tessera with `public_base_url = "http://localhost:8008"` and
+- Dev asaroton with `public_base_url = "http://localhost:8008"` and
   `[rtc.livekit] url = "ws://localhost:7890"` plus a `livekit-server` on 7890/7891 with the
   matching key. Both must be reachable as `localhost` inside the emulator and on the host:
   Element X allows cleartext HTTP only to localhost/10.0.2.2, and the Element Call WebView

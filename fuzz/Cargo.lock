@@ -1117,7 +1117,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "tessera-core"
+name = "asaroton-core"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
@@ -1130,13 +1130,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "tessera-fuzz"
+name = "asaroton-fuzz"
 version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
  "ruma",
  "serde_json",
- "tessera-core",
+ "asaroton-core",
 ]
 
 [[package]]

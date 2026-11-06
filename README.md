@@ -1,7 +1,11 @@
-# tessera
+# asaroton
 
 A Matrix homeserver written in Rust, built from scratch against the current Matrix
 specification (v1.19, room version 12 by default).
+
+The name is that of the *asarotos oikos*, the "unswept floor": an ancient mosaic that shows
+everything that ever fell on it. A homeserver never sweeps an event away either. The project
+was called tessera until November 2026.
 
 - Client-server API: registration and login (password and application-service), rooms,
   membership (incl. knocking, restricted rooms, upgrades), `/sync`, Simplified Sliding Sync
@@ -28,7 +32,7 @@ the Complement conformance suite).
 
 ```sh
 cp .env.example .env            # DATABASE_URL etc.
-cargo run -p tessera -- --config deploy/tessera.example.toml serve
+cargo run -p asaroton -- --config deploy/asaroton.example.toml serve
 scripts/check.sh                # fmt + clippy + tests
 scripts/complement.sh -run TestRegistration   # conformance suite (builds a Docker image)
 scripts/loadtest.py --users 50  # synthetic client swarm against a running server

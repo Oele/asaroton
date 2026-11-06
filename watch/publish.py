@@ -22,7 +22,7 @@ import urllib.parse
 import urllib.request
 
 HERE = pathlib.Path(__file__).resolve().parent
-CONFIG_DIR = pathlib.Path(os.environ.get("TESSERA_WATCH_CONFIG", "~/.config/tessera-watch")).expanduser()
+CONFIG_DIR = pathlib.Path(os.environ.get("ASAROTON_WATCH_CONFIG", "~/.config/asaroton-watch")).expanduser()
 SEVERITY = {"high": 0, "medium": 1, "low": 2}
 CONFIDENCE = {"confirmed": 0, "likely": 1, "unverified": 2}
 KIND_LABEL = {"bug": "bug", "security": "security", "spec-gap": "enhancement", "test-failure": "bug",
@@ -96,7 +96,7 @@ def main():
     today = dt.date.today()
 
     if args.failure:
-        text = f"**tessera watch, {today:%-d %b %Y}: the run failed**\n\n{args.failure}\n\nNothing was filed. The run directory is `{args.run_dir}`."
+        text = f"**asaroton watch, {today:%-d %b %Y}: the run failed**\n\n{args.failure}\n\nNothing was filed. The run directory is `{args.run_dir}`."
         (args.run_dir / "digest.md").write_text(text)
         if not args.dry_run:
             send_matrix(config, text)
@@ -144,7 +144,7 @@ def main():
         created.append((url, f))
 
     since = json.loads((args.run_dir / "status.json").read_text())["since"][:10]
-    out = [f"**tessera watch, {since} to {today}**", analysis["headline"].strip(), analysis["digest"].strip()]
+    out = [f"**asaroton watch, {since} to {today}**", analysis["headline"].strip(), analysis["digest"].strip()]
     if created:
         out.append(f"**New issues ({len(created)})**\n" + "\n".join(
             f"- [{f['title']}]({url}) · {f['severity']}, {f['confidence']}" for url, f in created))

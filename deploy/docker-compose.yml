@@ -1,23 +1,23 @@
-# tessera with PostgreSQL. Copy deploy/tessera.example.toml to ./data/tessera.toml, set
+# asaroton with PostgreSQL. Copy deploy/asaroton.example.toml to ./data/asaroton.toml, set
 # server_name, then: docker compose up -d
 services:
   postgres:
     image: postgres:18
     environment:
-      POSTGRES_USER: tessera
-      POSTGRES_PASSWORD: tessera
-      POSTGRES_DB: tessera
+      POSTGRES_USER: asaroton
+      POSTGRES_PASSWORD: asaroton
+      POSTGRES_DB: asaroton
     volumes:
       - postgres:/var/lib/postgresql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U tessera"]
+      test: ["CMD-SHELL", "pg_isready -U asaroton"]
       interval: 5s
       timeout: 3s
       retries: 20
 
-  tessera:
+  asaroton:
     build: ..
-    image: tessera:latest
+    image: asaroton:latest
     depends_on:
       postgres:
         condition: service_healthy
@@ -28,8 +28,8 @@ services:
       - "8448:8448"
     restart: unless-stopped
 
-  # Optional: Matrix Authentication Service (enable [mas] in tessera.toml and point its
-  # matrix.endpoint at http://tessera:8008). See docs/deployment.md.
+  # Optional: Matrix Authentication Service (enable [mas] in asaroton.toml and point its
+  # matrix.endpoint at http://asaroton:8008). See docs/deployment.md.
   # mas:
   #   image: ghcr.io/element-hq/matrix-authentication-service:latest
   #   command: ["server"]

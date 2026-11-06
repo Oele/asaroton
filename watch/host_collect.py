@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""Read-only collector for the tessera watch job.
+"""Read-only collector for the asaroton watch job.
 
-Prints one JSON document describing a tessera host: a digest of the service log, the state of
+Prints one JSON document describing an asaroton host: a digest of the service log, the state of
 the federation outbox, and new messages in the Matrix rooms listed in ROOMS (read straight from
-tessera's database, so no account has to join anything).
+asaroton's database, so no account has to join anything).
 
-On the homeserver host this file is installed as /usr/local/sbin/tessera-watch-collect and is
+On the homeserver host this file is installed as /usr/local/sbin/asaroton-watch-collect and is
 the only thing the watch job's ssh key can run (a forced command). Its two arguments, taken
 from SSH_ORIGINAL_COMMAND, are integers; nothing else from the caller is used. It never writes.
 
-    tessera-watch-collect SINCE_STREAM SINCE_EPOCH
+    asaroton-watch-collect SINCE_STREAM SINCE_EPOCH
     host_collect.py --local SINCE_EPOCH        (journal and host facts only, no database)
 """
 import collections
@@ -20,8 +20,12 @@ import subprocess
 import sys
 import time
 
-UNIT = "tessera"
-DATABASE = "tessera"
+UNIT = "asaroton"
+DATABASE = "asaroton"
+# The service was called tessera until 2026-11-06. Its journal from before the rename lives
+# under the old unit name and logs "tessera starting"; both are still read so a digest that
+# spans the rename is complete.
+LEGACY_UNIT = "tessera"
 # Rooms whose messages the watch job may read. The caller cannot change this list.
 ROOMS = {
     "!i5D5LLct_DYG-4hQprLzrxdbZ580U9UB6AEgFnk6rZQ": "#synapse-dev:matrix.org",
@@ -67,7 +71,7 @@ def normalise_path(path):
 
 
 def journal(since_epoch):
-    raw = run(["journalctl", "-u", UNIT, "--since", f"@{since_epoch}", "--no-pager", "-o", "cat"], 600)
+    raw = run(["journalctl", "-u", UNIT, "-u", LEGACY_UNIT, "--since", f"@{since_epoch}", "--no-pager", "-o", "cat"], 600)
     levels = collections.Counter()
     groups = {}
     unrecognized = collections.Counter()
@@ -78,7 +82,7 @@ def journal(since_epoch):
         line = ANSI.sub("", line)
         m = LINE.match(line)
         if not m:
-            if line.startswith(f"{UNIT}.service:"):
+            if line.startswith((f"{UNIT}.service:", f"{LEGACY_UNIT}.service:")):
                 systemd[NUMBERS.sub("N", line)[:160]] += 1
             if "panicked" in line:
                 panics.append(line[:400])
@@ -87,7 +91,7 @@ def journal(since_epoch):
         levels[level] += 1
         if "panicked" in msg:
             panics.append(f"{ts} {msg[:400]}")
-        if msg.startswith("tessera starting"):
+        if msg.startswith(("asaroton starting", "tessera starting")):
             starts.append(ts)
         elif msg.startswith("transaction sent"):
             per_minute[ts[:16]] += 1
@@ -128,12 +132,12 @@ def host_facts():
     facts = dict(l.split("=", 1) for l in show.splitlines() if "=" in l)
     facts["loadavg"] = open("/proc/loadavg").read().split()[:3]
     facts["cpus"] = os.cpu_count()
-    binary = run(["sha256sum", "/usr/local/bin/tessera"]).split(" ")[0][:12]
+    binary = run(["sha256sum", "/usr/local/bin/asaroton"]).split(" ")[0][:12]
     facts["binary_sha256"] = binary
     facts["disk_root"] = run(["df", "-h", "--output=pcent,avail", "/"]).split("\n")[1:2]
-    facts["watchdog_running"] = bool(run(["pgrep", "-f", "tessera-watchdog"]).strip())
+    facts["watchdog_running"] = bool(run(["pgrep", "-f", "asaroton-watchdog"]).strip())
     try:
-        facts["watchdog_log_tail"] = open("/var/log/tessera-watchdog.log").read().splitlines()[-5:]
+        facts["watchdog_log_tail"] = open("/var/log/asaroton-watchdog.log").read().splitlines()[-5:]
     except OSError:
         facts["watchdog_log_tail"] = []
     facts["livekit"] = run(["systemctl", "is-active", "livekit"]).strip()
@@ -212,7 +216,7 @@ def main():
         since_stream, since_epoch = 0, int(numbers[0]) if numbers else 0
     else:
         if len(numbers) != 2:
-            sys.exit("usage: tessera-watch-collect SINCE_STREAM SINCE_EPOCH")
+            sys.exit("usage: asaroton-watch-collect SINCE_STREAM SINCE_EPOCH")
         since_stream, since_epoch = int(numbers[0]), int(numbers[1])
     since_epoch = max(since_epoch, int(time.time()) - 31 * 86400)
     out = {

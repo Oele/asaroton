@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The tessera watch job: collect, analyse, publish. Started by cron; see README.md.
+# The asaroton watch job: collect, analyse, publish. Started by cron; see README.md.
 #
 #   watch.sh                      a full run
 #   watch.sh --dry-run            analyse and print the digest; file nothing, post nothing, keep cursors
@@ -10,7 +10,7 @@ export PATH="$HOME/.local/bin:$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin"
 export LANG=C.UTF-8
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(dirname "$HERE")
-STATE=${TESSERA_WATCH_STATE:-$HOME/.local/state/tessera-watch}
+STATE=${ASAROTON_WATCH_STATE:-$HOME/.local/state/asaroton-watch}
 DRY=""; SKIP=""; RUN=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -23,7 +23,7 @@ while [ $# -gt 0 ]; do
 done
 mkdir -p "$STATE/runs"
 exec 9>"$STATE/lock"
-flock -n 9 || { echo "tessera watch: a run is already in progress" >&2; exit 0; }
+flock -n 9 || { echo "asaroton watch: a run is already in progress" >&2; exit 0; }
 
 RESUMED=$RUN
 [ -n "$RUN" ] || RUN="$STATE/runs/$(date +%Y-%m-%d_%H%M)"
@@ -32,7 +32,7 @@ LOG="$RUN/watch.log"
 cfg() { python3 -c "import tomllib,sys; d=tomllib.load(open('$HERE/config.toml','rb')); print(d$1)"; }
 
 fail() {
-  echo "tessera watch failed: $1" | tee -a "$LOG" >&2
+  echo "asaroton watch failed: $1" | tee -a "$LOG" >&2
   tail -n 15 "$LOG" >&2
   [ -n "$DRY" ] || python3 "$HERE/publish.py" "$RUN" --failure "$1" >>"$LOG" 2>&1
   exit 1

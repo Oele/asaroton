@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Compare a Synapse database with the tessera database imported from it.
+"""Compare a Synapse database with the asaroton database imported from it.
 
 Runs the same counts on both sides for the selected rooms and users and prints the differences.
-Usage: compare-synapse.py SYNAPSE_DSN TESSERA_DSN   (libpq connection strings or URLs)
+Usage: compare-synapse.py SYNAPSE_DSN ASAROTON_DSN   (libpq connection strings or URLs)
 """
 import subprocess, sys, json
 
@@ -22,9 +22,9 @@ def compare(label, syn_sql, tes_sql, key=lambda r: r[0]):
     a = {key(r): r[1:] for r in q(syn, syn_sql)}
     b = {key(r): r[1:] for r in q(tes, tes_sql)}
     diff = [(k, a.get(k), b.get(k)) for k in sorted(set(a) | set(b)) if a.get(k) != b.get(k)]
-    print(f"{label}: {len(a)} synapse, {len(b)} tessera, {len(diff)} differences")
+    print(f"{label}: {len(a)} synapse, {len(b)} asaroton, {len(diff)} differences")
     for k, x, y in diff[:15]:
-        print(f"   {k}: synapse={x} tessera={y}")
+        print(f"   {k}: synapse={x} asaroton={y}")
     problems += len(diff)
 
 compare("events per room",

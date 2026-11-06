@@ -23,8 +23,8 @@ import urllib.request
 
 HERE = pathlib.Path(__file__).resolve().parent
 REPO = HERE.parent
-STATE_DIR = pathlib.Path(os.environ.get("TESSERA_WATCH_STATE", "~/.local/state/tessera-watch")).expanduser()
-CONFIG_DIR = pathlib.Path(os.environ.get("TESSERA_WATCH_CONFIG", "~/.config/tessera-watch")).expanduser()
+STATE_DIR = pathlib.Path(os.environ.get("ASAROTON_WATCH_STATE", "~/.local/state/asaroton-watch")).expanduser()
+CONFIG_DIR = pathlib.Path(os.environ.get("ASAROTON_WATCH_CONFIG", "~/.config/asaroton-watch")).expanduser()
 SOURCES = {}
 
 
@@ -143,7 +143,7 @@ def releases(ctx):
         parts.append(f"## {repo}\n" + ("\n".join(rel) if rel else "Nothing new.\n"))
     for url in ctx["config"].get("forgejo", {}).get("releases", []):
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "tessera-watch"})
+            req = urllib.request.Request(url, headers={"User-Agent": "asaroton-watch"})
             items = json.load(urllib.request.urlopen(req, timeout=30))
             rel = [
                 f"### {r['tag_name']}, {r['published_at'][:10]}\n{r['html_url']}\n\n{clip(r.get('body'), 2500)}\n"
@@ -157,13 +157,13 @@ def releases(ctx):
 
 @source
 def deps(ctx):
-    parts = ["# Dependencies of tessera\n"]
+    parts = ["# Dependencies of asaroton\n"]
     upd = run(["cargo", "update", "--dry-run"], 300, cwd=REPO)
     lines = [l.strip() for l in (upd.stderr + upd.stdout).splitlines() if re.search(r"Updating|Adding|Removing|Unchanged|note:", l)]
     parts.append("## `cargo update --dry-run` (newer versions the lock file could take)\n```\n" + clip("\n".join(lines), 6000) + "\n```\n")
     pinned = re.search(r'^ruma = \{ version = "([^"]+)"', (REPO / "Cargo.toml").read_text(), re.M)
     try:
-        req = urllib.request.Request("https://crates.io/api/v1/crates/ruma", headers={"User-Agent": "tessera-watch"})
+        req = urllib.request.Request("https://crates.io/api/v1/crates/ruma", headers={"User-Agent": "asaroton-watch"})
         newest = json.load(urllib.request.urlopen(req, timeout=30))["crate"]["max_stable_version"]
     except Exception as e:  # noqa: BLE001
         newest = f"unknown ({e})"
@@ -242,18 +242,18 @@ def complement(ctx):
     if not results:
         raise RuntimeError("Complement produced no results: " + (ctx["run_dir"] / "complement.stderr").read_text()[-800:])
     # A run whose homeserver containers vanished (a second Complement run on the same Docker
-    # daemon removes them) fails dozens of tests for no reason of tessera's. Reporting those as
+    # daemon removes them) fails dozens of tests for no reason of asaroton's. Reporting those as
     # regressions, or keeping them as the next baseline, would be worse than reporting nothing.
     broken = [t for t, r in results.items() if r == "fail" and "/" not in t and any(
         "connection refused" in line or "No such container" in line for line in output.get(t, []))]
     if len(broken) >= 10:
         raise RuntimeError(f"the Complement run itself broke: {len(broken)} tests could not reach their homeserver "
                            f"(for example {', '.join(broken[:3])}). Was another Complement run active at the same time?")
-    tessera = run(["git", "rev-parse", "--short", "HEAD"], cwd=REPO).stdout.strip()
-    (ctx["run_dir"] / "complement-results.json").write_text(json.dumps({"complement": after, "tessera": tessera, "results": results}))
+    asaroton = run(["git", "rev-parse", "--short", "HEAD"], cwd=REPO).stdout.strip()
+    (ctx["run_dir"] / "complement-results.json").write_text(json.dumps({"complement": after, "asaroton": asaroton, "results": results}))
     count = lambda rs, a, top: sum(1 for t, r in rs.items() if r == a and (("/" not in t) == top))
     parts = [
-        f"# Complement (conformance suite) at {after}, tessera {tessera}\n",
+        f"# Complement (conformance suite) at {after}, asaroton {asaroton}\n",
         f"Run time {int((time.time() - started) / 60)} min, go test exit code {p.returncode}.\n",
         f"Top-level tests: {count(results, 'pass', True)} pass, {count(results, 'fail', True)} fail, {count(results, 'skip', True)} skipped. "
         f"Subtests: {count(results, 'pass', False)} pass, {count(results, 'fail', False)} fail, {count(results, 'skip', False)} skipped.\n",
@@ -274,7 +274,7 @@ def complement(ctx):
         fresh_fail = sorted(t for t in failing if t not in old)
         fresh_pass = sum(1 for t, r in results.items() if r == "pass" and t not in old)
         gone = sorted(t for t in old if t not in results)
-        parts.append(f"## Compared with the previous run (Complement {base.get('complement')}, tessera {base.get('tessera')})\n")
+        parts.append(f"## Compared with the previous run (Complement {base.get('complement')}, asaroton {base.get('asaroton')})\n")
         for title, names in [("Regressions: passed before, fail now", regress), ("New tests that fail", fresh_fail),
                              ("Fixed: failed before, pass now", fixed), ("Tests that no longer exist or did not run", gone)]:
             parts.append(f"### {title} ({len(names)})\n" + ("\n".join(f"- {n}" for n in names[:150]) or "None.") + "\n")
@@ -301,14 +301,14 @@ def host_markdown(name, data):
     j, facts = data["journal"], data["facts"]
     since = dt.datetime.fromtimestamp(j["since_epoch"], dt.UTC)
     parts = [
-        f"# Host {name} ({data['host']}): tessera service log since {since:%Y-%m-%d %H:%M} UTC\n",
+        f"# Host {name} ({data['host']}): asaroton service log since {since:%Y-%m-%d %H:%M} UTC\n",
         "## Service facts\n```\n" + json.dumps(facts, indent=1, ensure_ascii=False) + "\n```\n",
         f"Log lines by level: {j['lines_by_level']}. Service starts in the window: {len(j['service_starts'])} {j['service_starts']}.\n",
         f"Panics: {len(j['panics'])}.\n" + "".join(f"- {p}\n" for p in j["panics"]),
         "systemd messages: " + json.dumps(j["systemd_messages"], ensure_ascii=False) + "\n",
         "## Outbound federation\n```\n" + json.dumps(j["federation_transactions"], indent=1) + "\n```\n"
         "A healthy small server sends at most a few hundred transactions in its busiest minute. Thousands per minute is a flood.\n",
-        "## Requests for endpoints tessera does not implement (method, path, count)\n"
+        "## Requests for endpoints asaroton does not implement (method, path, count)\n"
         + ("\n".join(f"- {c} × {p}" for p, c in j["unrecognized_endpoints"]) or
            "None logged. (Logging of these was added on 2026-11-06; a build older than that logs nothing here.)") + "\n",
         f"## Warnings and errors, grouped ({len(j['warn_error_groups'])} groups, {j['warn_error_groups_omitted']} more omitted)\n",
@@ -337,7 +337,7 @@ def transcript(messages):
 
 @source
 def hosts(ctx):
-    """Log digests of the tessera hosts and, where the database is read, the watched rooms."""
+    """Log digests of the asaroton hosts and, where the database is read, the watched rooms."""
     since_epoch = int(ctx["since"].timestamp())
     summary = []
     collector = (HERE / "host_collect.py").read_text()

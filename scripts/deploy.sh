@@ -8,19 +8,19 @@
 #   scripts/deploy.sh rollback-local | rollback-remote
 #
 # It deploys only what is on origin/main: the tree must be clean, HEAD must be pushed and
-# scripts/check.sh must pass. The work on each host is done by /usr/local/sbin/tessera-deploy
+# scripts/check.sh must pass. The work on each host is done by /usr/local/sbin/asaroton-deploy
 # (deploy/systemd/), which verifies the checksum, checks health and rolls back.
 #
-# The remote host is reached with the key in ~/.config/tessera-deploy/ when there is one (a key
-# that can run nothing but tessera-deploy), otherwise with whatever ssh access the caller has.
+# The remote host is reached with the key in ~/.config/asaroton-deploy/ when there is one (a key
+# that can run nothing but asaroton-deploy), otherwise with whatever ssh access the caller has.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 MODE=${1:-all}
-REMOTE=${TESSERA_DEPLOY_REMOTE:-root@cluephone.org}
-KEY=${TESSERA_DEPLOY_KEY:-$HOME/.config/tessera-deploy/id_ed25519}
-TOOL=/usr/local/sbin/tessera-deploy
-SOAK=${TESSERA_DEPLOY_SOAK:-30}
-BINARY=target/release/tessera
+REMOTE=${ASAROTON_DEPLOY_REMOTE:-root@cluephone.org}
+KEY=${ASAROTON_DEPLOY_KEY:-$HOME/.config/asaroton-deploy/id_ed25519}
+TOOL=/usr/local/sbin/asaroton-deploy
+SOAK=${ASAROTON_DEPLOY_SOAK:-30}
+BINARY=target/release/asaroton
 
 die() { echo "deploy: $*" >&2; exit 1; }
 here() { sudo -n "$TOOL" "$@"; }
@@ -52,7 +52,7 @@ git fetch -q origin
 [ -z "$(git status --porcelain --untracked-files=no)" ] || die "there are uncommitted changes; commit and push first"
 [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] || die "HEAD is not origin/main; push first"
 echo "checking $(git log -1 --format='%h %s')"
-scripts/check.sh >/tmp/tessera-deploy-check.log 2>&1 || { tail -n 20 /tmp/tessera-deploy-check.log; die "scripts/check.sh fails; not deploying"; }
+scripts/check.sh >/tmp/asaroton-deploy-check.log 2>&1 || { tail -n 20 /tmp/asaroton-deploy-check.log; die "scripts/check.sh fails; not deploying"; }
 cargo build --release 2>&1 | tail -n 1
 SHA=$(sha256sum "$BINARY" | cut -d' ' -f1)
 echo "binary ${SHA:0:12}"

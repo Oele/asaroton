@@ -17,8 +17,8 @@
           "source": {"enum": ["spec", "complement", "synapse", "synapse-dev", "logs", "clients", "deps", "other-homeservers", "check"]},
           "kind": {"enum": ["bug", "security", "spec-gap", "test-failure", "interop", "ops", "dependency"]},
           "severity": {"enum": ["high", "medium", "low"]},
-          "confidence": {"enum": ["confirmed", "likely", "unverified"], "description": "confirmed: you read the tessera code and the problem is there. likely: the evidence points to it. unverified: worth a look, not checked."},
-          "body": {"type": "string", "description": "Markdown issue body with the sections What, Evidence, Where in tessera, Suggested fix, How to verify."},
+          "confidence": {"enum": ["confirmed", "likely", "unverified"], "description": "confirmed: you read the asaroton code and the problem is there. likely: the evidence points to it. unverified: worth a look, not checked."},
+          "body": {"type": "string", "description": "Markdown issue body with the sections What, Evidence, Where in asaroton, Suggested fix, How to verify."},
           "existing_issue": {"type": ["integer", "null"], "description": "Number of an existing issue that already covers this, or null."},
           "comment": {"type": ["string", "null"], "description": "Only with existing_issue: new evidence to add as a comment, or null when there is nothing new."}
         }

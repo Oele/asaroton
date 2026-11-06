@@ -116,6 +116,173 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9dbc3a507a82b17ba0d98f6ce8fd6954ea0c8152e98009d36a40d8dcc8ce078a"
 
 [[package]]
+name = "asaroton"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "asaroton-api",
+ "asaroton-auth",
+ "asaroton-core",
+ "asaroton-federation",
+ "asaroton-service",
+ "asaroton-store",
+ "axum",
+ "axum-server",
+ "clap",
+ "ruma",
+ "rustls",
+ "rustls-pemfile",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sqlx",
+ "thiserror",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "asaroton-api"
+version = "0.1.0"
+dependencies = [
+ "asaroton-auth",
+ "asaroton-core",
+ "asaroton-federation",
+ "asaroton-service",
+ "asaroton-store",
+ "axum",
+ "bytes",
+ "dashmap",
+ "futures",
+ "hex",
+ "hmac 0.12.1",
+ "http",
+ "percent-encoding",
+ "rand 0.9.5",
+ "reqwest",
+ "ruma",
+ "serde",
+ "serde_json",
+ "sha1 0.10.7",
+ "sha2 0.10.9",
+ "thiserror",
+ "tokio",
+ "tokio-tungstenite 0.28.0",
+ "tower",
+ "tower-http 0.7.1",
+ "tracing",
+]
+
+[[package]]
+name = "asaroton-auth"
+version = "0.1.0"
+dependencies = [
+ "argon2",
+ "asaroton-core",
+ "asaroton-store",
+ "async-trait",
+ "bcrypt",
+ "dashmap",
+ "rand 0.9.5",
+ "reqwest",
+ "ruma",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "asaroton-core"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "rand 0.9.5",
+ "ruma",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "asaroton-federation"
+version = "0.1.0"
+dependencies = [
+ "asaroton-core",
+ "asaroton-service",
+ "asaroton-store",
+ "async-trait",
+ "base64 0.22.1",
+ "bytes",
+ "dashmap",
+ "futures",
+ "hickory-resolver",
+ "html-escape",
+ "http",
+ "image",
+ "parking_lot",
+ "rand 0.9.5",
+ "reqwest",
+ "ruma",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "asaroton-service"
+version = "0.1.0"
+dependencies = [
+ "asaroton-auth",
+ "asaroton-core",
+ "asaroton-store",
+ "async-trait",
+ "base64 0.22.1",
+ "dashmap",
+ "futures",
+ "hex",
+ "hmac 0.12.1",
+ "http",
+ "image",
+ "lru",
+ "parking_lot",
+ "rand 0.9.5",
+ "regex",
+ "reqwest",
+ "ruma",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "asaroton-store"
+version = "0.1.0"
+dependencies = [
+ "asaroton-core",
+ "async-trait",
+ "chrono",
+ "futures",
+ "ruma",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "assign"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3263,173 +3430,6 @@ name = "tagptr"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7b2093cf4c8eb1e67749a6762251bc9cd836b6fc171623bd0a9d324d37af2417"
-
-[[package]]
-name = "tessera"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "axum-server",
- "clap",
- "ruma",
- "rustls",
- "rustls-pemfile",
- "serde",
- "serde_json",
- "serde_yaml",
- "sqlx",
- "tessera-api",
- "tessera-auth",
- "tessera-core",
- "tessera-federation",
- "tessera-service",
- "tessera-store",
- "thiserror",
- "tokio",
- "toml",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "tessera-api"
-version = "0.1.0"
-dependencies = [
- "axum",
- "bytes",
- "dashmap",
- "futures",
- "hex",
- "hmac 0.12.1",
- "http",
- "percent-encoding",
- "rand 0.9.5",
- "reqwest",
- "ruma",
- "serde",
- "serde_json",
- "sha1 0.10.7",
- "sha2 0.10.9",
- "tessera-auth",
- "tessera-core",
- "tessera-federation",
- "tessera-service",
- "tessera-store",
- "thiserror",
- "tokio",
- "tokio-tungstenite 0.28.0",
- "tower",
- "tower-http 0.7.1",
- "tracing",
-]
-
-[[package]]
-name = "tessera-auth"
-version = "0.1.0"
-dependencies = [
- "argon2",
- "async-trait",
- "bcrypt",
- "dashmap",
- "rand 0.9.5",
- "reqwest",
- "ruma",
- "serde",
- "serde_json",
- "tessera-core",
- "tessera-store",
- "thiserror",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "tessera-core"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "rand 0.9.5",
- "ruma",
- "serde",
- "serde_json",
- "thiserror",
- "tracing",
-]
-
-[[package]]
-name = "tessera-federation"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "base64 0.22.1",
- "bytes",
- "dashmap",
- "futures",
- "hickory-resolver",
- "html-escape",
- "http",
- "image",
- "parking_lot",
- "rand 0.9.5",
- "reqwest",
- "ruma",
- "serde",
- "serde_json",
- "tessera-core",
- "tessera-service",
- "tessera-store",
- "thiserror",
- "tokio",
- "tracing",
- "url",
-]
-
-[[package]]
-name = "tessera-service"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "base64 0.22.1",
- "dashmap",
- "futures",
- "hex",
- "hmac 0.12.1",
- "http",
- "image",
- "lru",
- "parking_lot",
- "rand 0.9.5",
- "regex",
- "reqwest",
- "ruma",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tessera-auth",
- "tessera-core",
- "tessera-store",
- "thiserror",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "tessera-store"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "futures",
- "ruma",
- "serde",
- "serde_json",
- "sqlx",
- "tessera-core",
- "thiserror",
- "tokio",
- "tracing",
-]
 
 [[package]]
 name = "thiserror"

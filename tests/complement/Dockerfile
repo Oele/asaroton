@@ -1,5 +1,5 @@
-# Complement conformance image for tessera.
-# Built from the repository root:  docker build -t complement-tessera -f tests/complement/Dockerfile .
+# Complement conformance image for asaroton.
+# Built from the repository root:  docker build -t complement-asaroton -f tests/complement/Dockerfile .
 #
 # Complement contract (see complement/README.md "Image requirements"):
 #  - EXPOSE 8008 (client, plain HTTP) and 8448 (federation, HTTPS)
@@ -13,13 +13,13 @@ WORKDIR /src
 COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --release -p tessera && cp target/release/tessera /tessera
+    cargo build --release -p asaroton && cp target/release/asaroton /asaroton
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl openssl postgresql postgresql-contrib \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=builder /tessera /usr/local/bin/tessera
+COPY --from=builder /asaroton /usr/local/bin/asaroton
 COPY tests/complement/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 ENV SERVER_NAME=localhost

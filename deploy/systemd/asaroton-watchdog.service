@@ -1,0 +1,18 @@
+[Unit]
+Description=Watchdog that stops asaroton when it floods the federation or runs away
+After=asaroton.service postgresql.service
+# Deliberately not bound to asaroton.service: it has to keep watching across asaroton restarts,
+# and it must not be pulled down when it stops asaroton itself.
+
+[Service]
+Type=simple
+# Override per host in /etc/default/asaroton-watchdog (ASAROTON_UNIT, ASAROTON_DB, MAX_TXN_PER_MIN,
+# MAX_CPU, MAX_OUTBOX).
+Environment=ASAROTON_UNIT=asaroton ASAROTON_DB=asaroton
+EnvironmentFile=-/etc/default/asaroton-watchdog
+ExecStart=/usr/local/sbin/asaroton-watchdog.sh
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
