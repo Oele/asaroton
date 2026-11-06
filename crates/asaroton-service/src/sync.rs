@@ -19,6 +19,9 @@ use serde_json::{Value, json};
 
 use crate::{Error, Notification, Result, Services, notifier, presence::presence_event};
 
+/// The most to-device messages one classic sync answer carries.
+const TO_DEVICE_PER_ANSWER: usize = 100;
+
 /// Positions across all streams.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SyncToken {
@@ -559,8 +562,22 @@ impl Services {
             }
             let msgs = self
                 .store
-                .to_device_messages(user, device_id, td_since, now.to_device, 100)
+                .to_device_messages(
+                    user,
+                    device_id,
+                    td_since,
+                    now.to_device,
+                    TO_DEVICE_PER_ANSWER,
+                )
                 .await?;
+            // More are waiting than one answer carries: the position stops at the last one
+            // that is sent. The next sync deletes what lies before its position, and the
+            // messages that did not fit must not be among that.
+            if msgs.len() >= TO_DEVICE_PER_ANSWER
+                && let Some(last) = msgs.last()
+            {
+                out.next_batch.to_device = last.stream_id;
+            }
             out.to_device = msgs
                 .into_iter()
                 .map(|m| json!({ "type": m.event_type, "sender": m.sender, "content": m.content }))

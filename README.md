@@ -46,6 +46,7 @@ scripts/createroomtest.py        # createRoom under pressure: several rooms at o
 scripts/clientendpointstest.py   # small client endpoints: capabilities under r0, the empty 3pid list, /keys/changes (starts its own server)
 scripts/fedinvitetest.py         # an invitation to another server goes there once, over /invite (starts its own server)
 scripts/softfailtest.py          # a soft-failed event (a banned user's message that builds on older history) is kept and not shown to clients (starts its own server)
+scripts/todevicetest.py          # to-device messages all arrive, however many are waiting, over both sync flavours (starts its own server)
 scripts/deploy.sh [status]      # check, build and deploy: this machine first, then the remote host (see docs/deployment.md)
 watch/                          # weekly watch job: spec, Synapse, tests and server logs become issues, see its README
 ```
