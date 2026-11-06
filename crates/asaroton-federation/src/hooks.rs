@@ -28,7 +28,6 @@ impl FederationHooks for Hooks {
                 return;
             }
         };
-        // A leave/kick must still reach the server of the user leaving.
         let servers = servers_except_self(servers, fed.server_name());
         // Servers denied by the room's ACL get nothing, except the ACL change itself.
         let is_acl_event = pdu.event_type() == &ruma::events::TimelineEventType::RoomServerAcl;
@@ -45,10 +44,19 @@ impl FederationHooks for Hooks {
             }
         }
         let mut servers = allowed;
+        // A leave, a kick or a ban must still reach the server of the user it is about, also
+        // when that server is not in the room: someone who was only invited, or the last
+        // member of their server who goes. An invitation is not sent this way. It has reached
+        // the invited user's server over `/invite`, and that server, not being in the room,
+        // has to refuse a copy that comes as an ordinary event.
         if pdu.event_type() == &ruma::events::TimelineEventType::RoomMember
             && let Some(target) = pdu.state_key().and_then(|k| OwnedUserId::try_from(k).ok())
             && target.server_name() != fed.server_name()
             && !servers.iter().any(|s| *s == target.server_name())
+            && serde_json::from_str::<Value>(pdu.content().get())
+                .ok()
+                .and_then(|c| c.get("membership")?.as_str().map(str::to_owned))
+                .is_some_and(|m| m == "leave" || m == "ban")
         {
             servers.push(target.server_name().to_owned());
         }
