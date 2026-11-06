@@ -17,7 +17,7 @@ The client listener is plain HTTP by default and is normally proxied with TLS as
 ## First admin
 
 Register the first user (enable `registration` temporarily, or use the shared-secret
-registration endpoint with `registration.shared_secret`), then list the user ID under
+registration endpoint with `registration.shared_secret`); `sudo scripts/adduser.py NAME [--admin]` does that on the server's host, then list the user ID under
 `admins` and restart, or set `is_admin` through the admin API from an existing admin. Admins use
 the Synapse-compatible API under `/_synapse/admin/` (users, rooms, deletion, history purge,
 server notices).
