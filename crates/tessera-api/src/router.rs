@@ -106,11 +106,20 @@ pub fn build_router(state: AppState) -> Router {
         .with_state(state)
 }
 
-async fn unrecognized() -> Response {
+/// Logs a request for an endpoint this server does not implement. The watch job counts these
+/// lines to see which features real clients and servers ask for; the query string is left out
+/// because it can carry tokens.
+fn log_unrecognized(method: &axum::http::Method, uri: &axum::http::Uri) {
+    tracing::info!(%method, path = uri.path(), "unrecognized endpoint");
+}
+
+async fn unrecognized(method: axum::http::Method, uri: axum::http::Uri) -> Response {
+    log_unrecognized(&method, &uri);
     Error::unrecognized("Unrecognized request").into_response()
 }
 
-async fn method_not_allowed() -> Response {
+async fn method_not_allowed(method: axum::http::Method, uri: axum::http::Uri) -> Response {
+    log_unrecognized(&method, &uri);
     Error::matrix(
         ruma::api::error::ErrorKind::Unrecognized,
         StatusCode::METHOD_NOT_ALLOWED,

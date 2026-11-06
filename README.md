@@ -34,6 +34,7 @@ scripts/complement.sh -run TestRegistration   # conformance suite (builds a Dock
 scripts/loadtest.py --users 50  # synthetic client swarm against a running server
 scripts/emulab/                 # Element X in an Android emulator + headless Element Web, see its README
 scripts/fedpresencetest.py LAB   # presence fan-out over federation stays bounded (two-server lab)
+watch/                          # weekly watch job: spec, Synapse, tests and server logs become issues, see its README
 ```
 
 ## License
