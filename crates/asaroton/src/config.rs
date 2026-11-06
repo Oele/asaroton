@@ -131,6 +131,12 @@ pub struct FederationConfig {
     /// passing it logs an error, so raise it when that turns out to be ordinary traffic.
     #[serde(default)]
     pub max_edu_transactions_per_minute: Option<u32>,
+    /// URL previews, push gateways and media that another server redirects to may only lead
+    /// to public internet addresses, so that nobody can make this server talk to services on
+    /// its own host or network. List the address ranges (CIDR) to exempt, for example a push
+    /// gateway on the local network: `["192.168.2.0/24"]`.
+    #[serde(default)]
+    pub allowed_internal_ranges: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]

@@ -50,6 +50,14 @@ proxy; asaroton answers them with an error when delegation is on. Clients discov
   asks; only a `400` or `403` answer discards it. Once an hour asaroton forgets inbound
   transactions older than a day and, for destinations that have been failing for a week,
   drops queued EDUs and all but the newest queued event per room.
+- URLs that somebody else chose only lead to the public internet: URL previews (the page,
+  its redirects and its image), the gateways of users' pushers, and media that another
+  homeserver redirects to. Loopback, private, link-local and similar addresses are refused,
+  also when a public name resolves to them, so that nobody can make the server talk to
+  services on its own host or network. A push gateway or other target on an internal
+  address needs its range listed in `federation.allowed_internal_ranges`. Application
+  services are configured by the operator and are not affected, and neither is federation
+  itself.
 - `deploy/systemd/` holds a watchdog that runs beside asaroton as its own service and stops
   it when it sends more than 1000 federation transactions in a minute, queues more than 5000
   outbox rows, or stays above 60% CPU. A homeserver that misbehaves bothers every server it

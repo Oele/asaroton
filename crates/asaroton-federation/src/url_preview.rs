@@ -15,18 +15,17 @@ const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
 impl Federation {
     /// Build the OpenGraph-style preview object for a URL.
     pub async fn preview_url(&self, url: &str) -> Result<Value> {
-        let parsed = reqwest::Url::parse(url).map_err(|_| Error::Protocol("invalid URL".into()))?;
-        if !matches!(parsed.scheme(), "http" | "https") {
-            return Err(Error::Protocol(
-                "only http and https URLs can be previewed".into(),
-            ));
-        }
-        let client = plain_http();
-        let resp = client
-            .get(parsed.clone())
-            .send()
-            .await
-            .map_err(|e| Error::Protocol(format!("fetching URL: {e}")))?;
+        // The URL is the user's choice, and so is everything the page points at: all of it
+        // goes through the client that only reaches public addresses.
+        let parsed = self.outbound.parse(url)?;
+        let get = |url: reqwest::Url| {
+            self.outbound
+                .request(reqwest::Method::GET, url)
+                .header(http::header::USER_AGENT, "asaroton-url-preview")
+        };
+        let resp = get(parsed.clone()).send().await.map_err(|e| {
+            Error::Protocol(format!("fetching URL: {}", crate::client::error_chain(&e)))
+        })?;
         let content_type = resp
             .headers()
             .get(http::header::CONTENT_TYPE)
@@ -75,8 +74,8 @@ impl Federation {
         // Resolve and cache the image.
         if let Some(Value::String(img)) = og.get("og:image").cloned()
             && let Ok(img_url) = parsed.join(&img)
-            && matches!(img_url.scheme(), "http" | "https")
-            && let Ok(resp) = client.get(img_url).send().await
+            && let Ok(img_url) = self.outbound.parse(img_url.as_str())
+            && let Ok(resp) = get(img_url).send().await
         {
             let ct = resp
                 .headers()
@@ -124,7 +123,8 @@ impl Federation {
     }
 }
 
-/// A plain HTTP client for fetching arbitrary URLs (not federation).
+/// A plain HTTP client for URLs from the operator's own configuration (application
+/// services). URLs that anyone else chose go through [`crate::outbound::Outbound`].
 pub(crate) fn plain_http() -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(15))

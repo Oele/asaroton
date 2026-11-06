@@ -25,6 +25,9 @@ bind = "0.0.0.0:8448"
 # The default suits a handful of active users. Passing it is logged as an error, so raise it
 # if that turns out to be ordinary traffic for your server.
 # max_edu_transactions_per_minute = 600
+# URL previews, push gateways and media redirects only reach public internet addresses.
+# Exempt ranges here, for example a push gateway on the local network:
+# allowed_internal_ranges = ["192.168.2.0/24"]
 
 [registration]
 enabled = false

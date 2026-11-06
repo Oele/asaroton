@@ -44,6 +44,8 @@ tls_key = "/etc/asaroton/tls.key"
 [federation]
 # Complement's CA signs every peer's certificate.
 extra_ca_certs = ["/complement/ca/ca.crt"]
+# Everything in a Complement run lives on private Docker networks.
+allowed_internal_ranges = ["0.0.0.0/0", "::/0"]
 
 [registration]
 enabled = true

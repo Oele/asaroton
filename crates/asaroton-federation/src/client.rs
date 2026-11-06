@@ -20,7 +20,7 @@ use ruma::{
 use crate::{Error, FederationConfig, Result, discovery::Discovery};
 
 /// Timeout for downloads.
-const LONG_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+pub(crate) const LONG_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 /// Timeout for ordinary federation requests. Joins and state fetches use a longer one.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const LONG_TIMEOUT: Duration = Duration::from_secs(180);
@@ -67,7 +67,7 @@ pub(crate) async fn read_body(
 }
 
 /// An error with its sources, as reqwest's top-level message hides the actual cause.
-fn error_chain(e: &reqwest::Error) -> String {
+pub(crate) fn error_chain(e: &reqwest::Error) -> String {
     let mut parts = vec![e.to_string()];
     let mut source = std::error::Error::source(e);
     while let Some(s) = source {
@@ -528,41 +528,6 @@ impl FederationClient {
             });
         }
         Ok((bytes.to_vec(), content_type, disposition))
-    }
-
-    /// Fetch media from the URL a server redirected us to (typically its CDN): a plain `GET`
-    /// without our signature, bounded in time and size. Returns the bytes and content type.
-    pub async fn get_redirected(
-        &self,
-        origin: &ServerName,
-        url: &str,
-        max_body: usize,
-    ) -> Result<(Vec<u8>, String)> {
-        let parsed = reqwest::Url::parse(url)
-            .ok()
-            .filter(|u| matches!(u.scheme(), "http" | "https"))
-            .ok_or_else(|| Error::Protocol(format!("{origin}: unusable media location")))?;
-        let resp = self
-            .http
-            .get(parsed)
-            .timeout(LONG_REQUEST_TIMEOUT)
-            .send()
-            .await
-            .map_err(|e| Error::Transport(origin.to_owned(), error_chain(&e)))?;
-        let status = resp.status();
-        let content_type = resp
-            .headers()
-            .get(http::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("application/octet-stream")
-            .to_owned();
-        let bytes = read_body(origin, resp, Some(max_body)).await?;
-        if !status.is_success() {
-            return Err(Error::Protocol(format!(
-                "{origin}: media location answered {status}"
-            )));
-        }
-        Ok((bytes.to_vec(), content_type))
     }
 
     /// Verify an incoming request's `X-Matrix` signature. Returns the origin server.

@@ -201,6 +201,10 @@ pub async fn set_pusher(
         }
         _ => return Err(Error::bad_json("Unknown pusher action.")),
     }
+    // Tell the push worker that the set of pushers changed.
+    services
+        .pushers_generation
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     Ok(set_pusher::v3::Response::new())
 }
 

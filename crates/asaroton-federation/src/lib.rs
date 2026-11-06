@@ -20,6 +20,7 @@ mod housekeeping;
 pub mod inbound;
 pub mod join;
 pub mod keys;
+pub mod outbound;
 pub mod push;
 pub mod receive;
 pub mod sender;
@@ -43,6 +44,9 @@ pub struct FederationConfig {
     /// Ceiling on transactions per minute that carry only EDUs, over all destinations. Zero
     /// selects the default.
     pub max_edu_transactions_per_minute: u32,
+    /// Address ranges (CIDR) that URL previews, push gateways and media redirects may reach
+    /// although they are not on the public internet.
+    pub allowed_internal_ranges: Vec<String>,
 }
 
 /// The federation subsystem handle.
@@ -50,6 +54,8 @@ pub struct Federation {
     pub services: Arc<Services>,
     pub client: client::FederationClient,
     pub discovery: discovery::Discovery,
+    /// The client for URLs that somebody else chose (previews, push gateways, media redirects).
+    pub outbound: outbound::Outbound,
     pub config: FederationConfig,
     /// Rooms whose join we are currently performing, to avoid duplicate remote joins.
     joins_in_progress: dashmap::DashMap<ruma::OwnedRoomId, ()>,
@@ -80,10 +86,12 @@ impl Federation {
         let client =
             client::FederationClient::new(Arc::clone(&services), discovery.clone(), &config)?;
         let sender = sender::SenderHandle::new(config.max_edu_transactions_per_minute);
+        let outbound = outbound::Outbound::new(&config.allowed_internal_ranges)?;
         let fed = Arc::new(Self {
             services,
             client,
             discovery,
+            outbound,
             config,
             joins_in_progress: dashmap::DashMap::new(),
             sender,

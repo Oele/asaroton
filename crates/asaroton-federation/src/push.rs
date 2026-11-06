@@ -11,7 +11,7 @@ use asaroton_store::{Pusher, StoredEvent};
 use ruma::{OwnedUserId, RoomId, events::StateEventType};
 use serde_json::{Value, json};
 
-use crate::{Federation, url_preview::plain_http};
+use crate::{Federation, outbound::Outbound};
 
 pub fn start(fed: &Arc<Federation>) {
     let fed = Arc::clone(fed);
@@ -21,10 +21,12 @@ pub fn start(fed: &Arc<Federation>) {
 async fn worker(fed: &Arc<Federation>) {
     let services: &Services = &fed.services;
     let mut rx = services.notifier.subscribe();
-    // Most users have no pusher; the set of those who do is refreshed every few seconds
-    // rather than queried per member per event.
+    // Most users have no pusher; the set of those who do is kept here rather than queried
+    // per member per event. It is read again when a pusher is set or removed, and every few
+    // seconds for changes that do not announce themselves (a logout drops its pushers).
     let mut with_pushers: HashSet<OwnedUserId> = HashSet::new();
     let mut refreshed: Option<Instant> = None;
+    let mut generation = 0;
     loop {
         let n = match rx.recv().await {
             Ok(n) => n,
@@ -38,7 +40,12 @@ async fn worker(fed: &Arc<Federation>) {
         else {
             continue;
         };
-        if refreshed.is_none_or(|t| t.elapsed() > Duration::from_secs(10)) {
+        let current = services
+            .pushers_generation
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if current != generation || refreshed.is_none_or(|t| t.elapsed() > Duration::from_secs(10))
+        {
+            generation = current;
             match services.store.users_with_pushers().await {
                 Ok(users) => with_pushers = users.into_iter().collect(),
                 Err(e) => tracing::warn!(error = %e, "could not list users with pushers"),
@@ -48,7 +55,15 @@ async fn worker(fed: &Arc<Federation>) {
         if with_pushers.is_empty() {
             continue;
         }
-        if let Err(e) = handle_event(services, room_id, *stream_ordering, &with_pushers).await {
+        if let Err(e) = handle_event(
+            services,
+            &fed.outbound,
+            room_id,
+            *stream_ordering,
+            &with_pushers,
+        )
+        .await
+        {
             tracing::warn!(%room_id, error = %e, "push delivery failed");
         }
     }
@@ -56,6 +71,7 @@ async fn worker(fed: &Arc<Federation>) {
 
 async fn handle_event(
     services: &Services,
+    outbound: &Outbound,
     room_id: &RoomId,
     stream_ordering: i64,
     with_pushers: &HashSet<OwnedUserId>,
@@ -94,7 +110,7 @@ async fn handle_event(
         let notification =
             build_notification(services, room_id, &ev, &m.user_id, highlight, unread).await?;
         for pusher in pushers {
-            deliver(services, &pusher, &notification).await;
+            deliver(services, outbound, &pusher, &notification).await;
         }
     }
     Ok(())
@@ -162,9 +178,18 @@ async fn build_notification(
 }
 
 /// POST the notification to one pusher's gateway; a rejected pushkey removes the pusher.
-async fn deliver(services: &Services, pusher: &Pusher, notification: &Value) {
+async fn deliver(services: &Services, outbound: &Outbound, pusher: &Pusher, notification: &Value) {
     let Some(url) = pusher.data.get("url").and_then(Value::as_str) else {
         return;
+    };
+    // The gateway URL is the user's choice: it may only lead to a public address (or one
+    // the operator exempted).
+    let target = match outbound.parse(url) {
+        Ok(target) => target,
+        Err(e) => {
+            tracing::warn!(user = %pusher.user_id, app = %pusher.app_id, url, error = %e, "not pushing to this gateway");
+            return;
+        }
     };
     let format = pusher.data.get("format").and_then(Value::as_str);
     let mut n = notification.clone();
@@ -190,10 +215,14 @@ async fn deliver(services: &Services, pusher: &Pusher, notification: &Value) {
         "tweaks": tweaks,
     }]);
     let body = json!({ "notification": n });
-    let client = plain_http();
     let mut delay = Duration::from_secs(1);
     for attempt in 0..3 {
-        match client.post(url).json(&body).send().await {
+        match outbound
+            .request(reqwest::Method::POST, target.clone())
+            .json(&body)
+            .send()
+            .await
+        {
             Ok(resp) if resp.status().is_success() => {
                 let rejected: Vec<String> = resp
                     .json::<Value>()

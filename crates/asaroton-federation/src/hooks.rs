@@ -448,8 +448,8 @@ impl FederationHooks for Hooks {
             FileOrLocation::Location(url) => {
                 let (bytes, content_type) = self
                     .0
-                    .client
-                    .get_redirected(server_name, &url, max)
+                    .outbound
+                    .media_location(server_name, &url, max, crate::client::LONG_REQUEST_TIMEOUT)
                     .await
                     .map_err(asaroton_service::Error::from)?;
                 Ok((bytes, content_type, None))
