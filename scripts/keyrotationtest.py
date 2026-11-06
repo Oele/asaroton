@@ -153,12 +153,22 @@ def run(hs, peers):
                     "verify_keys": {"ed25519:old": {"key": b64(bytes(old_key.verify_key))}}}
     old_response["signatures"] = {rotated.name: {"ed25519:old": b64(old_key.sign(canonical(old_response)).signature)}}
 
+    notary.signs = True
+
     def query(handler, m):
         server = urllib.parse.unquote(m.group(1))
         known = [p.server_keys() for p in peers.values() if p.name == server]
         if server == rotated.name and notary.knows_old_key:
             known.append(old_response)
-        handler.answer(200, {"server_keys": known})
+        out = []
+        for document in known:
+            document = json.loads(json.dumps(document))
+            if notary.signs:
+                # A notary adds its own signature over the document without its signatures.
+                bare = {k: v for k, v in document.items() if k != "signatures"}
+                document["signatures"][notary.name] = {"ed25519:k1": notary.sign(bare)}
+            out.append(document)
+        handler.answer(200, {"server_keys": out})
 
     notary.routes.append((re.compile(r"/_matrix/key/v2/query/([^/?]+)"), query))
 
@@ -196,10 +206,21 @@ def run(hs, peers):
     time.sleep(1)
     check("said while the old key was unknown" not in bodies(), "but not shown, as its sender is not a member here")
 
-    # ---- 2. the notary learns the old key; leave and join again
+    # ---- 2. the notary learns the old key, but hands it out without its own signature
     notary.knows_old_key = True
+    notary.signs = False
     hs.stop()
     hs.start()  # a key that could not be found is not looked for again for ten minutes
+    st, r = hs.req("POST", f"/_matrix/client/v3/rooms/{q(room.id)}/leave", {}, token)
+    st, r = join()
+    check(st == 200 and room.member not in members(), f"a key the notary has not signed for is not believed ({st} {members()})")
+    unsigned = hs.log_lines("ignoring a key response that the notary has not validly signed")
+    check(len(unsigned) >= 1, "and the log says so")
+
+    # ---- 3. the notary signs what it hands out; leave and join again
+    notary.signs = True
+    hs.stop()
+    hs.start()
     st, r = hs.req("POST", f"/_matrix/client/v3/rooms/{q(room.id)}/leave", {}, token)
     check(st == 200, f"leaving works ({st})")
     st, r = join()

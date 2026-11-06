@@ -96,9 +96,10 @@ impl KeyStore for PostgresStore {
             sqlx::query(sqlx::AssertSqlSafe(format!(
                 "INSERT INTO remote_server_keys ({REMOTE_COLUMNS}) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                  ON CONFLICT (server_name, key_id) DO UPDATE SET verify_key_b64 = EXCLUDED.verify_key_b64,
-                    valid_until_ts = GREATEST(remote_server_keys.valid_until_ts, EXCLUDED.valid_until_ts),
+                    valid_until_ts = EXCLUDED.valid_until_ts,
                     expired_ts = EXCLUDED.expired_ts, fetched_ts = EXCLUDED.fetched_ts,
-                    fetched_from = EXCLUDED.fetched_from, key_json = EXCLUDED.key_json"
+                    fetched_from = EXCLUDED.fetched_from, key_json = EXCLUDED.key_json
+                 WHERE EXCLUDED.valid_until_ts >= remote_server_keys.valid_until_ts"
             )))
             .bind(k.server_name.as_str())
             .bind(k.key_id.as_str())

@@ -307,7 +307,9 @@ pub async fn notary_query_batch(
             .filter_map(|c| c.minimum_valid_until_ts)
             .map(|t| i64::try_from(u64::from(t.0)).unwrap_or(0))
             .max()
-            .unwrap_or(0);
+            // The field is optional; without it the notary's current time counts, so that
+            // a cached document that has run out is refreshed before it is handed out.
+            .unwrap_or_else(asaroton_store::now_ts);
         if let Ok(keys) = fed.notary_keys_for(server, min).await {
             for k in keys {
                 if let Ok(raw) =

@@ -19,6 +19,34 @@ use crate::{Error, Federation, Result};
 /// How long a key that could not be found is not looked for again.
 const KEY_MISS_TTL: Duration = Duration::from_mins(10);
 
+/// Check that a key document carries a valid signature of the notary it came from, made with
+/// one of the notary's keys that we know.
+fn signed_by_notary(
+    document: &CanonicalJsonObject,
+    notary: &ServerName,
+    notary_keys: &PublicKeySet,
+) -> Result<()> {
+    let mut to_verify = document.clone();
+    let mut checkable = false;
+    if let Some(ruma::CanonicalJsonValue::Object(signatures)) = to_verify.get_mut("signatures") {
+        signatures.retain(|entity, _| entity == notary.as_str());
+        if let Some(ruma::CanonicalJsonValue::Object(by_key)) = signatures.get_mut(notary.as_str())
+        {
+            by_key.retain(|key_id, _| notary_keys.contains_key(key_id));
+            checkable = !by_key.is_empty();
+        }
+    }
+    if !checkable {
+        return Err(Error::Protocol(format!(
+            "no signature of {notary} made with a key we know"
+        )));
+    }
+    let mut map = PublicKeyMap::new();
+    map.insert(notary.to_string(), notary_keys.clone());
+    asaroton_core::signing::verify_json(&map, &to_verify)
+        .map_err(|e| Error::Protocol(format!("signature of {notary} does not verify: {e}")))
+}
+
 /// How long our published keys are valid for. Spec recommends at most a week.
 fn our_key_validity() -> Duration {
     Duration::from_hours(24 * 7)
@@ -212,9 +240,23 @@ impl Federation {
                 .await
             {
                 Ok(list) => {
+                    // What a notary says about another server counts because the notary
+                    // signs it. Its own keys come from the notary itself.
+                    let notary_keys = match self.notary_own_keys(notary).await {
+                        Ok(keys) => keys,
+                        Err(e) => {
+                            tracing::warn!(%notary, error = %e, "cannot check this notary's answers: its own keys are unavailable");
+                            last_err = e;
+                            continue;
+                        }
+                    };
                     // A notary returns every key response it holds for the server; one that
                     // does not check out must not cost us the others.
                     for keys in list {
+                        if let Err(e) = signed_by_notary(&keys, notary, &notary_keys) {
+                            tracing::warn!(server = %server_name, %notary, error = %e, "ignoring a key response that the notary has not validly signed");
+                            continue;
+                        }
                         match self.store_fetched_keys(server_name, notary, keys).await {
                             Ok(()) => found_any = true,
                             Err(e) => {
@@ -361,17 +403,41 @@ impl Federation {
                 .await;
             cached = self.services.store.remote_verify_keys(server_name).await?;
         }
-        // All rows from one fetch share the same signed response JSON; de-duplicate.
+        // All rows from one fetch share the same signed response JSON; de-duplicate. Each
+        // document goes out with our own signature added: that is what makes it a notary's
+        // answer, and servers that check it (Synapse does) refuse a document without one.
         let mut seen = std::collections::BTreeSet::new();
         let mut out = Vec::new();
         for k in cached {
             if seen.insert(k.key_json.clone())
-                && let Ok(obj) = asaroton_core::canonical::from_str(&k.key_json)
+                && let Ok(mut obj) = asaroton_core::canonical::from_str(&k.key_json)
             {
+                self.services
+                    .signing_key
+                    .sign_json(&self.services.config.server_name, &mut obj)?;
                 out.push(obj);
             }
         }
         Ok(out)
+    }
+
+    /// The keys of a notary itself, for checking its signature on what it hands out. Only
+    /// the notary is asked: who vouches for a notary's key is not a question for a notary.
+    async fn notary_own_keys(&self, notary: &ServerName) -> Result<PublicKeySet> {
+        let now = now_ts();
+        let mut cached = self.services.store.remote_verify_keys(notary).await?;
+        if cached.is_empty() || cached.iter().all(|k| k.valid_until_ts < now) {
+            let keys = self.fetch_keys_direct(notary).await?;
+            self.store_fetched_keys(notary, notary, keys).await?;
+            cached = self.services.store.remote_verify_keys(notary).await?;
+        }
+        let mut set = PublicKeySet::new();
+        for k in cached {
+            if let Ok(b) = Base64::parse(&k.verify_key_b64) {
+                set.insert(k.key_id.to_string(), b);
+            }
+        }
+        Ok(set)
     }
 }
 
