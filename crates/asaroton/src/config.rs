@@ -491,8 +491,10 @@ fn default_room_version() -> RoomVersionId {
     asaroton_core::DEFAULT_ROOM_VERSION
 }
 fn default_log_filter() -> String {
-    // ruma's state resolution logs every auth check at info level.
-    "info,asaroton=debug,ruma_state_res=warn".to_owned()
+    // ruma's state resolution logs every auth check at info level. The certificate verifier
+    // reports every other server's expired or broken certificate as an error of ours, without
+    // saying whose it is; the sender logs the same failure as a warning that names the server.
+    "info,asaroton=debug,ruma_state_res=warn,rustls_platform_verifier=off".to_owned()
 }
 
 impl Config {
