@@ -1,6 +1,7 @@
 //! The asaroton Matrix homeserver binary.
 
 #![allow(unreachable_pub)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 mod config;
 mod import_synapse;
