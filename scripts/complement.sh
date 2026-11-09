@@ -16,6 +16,12 @@ flock 9
 
 DOCKER_BUILDKIT=1 docker build -q -t "$IMAGE" -f tests/complement/Dockerfile . >/dev/null
 echo "built $IMAGE"
+# Every build leaves the image before it untagged and adds to BuildKit's cache, which BuildKit
+# did not keep down by itself: 18 GB in a day on a disk that also holds the live database
+# (issue #44). Keep the most recently used 10 GB of the cache (the cargo target mount, about
+# 2 GB, among them) and remove the untagged images of earlier builds.
+docker builder prune -f --max-used-space 10GB >/dev/null || echo "complement.sh: pruning the build cache failed" >&2
+docker image prune -f --filter "label=org.asaroton.complement=1" >/dev/null || true
 cd "$COMPLEMENT_DIR"
 export COMPLEMENT_BASE_IMAGE="$IMAGE"
 export COMPLEMENT_SPAWN_HS_TIMEOUT_SECS=${COMPLEMENT_SPAWN_HS_TIMEOUT_SECS:-60}

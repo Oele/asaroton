@@ -16,6 +16,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --release -p asaroton && cp target/release/asaroton /asaroton
 
 FROM debian:bookworm-slim
+# scripts/complement.sh removes the untagged images this label marks.
+LABEL org.asaroton.complement=1
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl openssl postgresql postgresql-contrib \
     && rm -rf /var/lib/apt/lists/*

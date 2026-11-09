@@ -2,3 +2,11 @@ target
 .git
 data
 .env
+# Not needed to build the Complement image. fuzz/ holds the fuzzers' own build (about 1 GB),
+# which every build of the image used to copy into a layer of its own (issue #44).
+fuzz
+logs
+watch
+docs
+scripts
+deploy
