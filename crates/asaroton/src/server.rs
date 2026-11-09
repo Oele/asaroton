@@ -223,6 +223,9 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     asaroton_service::presence::start_worker(Arc::clone(&services));
     asaroton_service::typing::start_worker(Arc::clone(&services));
     asaroton_service::rtc::delegation::start_worker(Arc::clone(&services));
+    if federation.is_some() {
+        reannounce_signed_devices_once(Arc::clone(&services), &config.data_dir);
+    }
     if config.retention.enabled {
         asaroton_service::admin::start_retention(
             Arc::clone(&services),
@@ -269,6 +272,33 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Until build 8a6d4c34632d, device keys went to other servers without the signatures their
+/// owners made on them (cross-signing), and servers that cache device lists, Synapse among
+/// them, kept them so: to their users a verified device looked unverified (issue #43). This
+/// sends those devices once more. A file in the data directory notes that it was done.
+fn reannounce_signed_devices_once(services: Arc<Services>, data_dir: &std::path::Path) {
+    let marker = data_dir.join("done-reannounce-signed-devices");
+    if marker.exists() {
+        return;
+    }
+    tokio::spawn(async move {
+        match services.reannounce_owner_signed_devices().await {
+            Ok(devices) => {
+                tracing::info!(
+                    devices,
+                    "sent the devices that carry their owner's signature to other servers again (once)"
+                );
+                if let Err(e) = std::fs::write(&marker, format!("{devices}\n")) {
+                    tracing::warn!(error = %e, file = %marker.display(), "could not note that the devices were sent; they go again at the next start");
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "sending signed devices again failed; it is tried again at the next start");
+            }
+        }
+    });
 }
 
 async fn listen(

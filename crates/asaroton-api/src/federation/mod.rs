@@ -765,12 +765,18 @@ pub async fn user_devices(
     if !app.is_local(&req.body.user_id) {
         return Err(Error::not_found("User is not on this server."));
     }
-    let stream = app.store.max_device_list_stream_id().await?;
+    // The position is read before the devices: a server that takes this answer as its
+    // starting point then holds every change up to it.
+    let stream = app.store.stream_positions().await?.device_lists;
     let mut resp = get_devices::v1::Response::new(
         req.body.user_id.clone(),
         UInt::try_from(stream.max(0)).unwrap_or(UInt::MAX),
     );
     for (device_id, keys) in app.store.all_device_keys(&req.body.user_id).await? {
+        // With the owner's cross-signing signatures: the caller caches what it gets here.
+        let keys = app
+            .device_keys_with_signatures(&req.body.user_id, &device_id, keys)
+            .await?;
         let raw: ruma::serde::Raw<ruma::encryption::DeviceKeys> = crate::client::rooms::raw(&keys)?;
         let mut d = get_devices::v1::UserDevice::new(device_id.clone(), raw);
         d.device_display_name = app
@@ -781,8 +787,7 @@ pub async fn user_devices(
         resp.devices.push(d);
     }
     if let Some(k) = app
-        .store
-        .get_cross_signing_key(&req.body.user_id, "master")
+        .master_key_with_signatures(&req.body.user_id, None)
         .await?
     {
         resp.master_key = Some(crate::client::rooms::raw(&k)?);

@@ -142,16 +142,10 @@ impl Services {
                 all.retain(|(d, _)| devices.contains(d));
             }
             let mut per_user = BTreeMap::new();
-            for (device_id, mut keys) in all {
-                // Merge uploaded cross-signing signatures and the device display name.
-                for (signer, key_id, sig) in
-                    self.store.key_signatures(user, device_id.as_str()).await?
-                {
-                    if signer != *user {
-                        continue;
-                    }
-                    keys["signatures"][signer.as_str()][key_id] = json!(sig);
-                }
+            for (device_id, keys) in all {
+                let mut keys = self
+                    .device_keys_with_signatures(user, &device_id, keys)
+                    .await?;
                 if let Some(d) = self.store.get_device(user, &device_id).await?
                     && let Some(name) = d.display_name
                 {
@@ -161,13 +155,10 @@ impl Services {
             }
             out.device_keys.insert(user.clone(), per_user);
 
-            if let Some(mut k) = self.store.get_cross_signing_key(user, "master").await? {
-                for (signer, key_id, sig) in self.store.key_signatures(user, "master").await? {
-                    // Other users' signatures on a master key are only shown to the signer.
-                    if signer == *user || signer == requester {
-                        k["signatures"][signer.as_str()][key_id] = json!(sig);
-                    }
-                }
+            if let Some(k) = self
+                .master_key_with_signatures(user, Some(requester))
+                .await?
+            {
                 out.master_keys.insert(user.clone(), k);
             }
             if let Some(k) = self
@@ -252,7 +243,13 @@ impl Services {
         signed: &BTreeMap<OwnedUserId, BTreeMap<String, Value>>,
     ) -> Result<BTreeMap<OwnedUserId, BTreeMap<String, Value>>> {
         let mut failures: BTreeMap<OwnedUserId, BTreeMap<String, Value>> = BTreeMap::new();
-        let mut changed_users: Vec<OwnedUserId> = Vec::new();
+        // What the signatures change, and so who has to hear of it: the signer's own devices
+        // (other servers cache them, signatures included), the signer's own cross-signing keys
+        // (a device signing the master key), and other users' keys (a signature only the
+        // signer may see, so nothing for other servers).
+        let mut own_devices: Vec<OwnedDeviceId> = Vec::new();
+        let mut own_keys = false;
+        let mut other_users: Vec<OwnedUserId> = Vec::new();
         for (target_user, keys) in signed {
             for (target_key, obj) in keys {
                 let Some(sigs) = obj
@@ -267,12 +264,12 @@ impl Services {
                     continue;
                 };
                 // Normalise the target: a device id, or a cross-signing key by its ed25519 key id.
-                let target = if self
+                let is_device = self
                     .store
                     .get_device_keys(target_user, target_key.as_str().into())
                     .await?
-                    .is_some()
-                {
+                    .is_some();
+                let target = if is_device {
                     target_key.clone()
                 } else {
                     match self
@@ -296,13 +293,29 @@ impl Services {
                             .await?;
                     }
                 }
-                if !changed_users.contains(target_user) {
-                    changed_users.push(target_user.clone());
+                if target_user != signer {
+                    if !other_users.contains(target_user) {
+                        other_users.push(target_user.clone());
+                    }
+                } else if is_device {
+                    let device = OwnedDeviceId::from(target.as_str());
+                    if !own_devices.contains(&device) {
+                        own_devices.push(device);
+                    }
+                } else {
+                    own_keys = true;
                 }
             }
         }
-        for u in changed_users {
-            self.notify_device_list_change(&u, None).await?;
+        for device in own_devices {
+            self.notify_device_list_change(signer, Some(&device))
+                .await?;
+        }
+        if own_keys {
+            self.notify_device_list_change(signer, None).await?;
+        }
+        for u in other_users {
+            self.device_list_changed(&u, None, false).await?;
         }
         Ok(failures)
     }
@@ -326,11 +339,23 @@ impl Services {
         Ok(None)
     }
 
-    /// Record that a user's device list changed and wake their syncs.
+    /// Record that a user's device list changed, wake the syncs that follow it and, for a
+    /// local user, tell the servers that share a room with them.
     pub async fn notify_device_list_change(
         &self,
         user_id: &UserId,
         device_id: Option<&DeviceId>,
+    ) -> Result<()> {
+        self.device_list_changed(user_id, device_id, true).await
+    }
+
+    /// See [`Services::notify_device_list_change`]; `federate: false` keeps the change on this
+    /// server, for something that only local clients are to hear of.
+    async fn device_list_changed(
+        &self,
+        user_id: &UserId,
+        device_id: Option<&DeviceId>,
+        federate: bool,
     ) -> Result<()> {
         let stream_id = self
             .store
@@ -343,15 +368,31 @@ impl Services {
                 user_id: user_id.to_owned(),
             }],
         );
-        if self.is_local(user_id) {
+        if federate && self.is_local(user_id) {
             let servers = self.remote_servers_sharing_rooms_with(user_id).await?;
             match device_id {
                 Some(device_id) => {
-                    let keys = self.store.get_device_keys(user_id, device_id).await?;
+                    let keys = match self.store.get_device_keys(user_id, device_id).await? {
+                        Some(k) => Some(
+                            self.device_keys_with_signatures(user_id, device_id, k)
+                                .await?,
+                        ),
+                        None => None,
+                    };
                     let device = self.store.get_device(user_id, device_id).await?;
                     let deleted = keys.is_none() && device.is_none();
+                    // The update before this one for the same user: a server that holds it can
+                    // apply this one on top, one that does not knows it missed something and
+                    // fetches the whole list. An empty list says "start from here", which makes
+                    // the receiving server fetch the whole list every time.
+                    let prev_id: Vec<i64> = self
+                        .store
+                        .previous_device_change(user_id, stream_id)
+                        .await?
+                        .into_iter()
+                        .collect();
                     let mut content = json!({
-                        "user_id": user_id, "device_id": device_id, "stream_id": stream_id, "prev_id": [],
+                        "user_id": user_id, "device_id": device_id, "stream_id": stream_id, "prev_id": prev_id,
                         "deleted": deleted,
                     });
                     if let Some(n) = device.and_then(|d| d.display_name) {
@@ -367,7 +408,7 @@ impl Services {
                 }
                 None => {
                     let mut content = json!({ "user_id": user_id });
-                    if let Some(k) = self.store.get_cross_signing_key(user_id, "master").await? {
+                    if let Some(k) = self.master_key_with_signatures(user_id, None).await? {
                         content["master_key"] = k;
                     }
                     if let Some(k) = self
@@ -491,7 +532,14 @@ impl Services {
         if servers.is_empty() || !self.is_local(user) {
             return Ok(());
         }
-        let stream_id = self.store.max_device_list_stream_id().await?;
+        // A stream ID of its own for every device: they are to be distinct per user. No
+        // `prev_id`: the servers are new to this user, and should fetch the whole list.
+        let stream_ids: std::collections::HashMap<_, _> = self
+            .store
+            .device_stream_ids(user)
+            .await?
+            .into_iter()
+            .collect();
         let keys: std::collections::HashMap<_, _> = self
             .store
             .all_device_keys(user)
@@ -499,11 +547,16 @@ impl Services {
             .into_iter()
             .collect();
         for device in self.store.list_devices(user).await? {
+            let Some(&stream_id) = stream_ids.get(&device.device_id) else {
+                continue;
+            };
             let mut content = json!({
                 "user_id": user, "device_id": device.device_id, "stream_id": stream_id, "prev_id": [],
             });
             if let Some(k) = keys.get(&device.device_id) {
-                content["keys"] = k.clone();
+                content["keys"] = self
+                    .device_keys_with_signatures(user, &device.device_id, k.clone())
+                    .await?;
             }
             if let Some(n) = device.display_name {
                 content["device_display_name"] = json!(n);
@@ -514,5 +567,56 @@ impl Services {
             );
         }
         Ok(())
+    }
+
+    /// A device's keys as others are to see them: with the signatures its owner made on it
+    /// (cross-signing). Those come in through `/keys/signatures/upload` and are kept apart
+    /// from what the device uploaded itself, so everything that hands device keys to a client
+    /// or another server goes through here.
+    pub async fn device_keys_with_signatures(
+        &self,
+        user: &UserId,
+        device_id: &DeviceId,
+        mut keys: Value,
+    ) -> Result<Value> {
+        for (signer, key_id, sig) in self.store.key_signatures(user, device_id.as_str()).await? {
+            if signer == *user {
+                keys["signatures"][signer.as_str()][key_id] = json!(sig);
+            }
+        }
+        Ok(keys)
+    }
+
+    /// A user's master key with the signatures they made on it (with their devices), and
+    /// those of `viewer`: another user's signature on a master key is for its signer only.
+    pub async fn master_key_with_signatures(
+        &self,
+        user: &UserId,
+        viewer: Option<&UserId>,
+    ) -> Result<Option<Value>> {
+        let Some(mut key) = self.store.get_cross_signing_key(user, "master").await? else {
+            return Ok(None);
+        };
+        for (signer, key_id, sig) in self.store.key_signatures(user, "master").await? {
+            if signer == *user || viewer == Some(signer.as_ref()) {
+                key["signatures"][signer.as_str()][key_id] = json!(sig);
+            }
+        }
+        Ok(Some(key))
+    }
+
+    /// Sends every device of a local user that carries its owner's signature to the servers
+    /// that share a room with them, as a change of that device. Servers that cached these
+    /// devices before their signatures were sent along (until build 8a6d4c34632d) fetch them
+    /// again. Returns how many devices were sent.
+    pub async fn reannounce_owner_signed_devices(&self) -> Result<usize> {
+        let mut sent = 0;
+        for (user, device) in self.store.owner_signed_devices().await? {
+            if self.is_local(&user) {
+                self.notify_device_list_change(&user, Some(&device)).await?;
+                sent += 1;
+            }
+        }
+        Ok(sent)
     }
 }

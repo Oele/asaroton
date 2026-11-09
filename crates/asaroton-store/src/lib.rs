@@ -758,6 +758,15 @@ pub trait E2eeStore: Send + Sync {
     ) -> Result<i64>;
     async fn device_list_changes_since(&self, since: i64, to: i64) -> Result<Vec<OwnedUserId>>;
     async fn max_device_list_stream_id(&self) -> Result<i64>;
+    /// The newest change to one of `user_id`'s devices below `before`: what an
+    /// `m.device_list_update` with stream ID `before` names as its `prev_id`. Changes that
+    /// concern no device (cross-signing keys) are not part of that chain.
+    async fn previous_device_change(&self, user_id: &UserId, before: i64) -> Result<Option<i64>>;
+    /// A stream ID for each of `user_id`'s devices, distinct per device: the device's newest
+    /// change, or a fresh number for a device that has none (devices imported from Synapse).
+    async fn device_stream_ids(&self, user_id: &UserId) -> Result<Vec<(OwnedDeviceId, i64)>>;
+    /// Every device that carries a signature by its owner (cross-signing), on any server.
+    async fn owner_signed_devices(&self) -> Result<Vec<(OwnedUserId, OwnedDeviceId)>>;
 
     async fn add_to_device_message(
         &self,

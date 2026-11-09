@@ -328,6 +328,63 @@ impl E2eeStore for PostgresStore {
         Ok(row.get::<i64, _>(0))
     }
 
+    async fn previous_device_change(&self, user_id: &UserId, before: i64) -> Result<Option<i64>> {
+        let row = sqlx::query(
+            "SELECT MAX(stream_id) FROM device_list_changes
+             WHERE user_id = $1 AND device_id IS NOT NULL AND stream_id < $2",
+        )
+        .bind(user_id.as_str())
+        .bind(before)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.get::<Option<i64>, _>(0))
+    }
+
+    async fn device_stream_ids(&self, user_id: &UserId) -> Result<Vec<(OwnedDeviceId, i64)>> {
+        // COALESCE evaluates nextval only for a device without a change. The number is not
+        // written anywhere: it only has to differ from every other ID of this user's.
+        let rows = sqlx::query(
+            "SELECT d.device_id,
+                    COALESCE((SELECT MAX(c.stream_id) FROM device_list_changes c
+                              WHERE c.user_id = d.user_id AND c.device_id = d.device_id),
+                             nextval('device_lists_seq'))
+             FROM devices d WHERE d.user_id = $1 ORDER BY d.device_id",
+        )
+        .bind(user_id.as_str())
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                (
+                    OwnedDeviceId::from(r.get::<String, _>(0)),
+                    r.get::<i64, _>(1),
+                )
+            })
+            .collect())
+    }
+
+    async fn owner_signed_devices(&self) -> Result<Vec<(OwnedUserId, OwnedDeviceId)>> {
+        let rows = sqlx::query(
+            "SELECT DISTINCT s.target_user_id, s.target_key_id
+             FROM key_signatures s
+             JOIN device_keys k ON k.user_id = s.target_user_id AND k.device_id = s.target_key_id
+             WHERE s.signing_user_id = s.target_user_id
+             ORDER BY 1, 2",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|r| {
+                Ok((
+                    OwnedUserId::try_from(r.get::<String, _>(0))
+                        .map_err(|e| Error::Corrupt(e.to_string()))?,
+                    OwnedDeviceId::from(r.get::<String, _>(1)),
+                ))
+            })
+            .collect()
+    }
+
     async fn add_to_device_message(
         &self,
         user_id: &UserId,
