@@ -14,7 +14,10 @@ fi
 systemctl daemon-reload
 # A watchdog started by hand before this unit existed would run alongside it.
 pkill -f '^sh /[a-z/]*asaroton-watchdog\.sh' || true
-systemctl enable --now asaroton-watchdog.service
+systemctl enable asaroton-watchdog.service
+# A restart, not just a start: a watchdog that is already running keeps executing the old
+# script, whatever was installed over it.
+systemctl restart asaroton-watchdog.service
 sleep 2
 systemctl is-enabled asaroton-watchdog.service
 systemctl is-active asaroton-watchdog.service

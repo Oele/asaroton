@@ -7,7 +7,7 @@ After=asaroton.service postgresql.service
 [Service]
 Type=simple
 # Override per host in /etc/default/asaroton-watchdog (ASAROTON_UNIT, ASAROTON_DB, MAX_TXN_PER_MIN,
-# MAX_CPU, MAX_OUTBOX).
+# MAX_CPU, MAX_OUTBOX, MIN_FREE_GB, DISK_PATH, WATCHDOG_MAIL_TO).
 Environment=ASAROTON_UNIT=asaroton ASAROTON_DB=asaroton
 EnvironmentFile=-/etc/default/asaroton-watchdog
 ExecStart=/usr/local/sbin/asaroton-watchdog.sh

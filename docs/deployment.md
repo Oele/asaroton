@@ -89,7 +89,10 @@ proxy; asaroton answers them with an error when delegation is on. Clients discov
   it when it sends more than 1000 federation transactions in a minute, queues more than 5000
   outbox rows, or stays above 60% CPU. A homeserver that misbehaves bothers every server it
   federates with, so it errs on the side of stopping; it logs the reason to
-  `/var/log/asaroton-watchdog.log` and syslog and mails root. Install it with
+  `/var/log/asaroton-watchdog.log` and syslog and mails it to `WATCHDOG_MAIL_TO` (default
+  root; set it where root's mail stays on the host). It also mails, once each time, when the
+  disk that holds PostgreSQL's data has less than `MIN_FREE_GB` free (default 10); it stops
+  nothing for that. Install it with
   `deploy/systemd/install-watchdog.sh [UNIT [DBNAME]]` as root; it is enabled at boot and
   never starts asaroton again by itself. It counts transactions in asaroton's log, so it needs
   `RUST_LOG` to include `asaroton_federation=debug`. Thresholds go in
