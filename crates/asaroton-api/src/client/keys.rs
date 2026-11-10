@@ -21,7 +21,7 @@ use serde_json::Value;
 
 use crate::{AppState, Error, Result, Ruma, client::rooms::raw};
 
-fn to_json<T>(r: &Raw<T>) -> Result<Value> {
+pub(crate) fn to_json<T>(r: &Raw<T>) -> Result<Value> {
     serde_json::from_str(r.json().get()).map_err(|e| Error::bad_json(e.to_string()))
 }
 

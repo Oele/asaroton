@@ -11,6 +11,7 @@ pub mod admin;
 pub mod appservice;
 pub mod closing;
 pub mod config;
+pub mod dehydrated;
 pub mod delayed_events;
 pub mod e2ee;
 mod error;

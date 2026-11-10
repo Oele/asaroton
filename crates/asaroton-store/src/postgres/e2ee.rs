@@ -468,6 +468,44 @@ impl E2eeStore for PostgresStore {
         Ok(())
     }
 
+    async fn set_dehydrated_device(
+        &self,
+        user_id: &UserId,
+        device_id: &DeviceId,
+        device_data: &serde_json::Value,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO dehydrated_devices (user_id, device_id, device_data, created_ts)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (user_id) DO UPDATE SET device_id = EXCLUDED.device_id,
+                device_data = EXCLUDED.device_data, created_ts = EXCLUDED.created_ts",
+        )
+        .bind(user_id.as_str())
+        .bind(device_id.as_str())
+        .bind(device_data)
+        .bind(now_ts())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn dehydrated_device(
+        &self,
+        user_id: &UserId,
+    ) -> Result<Option<(OwnedDeviceId, serde_json::Value)>> {
+        let row =
+            sqlx::query("SELECT device_id, device_data FROM dehydrated_devices WHERE user_id = $1")
+                .bind(user_id.as_str())
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row.map(|r| {
+            (
+                OwnedDeviceId::from(r.get::<String, _>("device_id")),
+                r.get("device_data"),
+            )
+        }))
+    }
+
     async fn max_to_device_stream_id(&self) -> Result<i64> {
         let row = sqlx::query("SELECT COALESCE(MAX(stream_id), 0) FROM to_device_messages")
             .fetch_one(&self.pool)

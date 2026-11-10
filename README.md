@@ -51,6 +51,7 @@ scripts/devicelisttest.py        # device lists as other servers see them: cross
 scripts/droppedrequesttest.py    # requests cut off halfway leave nothing half done: no open transaction, nothing twice on a second attempt, from a client or from another server (starts its own server)
 scripts/refreshtest.py           # a refresh whose answer is lost does not end the session: the old refresh token is good until the new pair is used (starts its own server)
 scripts/stoptest.py              # a server that is told to stop answers who waits, finishes the writes and leaves no message to be sent twice (starts its own server)
+scripts/dehydratedtest.py        # dehydrated devices (MSC3814): others see the device and send it keys, its owner reads them out page by page, replacing and deleting (starts its own server)
 scripts/deploy.sh [status]      # check, build and deploy: this machine first, then the remote host (see docs/deployment.md)
 watch/                          # weekly watch job: spec, Synapse, tests and server logs become issues, see its README
 ```

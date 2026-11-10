@@ -3,6 +3,7 @@
 pub mod account;
 pub mod admin;
 pub mod backup;
+pub mod dehydrated;
 pub mod delayed_events;
 pub mod discovery;
 pub mod keys;
@@ -579,6 +580,20 @@ pub fn routes(router: Router<AppState>) -> Router<AppState> {
         backup::delete_session_key,
     );
     let r = route::<c::keys::upload_keys::v3::Request, _, _>(r, keys::upload);
+    let r = route::<c::dehydrated_device::put_dehydrated_device::unstable::Request, _, _>(
+        r,
+        dehydrated::put,
+    );
+    let r = route::<c::dehydrated_device::get_dehydrated_device::unstable::Request, _, _>(
+        r,
+        dehydrated::get,
+    );
+    let r = route::<c::dehydrated_device::delete_dehydrated_device::unstable::Request, _, _>(
+        r,
+        dehydrated::delete,
+    );
+    let r =
+        route::<c::dehydrated_device::get_events::unstable::Request, _, _>(r, dehydrated::events);
     let r = route::<c::keys::get_keys::v3::Request, _, _>(r, keys::query);
     let r = route::<c::keys::claim_keys::v3::Request, _, _>(r, keys::claim);
     let r = route::<c::keys::get_key_changes::v3::Request, _, _>(r, keys::changes);

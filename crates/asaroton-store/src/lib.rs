@@ -802,6 +802,20 @@ pub trait E2eeStore: Send + Sync {
     ) -> Result<()>;
     async fn max_to_device_stream_id(&self) -> Result<i64>;
 
+    /// Makes `device_id`, which has to exist, the user's dehydrated device (MSC3814), in the
+    /// place of any other.
+    async fn set_dehydrated_device(
+        &self,
+        user_id: &UserId,
+        device_id: &DeviceId,
+        device_data: &serde_json::Value,
+    ) -> Result<()>;
+    /// The user's dehydrated device and its data.
+    async fn dehydrated_device(
+        &self,
+        user_id: &UserId,
+    ) -> Result<Option<(OwnedDeviceId, serde_json::Value)>>;
+
     async fn get_push_rules(&self, user_id: &UserId) -> Result<Option<(serde_json::Value, i64)>>;
     /// Store the ruleset and return the account-data stream id it was published at.
     async fn set_push_rules(&self, user_id: &UserId, ruleset: &serde_json::Value) -> Result<i64>;

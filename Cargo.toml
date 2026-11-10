@@ -24,6 +24,7 @@ asaroton-auth = { path = "crates/asaroton-auth" }
 # Matrix protocol
 ruma = { version = "0.17.2", features = [
   "client-api-s",
+  "unstable-msc3814",
   "federation-api-s",
   "federation-api-c",
   "appservice-api-s",
