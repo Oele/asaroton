@@ -63,4 +63,16 @@ registration_dir = "/complement/appservice"
 CFG
 
 export RUST_LOG="${RUST_LOG:-info,asaroton_federation=debug}"
-exec asaroton --config /etc/asaroton/asaroton.toml
+# asaroton ends when it is told to stop, and the container ends with its first process. This
+# PostgreSQL does not write a commit to disk at once (synchronous_commit=off), so it has to be
+# shut down too, or what was committed in the last moments is gone when Complement starts
+# the container again. Hence no exec: the shell passes the signal on and stops the database.
+asaroton --config /etc/asaroton/asaroton.toml &
+server=$!
+trap 'kill -TERM "$server" 2>/dev/null' TERM INT
+status=0
+wait "$server" || status=$?
+# A signal ends the first wait; the second waits for the server itself.
+wait "$server" 2>/dev/null || true
+su postgres -c "$PGBIN/pg_ctl -D $PGDATA -m fast -w stop" >/dev/null 2>&1 || true
+exit "$status"
