@@ -134,7 +134,7 @@ impl KeyBackupStore for PostgresStore {
         keys: &[BackupKey],
     ) -> Result<(i64, i64)> {
         let n = parse_version(version).ok_or_else(|| Error::NotFound("backup version"))?;
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.begin().await?;
         for key in keys {
             let existing = sqlx::query(
                 "SELECT first_message_index, forwarded_count, is_verified, session_data

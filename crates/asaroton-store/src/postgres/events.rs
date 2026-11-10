@@ -377,7 +377,7 @@ impl EventStore for PostgresStore {
         // The streams before the connection: setting them up needs the pool itself.
         let streams = self.streams().await?;
         // The connection before the registration: waiting for one is no part of the write.
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.begin().await?;
         let mut writing = events
             .iter()
             .any(takes_a_place_in_the_stream)
@@ -1065,7 +1065,7 @@ impl EventStore for PostgresStore {
         room_id: &RoomId,
         event_ids: &[OwnedEventId],
     ) -> Result<()> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.begin().await?;
         set_forward_extremities(&mut tx, room_id, event_ids).await?;
         tx.commit().await?;
         Ok(())

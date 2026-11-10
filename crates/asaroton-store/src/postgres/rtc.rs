@@ -136,7 +136,7 @@ impl RtcStore for PostgresStore {
     }
 
     async fn add_delegated_leave(&self, leave: &DelegatedLeave) -> Result<bool> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.begin().await?;
         // One delegation per participant: a newer delay ID replaces the old one.
         sqlx::query(
             "DELETE FROM rtc_delegated_leaves WHERE lk_room = $1 AND lk_identity = $2 AND delay_id <> $3",

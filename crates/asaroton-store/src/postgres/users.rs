@@ -425,7 +425,7 @@ impl UserStore for PostgresStore {
     }
 
     async fn delete_device(&self, user_id: &UserId, device_id: &DeviceId) -> Result<()> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.begin().await?;
         sqlx::query("DELETE FROM access_tokens WHERE user_id = $1 AND device_id = $2")
             .bind(user_id.as_str())
             .bind(device_id.as_str())

@@ -178,7 +178,7 @@ impl RoomStore for PostgresStore {
     }
 
     async fn purge_room(&self, room_id: &RoomId) -> Result<()> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.begin().await?;
         let r = room_id.as_str();
         // Tables keyed by event: find the room's event IDs first.
         for sql in [
@@ -208,7 +208,7 @@ impl RoomStore for PostgresStore {
     }
 
     async fn purge_history(&self, room_id: &RoomId, before: StreamOrdering) -> Result<u64> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.begin().await?;
         let r = room_id.as_str();
         // Non-state events only: state events are needed to authorise what remains.
         let selector = "SELECT event_id FROM events WHERE room_id = $1 AND stream_ordering < $2

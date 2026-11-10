@@ -188,7 +188,7 @@ impl StateStore for PostgresStore {
         prev: Option<StateGroupId>,
         delta: &StateDelta,
     ) -> Result<StateGroupId> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.begin().await?;
         let id = create_state_group(&mut tx, room_id, prev, delta).await?;
         tx.commit().await?;
         Ok(id)
@@ -262,7 +262,7 @@ impl StateStore for PostgresStore {
         room_id: &RoomId,
         delta: &CurrentStateDelta,
     ) -> Result<()> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.begin().await?;
         apply_current_state_delta(&mut tx, room_id, delta).await?;
         tx.commit().await?;
         Ok(())

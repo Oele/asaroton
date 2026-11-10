@@ -63,7 +63,7 @@ impl E2eeStore for PostgresStore {
     }
 
     async fn delete_device_keys(&self, user_id: &UserId, device_id: &DeviceId) -> Result<()> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.begin().await?;
         for table in ["device_keys", "one_time_keys", "fallback_keys"] {
             sqlx::query(sqlx::AssertSqlSafe(format!(
                 "DELETE FROM {table} WHERE user_id = $1 AND device_id = $2"
@@ -83,7 +83,7 @@ impl E2eeStore for PostgresStore {
         device_id: &DeviceId,
         keys: &[OneTimeKeyRow],
     ) -> Result<()> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.begin().await?;
         for k in keys {
             sqlx::query(
                 "INSERT INTO one_time_keys (user_id, device_id, algorithm, key_id, key_json, created_ts)
@@ -126,7 +126,7 @@ impl E2eeStore for PostgresStore {
         device_id: &DeviceId,
         algorithm: &str,
     ) -> Result<Option<OneTimeKeyRow>> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.begin().await?;
         let row = sqlx::query(
             "DELETE FROM one_time_keys WHERE (user_id, device_id, algorithm, key_id) = (
                 SELECT user_id, device_id, algorithm, key_id FROM one_time_keys
@@ -171,7 +171,7 @@ impl E2eeStore for PostgresStore {
         device_id: &DeviceId,
         keys: &[OneTimeKeyRow],
     ) -> Result<()> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.begin().await?;
         for k in keys {
             sqlx::query(
                 "INSERT INTO fallback_keys (user_id, device_id, algorithm, key_id, key_json, used)

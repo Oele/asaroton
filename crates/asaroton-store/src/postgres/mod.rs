@@ -147,6 +147,32 @@ impl PostgresStore {
             .await
     }
 
+    /// Begins a transaction on a connection from the pool. Every transaction of the store
+    /// starts here, and none with the pool's own `begin`.
+    ///
+    /// It begins in a task of its own, because a caller may be dropped at any moment (a client
+    /// that hangs up takes its request down wherever it is) and sqlx 0.9.0 cannot take that
+    /// between sending BEGIN and reading the answer. It counts the transaction only once the
+    /// answer is in, and a transaction it has not counted is one it does not roll back: the
+    /// connection went back into the pool inside a transaction. The next user's statements
+    /// then ran in a transaction nobody was going to commit, so that a row written and
+    /// acknowledged was not there for any other connection, until a later user of that
+    /// connection happened to commit (PostgreSQL: "there is already a transaction in
+    /// progress") or to roll back.
+    ///
+    /// The task is not dropped with the caller. It sees BEGIN through, and a transaction that
+    /// nobody is waiting for any more is rolled back like any other that is dropped.
+    ///
+    /// Fixed in sqlx by <https://github.com/launchbadge/sqlx/pull/4394>, which is in no
+    /// release yet. With a release that has it, the pool's `begin` can be called directly.
+    pub(crate) async fn begin(&self) -> Result<sqlx::Transaction<'static, sqlx::Postgres>> {
+        let pool = self.pool.clone();
+        tokio::spawn(async move { pool.begin().await })
+            .await
+            .map_err(|e| Error::Interrupted(e.to_string()))?
+            .map_err(Into::into)
+    }
+
     /// Writes one row of a sync stream. `statement` runs the statement on the connection it
     /// is given and returns the number the row got, or `None` when it wrote no row.
     ///

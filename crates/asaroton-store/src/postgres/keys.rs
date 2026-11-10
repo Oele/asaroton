@@ -91,7 +91,7 @@ impl KeyStore for PostgresStore {
     }
 
     async fn store_remote_verify_keys(&self, keys: Vec<RemoteVerifyKey>) -> Result<()> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.begin().await?;
         for k in keys {
             sqlx::query(sqlx::AssertSqlSafe(format!(
                 "INSERT INTO remote_server_keys ({REMOTE_COLUMNS}) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)

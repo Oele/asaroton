@@ -1482,6 +1482,83 @@ async fn account_data_is_not_reported_past_a_write_that_is_under_way(pool: PgPoo
     assert_eq!(store.stream_positions().await.unwrap().account_data, free);
 }
 
+/// A call that is dropped while its transaction begins leaves the connection as it found it.
+///
+/// With sqlx 0.9.0 it did not: a call dropped between sending BEGIN and reading the answer
+/// gave its connection back to the pool inside a transaction, and whatever the next user
+/// wrote on it stayed invisible to every other connection. The server's requests are such
+/// calls: a client that hangs up takes its request down wherever it is. Seen from outside, a
+/// device that `/login` had just handed out was not there for the next request.
+///
+/// The store has one connection here, so that each write gets the one the dropped call had.
+#[sqlx::test(migrations = "./migrations")]
+async fn a_call_dropped_while_its_transaction_begins_leaves_the_connection_clean(
+    options: sqlx::postgres::PgPoolOptions,
+    database: sqlx::postgres::PgConnectOptions,
+) {
+    let pool = options
+        .clone()
+        .max_connections(1)
+        .connect_with(database.clone())
+        .await
+        .unwrap();
+    let store = PostgresStore::from_pool(pool);
+    let elsewhere = PostgresStore::from_pool(
+        options
+            .max_connections(1)
+            .connect_with(database)
+            .await
+            .unwrap(),
+    );
+    let alice = user_id!("@alice:example.org");
+    store
+        .create_user(NewUser {
+            user_id: alice.to_owned(),
+            password_hash: None,
+            display_name: None,
+            is_admin: false,
+            is_guest: false,
+            appservice_id: None,
+        })
+        .await
+        .unwrap();
+
+    // Dropped after one step, after two, and so on, with time in between for the database to
+    // answer: one of them is the step that leaves BEGIN sent and not yet answered.
+    for steps in 1..=8 {
+        {
+            let mut call = Box::pin(store.delete_device(alice, device_id!("NOSUCHDEVICE")));
+            for _ in 0..steps {
+                if futures::poll!(call.as_mut()).is_ready() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        }
+        let device = asaroton_core::ruma::OwnedDeviceId::from(format!("DEVICE{steps}"));
+        store.create_device(alice, &device, None).await.unwrap();
+        assert!(
+            elsewhere
+                .get_device(alice, &device)
+                .await
+                .unwrap()
+                .is_some(),
+            "a device created after a call that was dropped at step {steps} is there for another connection"
+        );
+        let inside: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_stat_activity
+             WHERE datname = current_database() AND state LIKE 'idle in transaction%'",
+        )
+        .fetch_one(elsewhere.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            inside, 0,
+            "no connection is left inside a transaction (dropped at step {steps})"
+        );
+    }
+}
+
 /// A table lock that keeps writers out and lets readers in, for as long as the returned
 /// transaction is open.
 async fn lock_against_writing(
