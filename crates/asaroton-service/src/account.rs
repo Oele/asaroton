@@ -224,7 +224,15 @@ impl Services {
     }
 
     /// Exchange a refresh token for a new access + refresh token pair.
+    ///
+    /// The refresh token stays good until the client has used what it got for it, the new
+    /// access token or the new refresh token (the spec asks for that): a client that lost
+    /// the answer asks again with the token it still has. It then gets the same pair again
+    /// and not a second one, so that an answer that did arrive stays good as well. The access
+    /// token from before the refresh lives until then too, or until it expires.
     pub async fn refresh_session(&self, refresh_token: &str) -> Result<Session> {
+        // One at a time: a second attempt that meets the first still at work waits for it.
+        let _turn = self.refresh_turn(refresh_token).await;
         let Some(rt) = self.store.get_refresh_token(refresh_token).await? else {
             return Err(Error::matrix(
                 ruma::api::error::ErrorKind::UnknownToken(unknown_token_data(false)),
@@ -237,44 +245,56 @@ impl Services {
         {
             return Err(Error::forbidden("Refresh token expired."));
         }
-        // A refresh token that was already rotated can only be used if the new one was never
-        // used; we keep it simple and allow the old one to re-issue until the next one is used.
+        // This token is in use, so the client has the answer to the refresh that handed it
+        // out: the token it replaced ends here.
+        for replaced in self
+            .store
+            .revoke_refresh_token_predecessor(&rt.token)
+            .await?
+        {
+            self.auth.forget_token(&replaced);
+        }
         let now = now_ts();
-        let new_access = generate_token("tsa");
-        let new_refresh = generate_token("tsr");
-        self.store
-            .create_refresh_token(RefreshToken {
-                token: new_refresh.clone(),
-                user_id: rt.user_id.clone(),
-                device_id: rt.device_id.clone(),
-                created_ts: now,
-                expires_ts: None,
-                next_token: None,
-            })
-            .await?;
-        self.store.delete_refresh_token(&rt.token).await?;
-        // Old access tokens of this device bound to the old refresh token are invalidated.
-        self.store
-            .delete_access_tokens_for_device(&rt.user_id, &rt.device_id)
-            .await?;
-        self.auth.forget_user(&rt.user_id);
-        self.store
-            .create_access_token(AccessToken {
-                token: new_access.clone(),
-                user_id: rt.user_id.clone(),
-                device_id: Some(rt.device_id.clone()),
-                created_ts: now,
-                expires_ts: Some(now + REFRESHABLE_TOKEN_LIFETIME_MS),
-                refresh_token: Some(new_refresh.clone()),
-                puppets_user_id: None,
-            })
-            .await?;
+        let next = match rt.next_token {
+            Some(next) if self.store.get_refresh_token(&next).await?.is_some() => next,
+            _ => {
+                let next = generate_token("tsr");
+                self.store
+                    .create_refresh_token(RefreshToken {
+                        token: next.clone(),
+                        user_id: rt.user_id.clone(),
+                        device_id: rt.device_id.clone(),
+                        created_ts: now,
+                        expires_ts: None,
+                        next_token: None,
+                    })
+                    .await?;
+                self.store.set_refresh_token_next(&rt.token, &next).await?;
+                next
+            }
+        };
+        let access = match self.store.access_token_for_refresh_token(&next).await? {
+            Some(access) => access,
+            None => {
+                let access = AccessToken {
+                    token: generate_token("tsa"),
+                    user_id: rt.user_id.clone(),
+                    device_id: Some(rt.device_id.clone()),
+                    created_ts: now,
+                    expires_ts: Some(now + REFRESHABLE_TOKEN_LIFETIME_MS),
+                    refresh_token: Some(next.clone()),
+                    puppets_user_id: None,
+                };
+                self.store.create_access_token(access.clone()).await?;
+                access
+            }
+        };
         Ok(Session {
             user_id: rt.user_id,
             device_id: rt.device_id,
-            access_token: new_access,
-            refresh_token: Some(new_refresh),
-            expires_in_ms: Some(REFRESHABLE_TOKEN_LIFETIME_MS),
+            access_token: access.token,
+            refresh_token: Some(next),
+            expires_in_ms: access.expires_ts.map(|expires| expires - now),
         })
     }
 

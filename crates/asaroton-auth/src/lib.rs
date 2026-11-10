@@ -238,6 +238,18 @@ impl Authenticator {
         if deactivated {
             return Err(AuthError::Deactivated);
         }
+        // An access token that came out of a refresh is in use, so the client has the answer
+        // to that refresh: the refresh token it replaced ends here, and the access tokens
+        // of that one with it. Until now they were kept, for a client that lost the answer.
+        if let Some(refresh_token) = &t.refresh_token {
+            for replaced in self
+                .store
+                .revoke_refresh_token_predecessor(refresh_token)
+                .await?
+            {
+                self.cache.remove(&replaced);
+            }
+        }
         if let Some(device_id) = &t.device_id {
             self.touch(&t.user_id, device_id);
         }

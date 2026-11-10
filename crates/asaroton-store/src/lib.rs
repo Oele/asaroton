@@ -104,6 +104,16 @@ pub trait UserStore: Send + Sync {
     async fn get_refresh_token(&self, token: &str) -> Result<Option<RefreshToken>>;
     async fn set_refresh_token_next(&self, token: &str, next: &str) -> Result<()>;
     async fn delete_refresh_token(&self, token: &str) -> Result<()>;
+    /// The access token that was handed out with this refresh token and has not expired,
+    /// the newest if there are several.
+    async fn access_token_for_refresh_token(
+        &self,
+        refresh_token: &str,
+    ) -> Result<Option<AccessToken>>;
+    /// Revokes what this refresh token replaced: the refresh token before it, and the access
+    /// tokens that were handed out with that one. Returns those access tokens. Called when
+    /// this refresh token, or an access token handed out with it, is used.
+    async fn revoke_refresh_token_predecessor(&self, refresh_token: &str) -> Result<Vec<String>>;
 }
 
 /// Rooms, aliases, and the event graph.

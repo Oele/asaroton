@@ -22,15 +22,29 @@ use tokio::sync::{Mutex, OwnedMutexGuard};
 use crate::Services;
 
 /// The transaction IDs that requests are answering right now.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub(crate) struct Turns(dashmap::DashMap<String, Arc<Mutex<()>>>);
 
 /// The turn of one transaction ID, for as long as this lives.
-#[derive(Debug)]
 pub struct TxnTurn<'a> {
     turns: &'a Turns,
     key: String,
     held: Option<OwnedMutexGuard<()>>,
+}
+
+// A key can hold a refresh token: neither of these shows its keys.
+impl std::fmt::Debug for Turns {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Turns")
+            .field("held", &self.0.len())
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for TxnTurn<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TxnTurn").finish_non_exhaustive()
+    }
 }
 
 impl Turns {
@@ -79,7 +93,17 @@ impl Services {
     /// is in it (a to-device message, say) must not be taken in twice.
     pub async fn federation_txn_turn(&self, origin: &ServerName, txn_id: &str) -> TxnTurn<'_> {
         // No user ID begins with a line break: these cannot meet the keys above.
-        self.txn_turns.take(format!("\n{origin}\n{txn_id}")).await
+        self.txn_turns
+            .take(format!("\nfederation\n{origin}\n{txn_id}"))
+            .await
+    }
+
+    /// Waits for the turn of a refresh token: a client that asks again with the same one
+    /// waits for the first request, and gets the same answer.
+    pub(crate) async fn refresh_turn(&self, refresh_token: &str) -> TxnTurn<'_> {
+        self.txn_turns
+            .take(format!("\nrefresh\n{refresh_token}"))
+            .await
     }
 }
 

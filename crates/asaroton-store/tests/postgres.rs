@@ -1559,6 +1559,117 @@ async fn a_call_dropped_while_its_transaction_begins_leaves_the_connection_clean
     }
 }
 
+/// A refresh token is kept until what replaced it is used, and then goes together with the
+/// access tokens that were handed out with it.
+#[sqlx::test(migrations = "./migrations")]
+async fn a_refresh_token_goes_when_what_replaced_it_is_used(pool: PgPool) {
+    use asaroton_store::RefreshToken;
+    let store = PostgresStore::from_pool(pool);
+    let alice = user_id!("@alice:example.org");
+    let device = device_id!("PHONE");
+    store
+        .create_user(NewUser {
+            user_id: alice.to_owned(),
+            password_hash: None,
+            display_name: None,
+            is_admin: false,
+            is_guest: false,
+            appservice_id: None,
+        })
+        .await
+        .unwrap();
+    store.create_device(alice, device, None).await.unwrap();
+    let now = now_ts();
+    let refresh = |token: &str, next: Option<&str>| RefreshToken {
+        token: token.into(),
+        user_id: alice.to_owned(),
+        device_id: device.to_owned(),
+        created_ts: now,
+        expires_ts: None,
+        next_token: next.map(Into::into),
+    };
+    let access = |token: &str, with: &str, created_ts: i64, expires_ts: i64| AccessToken {
+        token: token.into(),
+        user_id: alice.to_owned(),
+        device_id: Some(device.to_owned()),
+        created_ts,
+        expires_ts: Some(expires_ts),
+        refresh_token: Some(with.into()),
+        puppets_user_id: None,
+    };
+    // The old pair, the pair that replaced it, and a token that has nothing to do with them.
+    store
+        .create_refresh_token(refresh("r1", Some("r2")))
+        .await
+        .unwrap();
+    store
+        .create_refresh_token(refresh("r2", None))
+        .await
+        .unwrap();
+    for token in [
+        access("a1", "r1", now, now + 60_000),
+        access("a2-expired", "r2", now - 2, now - 1),
+        access("a2-older", "r2", now - 1, now + 60_000),
+        access("a2", "r2", now, now + 60_000),
+    ] {
+        store.create_access_token(token).await.unwrap();
+    }
+    store
+        .create_access_token(AccessToken {
+            token: "plain".into(),
+            user_id: alice.to_owned(),
+            device_id: Some(device.to_owned()),
+            created_ts: now,
+            expires_ts: None,
+            refresh_token: None,
+            puppets_user_id: None,
+        })
+        .await
+        .unwrap();
+
+    let handed_out = store.access_token_for_refresh_token("r2").await.unwrap();
+    assert_eq!(
+        handed_out.map(|t| t.token).as_deref(),
+        Some("a2"),
+        "the newest that has not expired"
+    );
+    assert!(
+        store
+            .access_token_for_refresh_token("none")
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // Nothing replaced r1, so using it revokes nothing.
+    assert!(
+        store
+            .revoke_refresh_token_predecessor("r1")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(store.get_refresh_token("r1").await.unwrap().is_some());
+    // Using r2, or an access token that came with it, ends r1 and a1.
+    assert_eq!(
+        store.revoke_refresh_token_predecessor("r2").await.unwrap(),
+        vec!["a1".to_owned()]
+    );
+    assert!(store.get_refresh_token("r1").await.unwrap().is_none());
+    assert!(store.get_access_token("a1").await.unwrap().is_none());
+    assert!(store.get_refresh_token("r2").await.unwrap().is_some());
+    assert!(store.get_access_token("a2").await.unwrap().is_some());
+    assert!(store.get_access_token("plain").await.unwrap().is_some());
+    assert!(
+        store
+            .revoke_refresh_token_predecessor("r2")
+            .await
+            .unwrap()
+            .is_empty(),
+        "once"
+    );
+}
+
 /// A table lock that keeps writers out and lets readers in, for as long as the returned
 /// transaction is open.
 async fn lock_against_writing(

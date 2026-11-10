@@ -544,6 +544,35 @@ impl UserStore for PostgresStore {
         .transpose()
     }
 
+    async fn access_token_for_refresh_token(
+        &self,
+        refresh_token: &str,
+    ) -> Result<Option<AccessToken>> {
+        let row: Option<TokenRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT {TOKEN_COLUMNS} FROM access_tokens
+             WHERE refresh_token = $1 AND (expires_ts IS NULL OR expires_ts > $2)
+             ORDER BY created_ts DESC LIMIT 1"
+        )))
+        .bind(refresh_token)
+        .bind(now_ts())
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(AccessToken::try_from).transpose()
+    }
+
+    async fn revoke_refresh_token_predecessor(&self, refresh_token: &str) -> Result<Vec<String>> {
+        // One statement, so that the refresh token does not go without its access tokens.
+        let rows = sqlx::query(
+            "WITH replaced AS (DELETE FROM refresh_tokens WHERE next_token = $1 RETURNING token)
+             DELETE FROM access_tokens WHERE refresh_token IN (SELECT token FROM replaced)
+             RETURNING token",
+        )
+        .bind(refresh_token)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(|r| r.get(0)).collect())
+    }
+
     async fn set_refresh_token_next(&self, token: &str, next: &str) -> Result<()> {
         sqlx::query("UPDATE refresh_tokens SET next_token = $2 WHERE token = $1")
             .bind(token)
