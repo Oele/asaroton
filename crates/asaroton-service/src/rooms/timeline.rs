@@ -339,13 +339,18 @@ impl Services {
                     // so the fetching gets a task of its own that is seen through.
                     let (federation, room, wanted) =
                         (self.federation(), room_id.to_owned(), limit.max(100));
-                    let got = tokio::spawn(async move { federation.backfill(&room, wanted).await })
-                        .await
-                        .unwrap_or_else(|e| Err(Error::internal(e.to_string())))
-                        .unwrap_or_else(|e| {
-                            tracing::debug!(%room_id, error = %e, "backfill failed");
-                            0
-                        });
+                    // Counted as a write: a server that stops waits for it.
+                    let write = self.closing.write();
+                    let got = tokio::spawn(async move {
+                        let _write = write;
+                        federation.backfill(&room, wanted).await
+                    })
+                    .await
+                    .unwrap_or_else(|e| Err(Error::internal(e.to_string())))
+                    .unwrap_or_else(|e| {
+                        tracing::debug!(%room_id, error = %e, "backfill failed");
+                        0
+                    });
                     if got > 0 {
                         continue;
                     }

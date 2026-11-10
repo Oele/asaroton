@@ -57,7 +57,7 @@ fn main() -> std::process::ExitCode {
         .build()
         .map_err(anyhow::Error::from)
         .and_then(|runtime| {
-            runtime.block_on(async move {
+            let result = runtime.block_on(async move {
                 match cli.command.unwrap_or(Command::Serve) {
                     Command::Serve => server::serve(config).await,
                     Command::Migrate => server::migrate_only(config).await,
@@ -66,7 +66,13 @@ fn main() -> std::process::ExitCode {
                     Command::ImportSynapse(args) => import_synapse::run(config, args).await,
                     Command::LivekitConfig => unreachable!("handled before the runtime starts"),
                 }
-            })
+            });
+            // What had to be finished is finished by now (a server that stops waits for its
+            // requests itself). Dropping the runtime would wait for every blocking call that
+            // is still out, and a name lookup for a server that does not answer can be out
+            // for half a minute: the process would not end when it is told to.
+            runtime.shutdown_background();
+            result
         });
     match result {
         Ok(()) => std::process::ExitCode::SUCCESS,

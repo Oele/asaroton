@@ -47,8 +47,12 @@ sqlx 0.9.0 does not roll back a transaction that is dropped while `BEGIN` is on 
 caller. `scripts/droppedrequesttest.py` cuts a few thousand requests off and checks what is
 left.
 
-Not covered: the server stopping. A restart ends every request where it is, and an event
-that was stored a moment before may be left without the note of its transaction ID.
+A server that is told to stop (SIGTERM, which every deploy sends) does the same from its
+side: it takes no new connections, answers the requests that wait for news at once with
+what they have, and gives the requests it is working on five seconds to finish, those
+whose client is gone included. A write takes milliseconds; what is still at work after
+five seconds is waiting for another server, and is cut off there as every request used to
+be. Only a server that is killed, or crashes, still ends a write where it is.
 
 ## Stream positions
 

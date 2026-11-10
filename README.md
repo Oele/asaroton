@@ -50,6 +50,7 @@ scripts/todevicetest.py          # to-device messages all arrive, however many a
 scripts/devicelisttest.py        # device lists as other servers see them: cross-signing signatures, prev_id, one stream ID per device (starts its own server)
 scripts/droppedrequesttest.py    # requests cut off halfway leave nothing half done: no open transaction, nothing twice on a second attempt, from a client or from another server (starts its own server)
 scripts/refreshtest.py           # a refresh whose answer is lost does not end the session: the old refresh token is good until the new pair is used (starts its own server)
+scripts/stoptest.py              # a server that is told to stop answers who waits, finishes the writes and leaves no message to be sent twice (starts its own server)
 scripts/deploy.sh [status]      # check, build and deploy: this machine first, then the remote host (see docs/deployment.md)
 watch/                          # weekly watch job: spec, Synapse, tests and server logs become issues, see its README
 ```

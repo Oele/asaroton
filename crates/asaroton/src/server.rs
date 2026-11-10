@@ -248,11 +248,13 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     }));
 
     let mut tasks = tokio::task::JoinSet::new();
+    let handle = axum_server::Handle::new();
     if config.listeners.client.enabled {
         tasks.spawn(listen(
             config.listeners.client.clone(),
             app.clone(),
             "client",
+            handle.clone(),
         ));
     }
     if config.listeners.federation.enabled && !config.federation.disabled {
@@ -260,18 +262,81 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
             config.listeners.federation.clone(),
             app,
             "federation",
+            handle.clone(),
         ));
     }
 
     tokio::select! {
-        _ = tokio::signal::ctrl_c() => tracing::info!("shutting down"),
+        signal = told_to_stop() => tracing::info!(signal, "told to stop"),
         res = tasks.join_next() => {
             if let Some(res) = res {
                 res.context("listener task panicked")??;
             }
+            return Ok(());
         }
     }
+    stop(&services, &handle, tasks, STOP_WITHIN).await;
     Ok(())
+}
+
+/// How long a stopping server gives the requests it is working on. A write takes
+/// milliseconds, so this is ample for what it is there for. What takes longer is waiting for
+/// another server (a key query, a join), and such a request, or a download, would otherwise
+/// keep every restart waiting: for as long as this lasts the server answers nobody. systemd
+/// kills a unit that has not ended after `TimeoutStopSec` (a minute and a half by default);
+/// this has to stay below that.
+const STOP_WITHIN: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Returns when the process is asked to end: SIGTERM, which is what `systemctl stop` sends,
+/// or SIGINT (Ctrl-C).
+async fn told_to_stop() -> &'static str {
+    let mut term = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+        Ok(term) => term,
+        Err(e) => {
+            tracing::warn!(error = %e, "cannot listen for SIGTERM; only Ctrl-C stops the server in an orderly way");
+            let _ = tokio::signal::ctrl_c().await;
+            return "SIGINT";
+        }
+    };
+    tokio::select! {
+        _ = term.recv() => "SIGTERM",
+        _ = tokio::signal::ctrl_c() => "SIGINT",
+    }
+}
+
+/// The orderly way out (see `asaroton_service::closing`): no new connections, the requests
+/// that wait for news are answered at once, and those that are being worked on get `within`
+/// to finish. A request that writes is waited for even when its client is gone.
+async fn stop(
+    services: &Services,
+    handle: &axum_server::Handle<std::net::SocketAddr>,
+    mut listeners: tokio::task::JoinSet<anyhow::Result<()>>,
+    within: std::time::Duration,
+) {
+    let started = std::time::Instant::now();
+    services.closing.begin();
+    // The listeners close what is idle, let each connection finish the request it is in, and
+    // cut off what is left when the time is up.
+    handle.graceful_shutdown(Some(within));
+    let finished = async {
+        while listeners.join_next().await.is_some() {}
+        services.closing.writes_done().await;
+    };
+    // A little longer than the listeners get, so that a write whose connection was cut off
+    // at the limit is not reported while it is still counted.
+    let limit = within + std::time::Duration::from_secs(1);
+    if tokio::time::timeout(limit, finished).await.is_ok() {
+        tracing::info!(
+            millis = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            "stopped: every request was finished"
+        );
+    } else {
+        tracing::warn!(
+            writes = services.closing.writes(),
+            connections = handle.connection_count(),
+            "stopping with requests unfinished: they did not end within the time limit"
+        );
+    }
 }
 
 /// Until build 8a6d4c34632d, device keys went to other servers without the signatures their
@@ -305,6 +370,7 @@ async fn listen(
     listener: crate::config::Listener,
     app: axum::Router,
     name: &'static str,
+    handle: axum_server::Handle<std::net::SocketAddr>,
 ) -> anyhow::Result<()> {
     let app = app.into_make_service_with_connect_info::<std::net::SocketAddr>();
     match listener.tls() {
@@ -320,12 +386,16 @@ async fn listen(
                 })?;
             tracing::info!(%name, bind = %listener.bind, "listening (https)");
             axum_server::bind_rustls(listener.bind, tls)
+                .handle(handle)
                 .serve(app)
                 .await?;
         }
         None => {
             tracing::info!(%name, bind = %listener.bind, "listening (http)");
-            axum_server::bind(listener.bind).serve(app).await?;
+            axum_server::bind(listener.bind)
+                .handle(handle)
+                .serve(app)
+                .await?;
         }
     }
     Ok(())

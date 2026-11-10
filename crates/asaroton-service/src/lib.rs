@@ -9,6 +9,7 @@
 pub mod account;
 pub mod admin;
 pub mod appservice;
+pub mod closing;
 pub mod config;
 pub mod delayed_events;
 pub mod e2ee;
@@ -69,6 +70,8 @@ pub struct Services {
     pub auth: Authenticator,
     pub uia: UiaSessions,
     pub notifier: Notifier,
+    /// What a stop of the server asks of the requests under way.
+    pub closing: closing::Closing,
     pub typing: typing::TypingState,
     pub presence: presence::PresenceMap,
     pub appservices: appservice::AppserviceRegistry,
@@ -153,6 +156,7 @@ impl Services {
             appservices,
             uia: UiaSessions::default(),
             notifier: Notifier::new(),
+            closing: closing::Closing::new(),
             typing: typing::TypingState::default(),
             presence: presence::PresenceMap::default(),
             sliding_sync: sliding_sync::SlidingSyncConnections::default(),

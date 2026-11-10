@@ -88,10 +88,16 @@ pub async fn websocket(
         sfu_path(&uri),
         query.map_or(String::new(), |q| format!("?{q}"))
     );
-    ws.on_upgrade(move |socket| relay(socket, url, turn_port))
+    let closing = app.closing.clone();
+    ws.on_upgrade(move |socket| relay(socket, url, turn_port, closing))
 }
 
-async fn relay(client: WebSocket, upstream_url: String, turn_port: Option<u16>) {
+async fn relay(
+    client: WebSocket,
+    upstream_url: String,
+    turn_port: Option<u16>,
+    closing: asaroton_service::closing::Closing,
+) {
     let (sfu, _) = match tokio_tungstenite::connect_async(&upstream_url).await {
         Ok(conn) => conn,
         Err(e) => {
@@ -141,6 +147,9 @@ async fn relay(client: WebSocket, upstream_url: String, turn_port: Option<u16>) 
     tokio::select! {
         () = client_to_sfu => {}
         () = sfu_to_client => {}
+        // A server that stops lets go of the connection, so that the client opens its next
+        // one to the server that follows; the call itself runs between client and SFU.
+        () = closing.begun() => {}
     }
 }
 

@@ -319,15 +319,19 @@ impl Services {
                 if remaining.is_zero() {
                     break;
                 }
-                let woke = notifier::wait_for(&mut rx, remaining, |n| match n {
+                let news = notifier::wait_for(&mut rx, remaining, |n| match n {
                     Notification::RoomEvent { room_id, .. }
                     | Notification::RoomEphemeral { room_id } => rooms.contains(room_id),
                     Notification::User { user_id: u } => *u == user_id,
                     // Cheap to re-check; the sync itself filters to relevant users.
                     Notification::DeviceLists { .. } | Notification::Presence { .. } => true,
                     Notification::Profile { .. } => !req.filter.profile_fields.is_empty(),
-                })
-                .await;
+                });
+                // A server that stops answers with what it has: nothing.
+                let woke = tokio::select! {
+                    woke = news => woke,
+                    () = self.closing.begun() => false,
+                };
                 if !woke {
                     break;
                 }

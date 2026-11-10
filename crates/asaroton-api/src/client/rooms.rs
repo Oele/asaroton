@@ -1675,7 +1675,10 @@ pub async fn timestamp_to_event(
         // event. In a task of its own, which is seen through when the client of this
         // reading request hangs up.
         let (federation, room) = (services.federation(), req.body.room_id.clone());
+        // Counted as a write: a server that stops waits for it.
+        let write = services.closing.write();
         let remote = tokio::spawn(async move {
+            let _write = write;
             federation
                 .remote_timestamp_to_event(&room, wanted, dir)
                 .await

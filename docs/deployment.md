@@ -85,6 +85,11 @@ proxy; asaroton answers them with an error when delegation is on. Clients discov
   when it dies, and gives up after ten failed starts within five minutes, so that a start
   that cannot succeed is not tried every three seconds for ever. A unit that gave up has to
   be cleared with `systemctl reset-failed asaroton` before it starts again.
+- On SIGTERM (`systemctl stop` and `restart`, so every deploy) the server takes no new
+  connections, answers the syncs that are waiting, gives the requests it is working on five
+  seconds to finish and then ends with status 0. Its last log line says whether every
+  request was finished or how many were not. `TimeoutStopSec` of the unit, 90 seconds unless
+  set, has to stay above those five seconds.
 - `deploy/systemd/` also holds a watchdog that runs beside asaroton as its own service and stops
   it when it sends more than 1000 federation transactions in a minute, queues more than 5000
   outbox rows, or stays above 60% CPU. A homeserver that misbehaves bothers every server it

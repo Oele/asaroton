@@ -98,7 +98,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/_matrix/{*rest}", axum::routing::any(unrecognized))
         .method_not_allowed_fallback(method_not_allowed)
         .fallback(not_found)
-        .layer(axum::middleware::from_fn(see_writes_through))
+        .layer(axum::middleware::from_fn_with_state(
+            state.closing.clone(),
+            see_writes_through,
+        ))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             crate::ratelimit::middleware,
@@ -155,16 +158,27 @@ async fn not_found() -> Response {
 /// of its own there.
 ///
 /// Nothing ends such a task early: a request that is seen through takes as long as it takes,
-/// which is bounded by the time limits on what it asks of other servers. Behind a reverse
-/// proxy that does not pass a client's hanging up on (Apache does not; it only gives up on a
-/// request after its own time limit), requests have always been seen through like this.
-async fn see_writes_through(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+/// which is bounded by the time limits on what it asks of other servers. A server that is
+/// told to stop waits for these tasks, for a while (`Closing::writes_done`), which is why
+/// each is counted. Behind a reverse proxy that does not pass a client's hanging up on
+/// (Apache does not; it only gives up on a request after its own time limit), requests have
+/// always been seen through like this.
+async fn see_writes_through(
+    State(closing): State<asaroton_service::closing::Closing>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
     if matches!(*req.method(), http::Method::GET | http::Method::HEAD)
         || waits_for_news(req.uri().path())
     {
         return next.run(req).await;
     }
-    match tokio::spawn(next.run(req)).await {
+    let write = closing.write();
+    let seen_through = tokio::spawn(async move {
+        let _write = write;
+        next.run(req).await
+    });
+    match seen_through.await {
         Ok(response) => response,
         Err(stopped) => match stopped.try_into_panic() {
             // A panic stays what it was: it takes the connection down.
@@ -236,7 +250,10 @@ mod tests {
                     .put(handler.clone())
                     .delete(handler),
             )
-            .layer(axum::middleware::from_fn(super::see_writes_through));
+            .layer(axum::middleware::from_fn_with_state(
+                asaroton_service::closing::Closing::new(),
+                super::see_writes_through,
+            ));
         let request = http::Request::builder()
             .method(method)
             .uri(format!("{path}{query}"))
@@ -268,9 +285,12 @@ mod tests {
 
     #[tokio::test]
     async fn a_request_that_is_seen_through_is_answered_as_before() {
-        let mut app: Router = Router::new()
-            .route(WRITE, post(|| async { "done" }))
-            .layer(axum::middleware::from_fn(super::see_writes_through));
+        let mut app: Router = Router::new().route(WRITE, post(|| async { "done" })).layer(
+            axum::middleware::from_fn_with_state(
+                asaroton_service::closing::Closing::new(),
+                super::see_writes_through,
+            ),
+        );
         let request = http::Request::builder()
             .method(http::Method::POST)
             .uri(WRITE)

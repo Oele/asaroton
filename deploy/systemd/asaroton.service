@@ -22,6 +22,8 @@ User=asaroton
 Group=asaroton
 ExecStart=/usr/local/bin/asaroton --config /etc/asaroton/asaroton.toml serve
 Restart=always
+# On SIGTERM the server gives the requests it is working on 5 seconds to finish. Keep
+# TimeoutStopSec, 90 seconds unless set here, above that.
 RestartSec=3
 LimitNOFILE=65536
 NoNewPrivileges=true

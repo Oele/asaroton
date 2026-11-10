@@ -100,7 +100,7 @@ def run(hs, peers):
     sliding = {"conn_id": "storm", "lists": {"all": {"ranges": [[0, 9]], "timeline_limit": 5, "required_state": []}}, "extensions": {"to_device": {"enabled": True}, "e2ee": {"enabled": True}}}
     st, r = hs.req("POST", f"{SLIDING}?timeout=0", sliding, c)
     assert st == 200, r
-    sliding["pos"] = r["pos"]
+    pos = r["pos"]  # goes in the query; without it the request starts anew and does not wait
 
     sent = []
 
@@ -118,7 +118,7 @@ def run(hs, peers):
             lambda: raw("POST", "/_matrix/client/v3/keys/upload", {"one_time_keys": {f"curve25519:{txn[:8]}": txn}}, token, host),
             lambda: raw("PUT", f"/_matrix/client/v3/rooms/{q(room)}/state/test.dropped/{txn[:4]}", {"n": txn}, token, host),
             lambda: raw("GET", f"/_matrix/client/v3/sync?timeout=2000&since={q(since)}", {}, c, host),
-            lambda: raw("POST", f"{SLIDING}?timeout=2000", sliding, c, host),
+            lambda: raw("POST", f"{SLIDING}?timeout=2000&pos={pos}", sliding, c, host),
         ][kind]()
 
     def storm(seed):
