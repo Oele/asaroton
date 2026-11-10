@@ -57,6 +57,9 @@ impl Services {
     ) -> Result<OwnedEventId> {
         // Transaction IDs are scoped to the device *and* the endpoint path (room + type).
         let txn_key = format!("send:{room_id}:{event_type}:{txn_id}");
+        // Held to the end: a second attempt with this ID waits here until the first has noted
+        // its answer, and then gets that.
+        let _turn = self.txn_turn(sender, device_id, &txn_key).await;
         if let Some(existing) = self
             .store
             .get_txn_event(sender, device_id, &txn_key)
@@ -135,7 +138,16 @@ impl Services {
             };
             return Ok(ev.pdu.event_id().to_owned());
         }
-        // Re-sending the exact current state is idempotent: return the existing event.
+        // Re-sending the exact current state is idempotent: return the existing event. A
+        // second attempt that comes in while the first is still at work waits for it here,
+        // and then finds the state it wanted to set.
+        let _turn = self
+            .txn_turn(
+                sender,
+                None,
+                &format!("state:{room_id}:{event_type}:{state_key}"),
+            )
+            .await;
         if let Some(current_id) = self
             .store
             .current_state_event(room_id, &StateEventType::from(event_type), state_key)
@@ -185,6 +197,7 @@ impl Services {
         reason: Option<&str>,
     ) -> Result<OwnedEventId> {
         let txn_key = format!("redact:{room_id}:{target}:{txn_id}");
+        let _turn = self.txn_turn(sender, device_id, &txn_key).await;
         if let Some(existing) = self
             .store
             .get_txn_event(sender, device_id, &txn_key)
@@ -321,10 +334,14 @@ impl Services {
                 // Out of local history: paginating backwards may pull more over federation.
                 if direction == Direction::Backwards && to.is_none() && backfills < 3 {
                     backfills += 1;
-                    let got = self
-                        .federation()
-                        .backfill(room_id, limit.max(100))
+                    // Fetching history stores it, event after event, each with the steps
+                    // that follow it. This request reads and ends when its client hangs up,
+                    // so the fetching gets a task of its own that is seen through.
+                    let (federation, room, wanted) =
+                        (self.federation(), room_id.to_owned(), limit.max(100));
+                    let got = tokio::spawn(async move { federation.backfill(&room, wanted).await })
                         .await
+                        .unwrap_or_else(|e| Err(Error::internal(e.to_string())))
                         .unwrap_or_else(|e| {
                             tracing::debug!(%room_id, error = %e, "backfill failed");
                             0

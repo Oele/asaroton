@@ -371,6 +371,10 @@ pub async fn send_to_device(
     let sender = req.sender()?;
     // Transaction-ID de-duplication for to-device sends.
     let txn_key = format!("to_device:{}", req.body.txn_id);
+    // A second attempt with this ID waits until the first has delivered and noted it.
+    let _turn = services
+        .txn_turn(&sender.user_id, sender.device_id.as_deref(), &txn_key)
+        .await;
     if services
         .store
         .get_txn_event(&sender.user_id, sender.device_id.as_deref(), &txn_key)

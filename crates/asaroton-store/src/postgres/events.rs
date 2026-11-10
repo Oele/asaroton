@@ -367,10 +367,12 @@ impl EventStore for PostgresStore {
         // Unlike the single-row writers, this is not moved into a task of its own. An event
         // comes with steps that follow its write (the room's context, the wake-ups, sending
         // it on, the transaction ID it answers), done by the caller under the room's lock.
-        // A request that is dropped halfway has to take the write down with it, which the
-        // transaction does: nothing is stored, and the number it took stays unused. (Dropped
-        // in the very moment of the commit, the event is stored and its registration ends a
-        // moment early. That has always left the follow-up steps undone.)
+        // A caller that is dropped halfway has to take the write down with it, which the
+        // transaction does: nothing is stored, and the number it took stays unused. Dropped
+        // in the very moment of the commit, the event is stored without those steps. That is
+        // why the requests that send events are not dropped when their client hangs up (the
+        // API's router sees every request that writes through to the end); what is left are
+        // callers that fetch history for a request that reads.
         let keep = self
             .search_plaintext
             .load(std::sync::atomic::Ordering::Relaxed);
@@ -718,21 +720,25 @@ impl EventStore for PostgresStore {
     async fn redact_event(&self, event_id: &EventId, redacted: &Pdu) -> Result<()> {
         // The redacted form carries `unsigned.redacted_because`, which clients need; keep it.
         let json = asaroton_core::canonical::to_string(redacted.raw());
+        // All or nothing: a redacted event that can still be found by its old text, or that
+        // still counts as a reaction, is not redacted.
+        let mut tx = self.begin().await?;
         sqlx::query(
             "UPDATE events SET original_json = COALESCE(original_json, json), json = $2 WHERE event_id = $1",
         )
         .bind(event_id.as_str())
         .bind(&json)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
         sqlx::query("DELETE FROM event_relations WHERE event_id = $1")
             .bind(event_id.as_str())
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
         sqlx::query("DELETE FROM event_search WHERE event_id = $1")
             .bind(event_id.as_str())
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
+        tx.commit().await?;
         Ok(())
     }
 

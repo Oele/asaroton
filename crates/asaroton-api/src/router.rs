@@ -98,6 +98,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/_matrix/{*rest}", axum::routing::any(unrecognized))
         .method_not_allowed_fallback(method_not_allowed)
         .fallback(not_found)
+        .layer(axum::middleware::from_fn(see_writes_through))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             crate::ratelimit::middleware,
@@ -132,6 +133,55 @@ async fn not_found() -> Response {
     (StatusCode::NOT_FOUND, "Not found").into_response()
 }
 
+/// A request that writes is seen through to the end, also when the client hangs up halfway.
+///
+/// The server stops working on a request the moment its connection is gone. For a request
+/// that reads, that is right: nobody is waiting for the answer. A request that writes is a
+/// row of steps that belong together. An event is stored, the room moves on to it, those who
+/// wait for it are woken, it goes out to other servers, and the transaction ID it answers
+/// is noted. Stopped after the first of these, the event was there and none of the rest: the
+/// client that tried again, as a client does when its connection is lost, got its message a
+/// second time, and the next sender built past the event.
+///
+/// So every request that is not a GET runs in a task of its own, which the connection waits
+/// for and does not take down with it. A client that tries again while the first attempt is
+/// still running waits its turn where transaction IDs are compared (`Services::txn_turn`),
+/// and so does another server with a transaction it sends again.
+///
+/// The exception is a request that waits for news (see [`waits_for_news`]): it has to end
+/// with its connection, or it would go on waiting for a client that has already asked again.
+/// That, and every GET, can still be dropped anywhere; what they write has to take that, and
+/// where it is more than one statement (history fetched from other servers) it gets a task
+/// of its own there.
+///
+/// Nothing ends such a task early: a request that is seen through takes as long as it takes,
+/// which is bounded by the time limits on what it asks of other servers. Behind a reverse
+/// proxy that does not pass a client's hanging up on (Apache does not; it only gives up on a
+/// request after its own time limit), requests have always been seen through like this.
+async fn see_writes_through(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    if matches!(*req.method(), http::Method::GET | http::Method::HEAD)
+        || waits_for_news(req.uri().path())
+    {
+        return next.run(req).await;
+    }
+    match tokio::spawn(next.run(req)).await {
+        Ok(response) => response,
+        Err(stopped) => match stopped.try_into_panic() {
+            // A panic stays what it was: it takes the connection down.
+            Ok(panic) => std::panic::resume_unwind(panic),
+            Err(stopped) => {
+                Error::internal(format!("the request did not finish: {stopped}")).into_response()
+            }
+        },
+    }
+}
+
+/// Whether a request that is not a GET waits for news instead of bringing some: sliding sync,
+/// which is a POST that stays open until there is something to tell.
+fn waits_for_news(path: &str) -> bool {
+    path == crate::client::sliding_sync::PATH
+}
+
 /// Answer CORS preflight requests and stamp CORS headers on every response.
 async fn cors_and_options(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
     if req.method() == http::Method::OPTIONS {
@@ -142,4 +192,91 @@ async fn cors_and_options(req: axum::extract::Request, next: axum::middleware::N
     let mut resp = next.run(req).await;
     add_cors(resp.headers_mut());
     resp
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
+
+    use axum::{
+        Router,
+        body::Body,
+        routing::{get, post},
+    };
+    use tower::Service;
+
+    const WRITE: &str = "/_matrix/client/v3/rooms/!r:example.org/send/m.room.message/1";
+    const READ: &str = "/_matrix/client/v3/sync";
+
+    /// Sends a request to a handler that takes a tenth of a second and hangs up long before
+    /// that. Returns how many times the handler got to its end.
+    async fn hang_up(method: http::Method, path: &'static str, query: &str) -> usize {
+        let finished = Arc::new(AtomicUsize::new(0));
+        let handler = {
+            let finished = Arc::clone(&finished);
+            move || {
+                let finished = Arc::clone(&finished);
+                async move {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    finished.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        };
+        let mut app: Router = Router::new()
+            .route(
+                path,
+                get(handler.clone())
+                    .post(handler.clone())
+                    .put(handler.clone())
+                    .delete(handler),
+            )
+            .layer(axum::middleware::from_fn(super::see_writes_through));
+        let request = http::Request::builder()
+            .method(method)
+            .uri(format!("{path}{query}"))
+            .body(Body::empty())
+            .unwrap();
+        let hung_up = tokio::time::timeout(Duration::from_millis(20), app.call(request)).await;
+        assert!(hung_up.is_err(), "the client was gone before the answer");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        finished.load(Ordering::SeqCst)
+    }
+
+    #[tokio::test]
+    async fn a_request_that_writes_is_seen_through_when_its_client_hangs_up() {
+        assert_eq!(hang_up(http::Method::PUT, WRITE, "").await, 1);
+        assert_eq!(hang_up(http::Method::POST, WRITE, "?ts=1").await, 1);
+        assert_eq!(hang_up(http::Method::DELETE, WRITE, "").await, 1);
+    }
+
+    #[tokio::test]
+    async fn a_request_that_reads_or_waits_for_news_ends_with_its_client() {
+        assert_eq!(hang_up(http::Method::GET, READ, "?timeout=30000").await, 0);
+        let sliding_sync = crate::client::sliding_sync::PATH;
+        assert_eq!(hang_up(http::Method::POST, sliding_sync, "").await, 0);
+        assert_eq!(
+            hang_up(http::Method::POST, sliding_sync, "?timeout=30000&pos=5").await,
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn a_request_that_is_seen_through_is_answered_as_before() {
+        let mut app: Router = Router::new()
+            .route(WRITE, post(|| async { "done" }))
+            .layer(axum::middleware::from_fn(super::see_writes_through));
+        let request = http::Request::builder()
+            .method(http::Method::POST)
+            .uri(WRITE)
+            .body(Body::empty())
+            .unwrap();
+        let response = app.call(request).await.unwrap();
+        assert_eq!(response.status(), http::StatusCode::OK);
+    }
 }

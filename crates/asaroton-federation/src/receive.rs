@@ -117,6 +117,10 @@ impl Federation {
             ));
         }
         let txn_id = req.transaction_id.to_string();
+        // Held to the end. A server that got no answer in time sends the transaction again,
+        // and this one may still be at work on it: requests that write are seen through. The
+        // second waits here and is then answered with what the first found.
+        let _turn = self.services.federation_txn_turn(origin, &txn_id).await;
         if let Some(prev) = self
             .services
             .store

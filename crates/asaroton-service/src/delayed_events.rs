@@ -79,6 +79,15 @@ impl Services {
         if !content.is_object() {
             return Err(Error::bad_json("Event content must be an object."));
         }
+        // A second attempt with the same transaction ID waits until the first has scheduled
+        // its event, and then gets that one.
+        let _turn = match txn_id {
+            Some(txn) => Some(
+                self.txn_turn(user_id, device_id, &format!("delayed:{txn}"))
+                    .await,
+            ),
+            None => None,
+        };
         if let Some(txn) = txn_id
             && let Some(existing) = self
                 .store

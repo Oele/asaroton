@@ -93,13 +93,10 @@ pub async fn create(
         power_level_content_override: pl_override,
         initial_state,
     };
-    // A room is written as a row of events. In a task of its own that goes on to the end
-    // when the client hangs up halfway; as part of the request it would stop there, and a
-    // room without, say, its encryption event would be left behind.
-    let app = std::sync::Arc::clone(&services);
-    let room_id = tokio::spawn(async move { app.create_room(request).await })
-        .await
-        .map_err(|e| Error::internal(format!("creating a room: {e}")))??;
+    // A room is written as a row of events, and one without, say, its encryption event must
+    // not be left behind. Like every request that writes, this one goes on to the end when
+    // the client hangs up halfway (`router::see_writes_through`).
+    let room_id = services.create_room(request).await?;
     Ok(create_room::v3::Response::new(room_id))
 }
 
@@ -1411,20 +1408,16 @@ pub async fn upgrade(
             "Unsupported room version.",
         ));
     }
-    // Like createRoom: in a task of its own, so that a client that hangs up halfway does not
-    // leave a successor room without its state, or an old room that was never closed.
-    let app = std::sync::Arc::clone(&services);
-    let (user, old_room) = (sender.user_id.clone(), req.body.room_id.clone());
-    let (new_version, creators) = (
-        req.body.new_version.clone(),
-        req.body.additional_creators.clone(),
-    );
-    let new_room = tokio::spawn(async move {
-        app.upgrade_room(&user, &old_room, new_version, creators)
-            .await
-    })
-    .await
-    .map_err(|e| Error::internal(format!("upgrading a room: {e}")))??;
+    // Like createRoom, this goes on to the end when the client hangs up halfway: a successor
+    // room without its state, or an old room that was never closed, must not be left behind.
+    let new_room = services
+        .upgrade_room(
+            &sender.user_id,
+            &req.body.room_id,
+            req.body.new_version.clone(),
+            req.body.additional_creators.clone(),
+        )
+        .await?;
     Ok(room::upgrade_room::v3::Response::new(new_room))
 }
 
@@ -1678,11 +1671,19 @@ pub async fn timestamp_to_event(
     let best = if exact {
         local
     } else {
-        let remote = services
-            .federation()
-            .remote_timestamp_to_event(&req.body.room_id, wanted, dir)
-            .await
-            .unwrap_or(None);
+        // The answer of another server is stored as history, with the steps that follow an
+        // event. In a task of its own, which is seen through when the client of this
+        // reading request hangs up.
+        let (federation, room) = (services.federation(), req.body.room_id.clone());
+        let remote = tokio::spawn(async move {
+            federation
+                .remote_timestamp_to_event(&room, wanted, dir)
+                .await
+        })
+        .await
+        .ok()
+        .and_then(std::result::Result::ok)
+        .flatten();
         match (local, remote) {
             (Some(l), Some(r)) => {
                 let closer = match dir {

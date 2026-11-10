@@ -26,6 +26,30 @@ path in `asaroton-service`:
 6. Persist atomically, assign stream positions.
 7. Notify sync, federation sender, push and appservices.
 
+## Requests that are cut off
+
+A client can hang up in the middle of a request, and the HTTP server then stops working on
+that request wherever it is. For a request that reads, that is what should happen. A request
+that writes is a row of steps that belong together (store the event, move the room on to
+it, wake those who wait, send it on, note the transaction ID it answers), so the router runs
+every request that is not a `GET` in a task of its own: the connection waits for it and does
+not take it down. Sliding sync is the exception, a `POST` that waits for news and has to end
+with its client. A client that tries again while its first attempt is still running waits
+its turn where transaction IDs are compared, and gets the first attempt's answer; so does
+another server that sends a transaction again.
+
+What can still be dropped anywhere (every `GET`, sliding sync) has to leave the database
+as it found it. Where a reading request writes more than one statement, which is when it
+fetches history from other servers, that part runs in a task of its own as well.
+Transactions roll back when they are dropped, with one hole that the store closes itself:
+sqlx 0.9.0 does not roll back a transaction that is dropped while `BEGIN` is on its way, so
+`PostgresStore::begin` begins every transaction in a task that is not dropped with its
+caller. `scripts/droppedrequesttest.py` cuts a few thousand requests off and checks what is
+left.
+
+Not covered: the server stopping. A restart ends every request where it is, and an event
+that was stored a moment before may be left without the note of its transaction ID.
+
 ## Stream positions
 
 Everything that can appear in `/sync` carries a monotonically increasing stream id drawn

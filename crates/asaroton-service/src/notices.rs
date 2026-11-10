@@ -95,6 +95,9 @@ impl Services {
         if !self.is_local(target) || self.store.get_user(target).await?.is_none() {
             return Err(Error::not_found("Unknown local user."));
         }
+        // One notice at a time for a user: two that find no room for notices would each
+        // make one.
+        let _turn = self.txn_turn(target, None, "notice").await;
         let room_id = match self.server_notice_room_for(target).await? {
             Some(room) => {
                 let membership = self

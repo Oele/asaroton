@@ -48,6 +48,7 @@ scripts/fedinvitetest.py         # an invitation to another server goes there on
 scripts/softfailtest.py          # a soft-failed event (a banned user's message that builds on older history) is kept and not shown to clients (starts its own server)
 scripts/todevicetest.py          # to-device messages all arrive, however many are waiting, over both sync flavours (starts its own server)
 scripts/devicelisttest.py        # device lists as other servers see them: cross-signing signatures, prev_id, one stream ID per device (starts its own server)
+scripts/droppedrequesttest.py    # requests cut off halfway leave nothing half done: no open transaction, nothing twice on a second attempt, from a client or from another server (starts its own server)
 scripts/deploy.sh [status]      # check, build and deploy: this machine first, then the remote host (see docs/deployment.md)
 watch/                          # weekly watch job: spec, Synapse, tests and server logs become issues, see its README
 ```

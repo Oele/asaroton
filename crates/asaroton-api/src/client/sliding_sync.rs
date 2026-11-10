@@ -13,6 +13,10 @@ use serde_json::{Map, Value, json};
 
 use crate::{AppState, Result, Ruma, client::rooms::client_event};
 
+/// Where sliding sync is served. The router needs to know it apart from the other requests
+/// that are not a GET: this one waits for news and ends when its client hangs up.
+pub(crate) const PATH: &str = "/_matrix/client/unstable/org.matrix.simplified_msc3575/sync";
+
 fn room_type_filter(f: &ruma::directory::RoomTypeFilter) -> Option<String> {
     match serde_json::to_value(f) {
         Ok(Value::String(s)) => Some(s),

@@ -150,15 +150,15 @@ impl PostgresStore {
     /// Begins a transaction on a connection from the pool. Every transaction of the store
     /// starts here, and none with the pool's own `begin`.
     ///
-    /// It begins in a task of its own, because a caller may be dropped at any moment (a client
-    /// that hangs up takes its request down wherever it is) and sqlx 0.9.0 cannot take that
-    /// between sending BEGIN and reading the answer. It counts the transaction only once the
-    /// answer is in, and a transaction it has not counted is one it does not roll back: the
-    /// connection went back into the pool inside a transaction. The next user's statements
-    /// then ran in a transaction nobody was going to commit, so that a row written and
-    /// acknowledged was not there for any other connection, until a later user of that
-    /// connection happened to commit (PostgreSQL: "there is already a transaction in
-    /// progress") or to roll back.
+    /// It begins in a task of its own, because a caller may be dropped at any moment (a
+    /// request that reads or waits ends wherever it is when its client hangs up) and sqlx
+    /// 0.9.0 cannot take that between sending BEGIN and reading the answer. It counts the
+    /// transaction only once the answer is in, and a transaction it has not counted is one
+    /// it does not roll back: the connection went back into the pool inside a transaction.
+    /// The next user's statements then ran in a transaction nobody was going to commit, so
+    /// that a row written and acknowledged was not there for any other connection, until a
+    /// later user of that connection happened to commit (PostgreSQL: "there is already a
+    /// transaction in progress") or to roll back.
     ///
     /// The task is not dropped with the caller. It sees BEGIN through, and a transaction that
     /// nobody is waiting for any more is rolled back like any other that is dropped.

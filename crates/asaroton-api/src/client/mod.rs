@@ -462,7 +462,7 @@ pub fn routes(router: Router<AppState>) -> Router<AppState> {
             axum::routing::get(thirdparty_user_by_id_handler),
         )
         .route(
-            "/_matrix/client/unstable/org.matrix.simplified_msc3575/sync",
+            sliding_sync::PATH,
             axum::routing::post(sliding_sync_handler),
         )
         // Matrix Authentication Service: discovery for clients, management API for MAS.
