@@ -22,6 +22,7 @@ thiserror.workspace = true
 tracing.workspace = true
 tokio.workspace = true
 reqwest.workspace = true
+percent-encoding.workspace = true
 html-escape.workspace = true
 hickory-resolver.workspace = true
 futures.workspace = true

@@ -26,6 +26,13 @@ impl Federation {
         let resp = get(parsed.clone()).send().await.map_err(|e| {
             Error::Protocol(format!("fetching URL: {}", crate::client::error_chain(&e)))
         })?;
+        if is_a_gate(&parsed, resp.url()) {
+            // The site did not show us the page: it sent us to another site to be let in
+            // first (a consent page, a login). What is there is not a preview of what the
+            // user linked, so there is none; an answer without a title shows no card.
+            tracing::debug!(asked = %parsed, ended = %resp.url(), "URL preview ended at a gate");
+            return Ok(json!({}));
+        }
         let content_type = resp
             .headers()
             .get(http::header::CONTENT_TYPE)
@@ -121,6 +128,41 @@ impl Federation {
             }
         }
     }
+}
+
+/// Whether a fetch of `asked` that ended at `ended` was sent to a gate: a page on another
+/// host that is told, in its address, where to send the visitor back to. That is how consent
+/// pages and logins work (`https://consent.example/?callbackUrl=https%3A%2F%2Fnews.example%2F…`),
+/// and their title and picture are their own, not the linked page's.
+///
+/// A plain redirect to another host (a link shortener, a site that moved) names no way back
+/// and is followed as before.
+fn is_a_gate(asked: &reqwest::Url, ended: &reqwest::Url) -> bool {
+    let (Some(from), Some(to)) = (asked.host_str(), ended.host_str()) else {
+        return false;
+    };
+    if from.eq_ignore_ascii_case(to) {
+        return false;
+    }
+    let from = from.to_ascii_lowercase();
+    // The way back is often wrapped more than once (the gate's own "accept" address around
+    // the page), so a value is unwrapped a few times.
+    ended.query_pairs().any(|(_, value)| {
+        let mut value = value.into_owned();
+        for _ in 0..3 {
+            if value.to_ascii_lowercase().contains(&from) {
+                return true;
+            }
+            let unwrapped = percent_encoding::percent_decode_str(&value)
+                .decode_utf8_lossy()
+                .into_owned();
+            if unwrapped == value {
+                break;
+            }
+            value = unwrapped;
+        }
+        false
+    })
 }
 
 /// A plain HTTP client for URLs from the operator's own configuration (application
@@ -224,6 +266,39 @@ mod tests {
         assert_eq!(tags[1], ("description".into(), "Desc".into()));
         assert_eq!(tags[2].1, "/img.png");
         assert_eq!(title_tag(html).as_deref(), Some("T & U"));
+    }
+
+    #[test]
+    fn a_page_that_sends_the_visitor_elsewhere_to_be_let_in_is_a_gate() {
+        let url = |s: &str| reqwest::Url::parse(s).unwrap();
+        let article = url("https://www.nu.nl/economie/6416170/een-artikel.html");
+        // The consent page of a news publisher, as it answers: the way back wrapped twice.
+        assert!(is_a_gate(
+            &article,
+            &url(
+                "https://myprivacy.dpgmedia.nl/consent?siteKey=abc&callbackUrl=https%3A%2F%2Fwww.nu.nl%2Fprivacy-gate%2Faccept%3FredirectUri%3D%252Feconomie%252F6416170%252Feen-artikel.html"
+            )
+        ));
+        // A login that is told where to return to.
+        assert!(is_a_gate(
+            &url("https://docs.example.org/page"),
+            &url("https://login.example.com/?return_to=https://DOCS.example.org/page")
+        ));
+        // The page itself, also after a redirect within the site.
+        assert!(!is_a_gate(&article, &article));
+        assert!(!is_a_gate(
+            &article,
+            &url("https://www.nu.nl/artikel?ref=www.nu.nl")
+        ));
+        // Another host that names no way back: a shortened link, a site that moved.
+        assert!(!is_a_gate(
+            &url("https://short.example/abc"),
+            &url("https://news.example.org/story?utm_source=feed")
+        ));
+        assert!(!is_a_gate(
+            &url("http://example.org/"),
+            &url("https://www.example.org/")
+        ));
     }
 
     #[test]

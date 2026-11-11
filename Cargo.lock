@@ -242,6 +242,7 @@ dependencies = [
  "http",
  "image",
  "parking_lot",
+ "percent-encoding",
  "rand 0.9.5",
  "reqwest",
  "ruma",
