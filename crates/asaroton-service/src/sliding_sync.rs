@@ -461,19 +461,29 @@ struct RoomSelection {
 
 impl ExtensionScope {
     fn applies(&self, room: &RoomSelection) -> bool {
-        if self.lists.is_none() && self.rooms.is_none() {
-            return true;
-        }
-        if let Some(l) = &self.lists
-            && room.lists.iter().any(|n| l.contains(n))
-        {
+        self.applies_to(&room.room_id, &room.lists, room.subscribed)
+    }
+
+    /// Whether the extension covers a room that is in `lists` and, when `subscribed`, among
+    /// the request's room subscriptions.
+    fn applies_to(&self, room_id: &RoomId, lists: &[String], subscribed: bool) -> bool {
+        // Each of the two is "all of them" when it is left out (MSC4186): a request that names
+        // only `rooms` still means the rooms of every list, and the other way round. `*` in
+        // `lists` says the same in so many words.
+        let in_a_wanted_list = match &self.lists {
+            None => !lists.is_empty(),
+            Some(wanted) => lists
+                .iter()
+                .any(|n| wanted.contains(n) || wanted.iter().any(|w| w == "*")),
+        };
+        if in_a_wanted_list || (self.rooms.is_none() && subscribed) {
             return true;
         }
         if let Some(r) = &self.rooms {
             for e in r {
                 match e {
-                    ScopeRoom::AllSubscribed if room.subscribed => return true,
-                    ScopeRoom::Room(id) if *id == room.room_id => return true,
+                    ScopeRoom::AllSubscribed if subscribed => return true,
+                    ScopeRoom::Room(id) if id == room_id => return true,
                     _ => {}
                 }
             }
@@ -1543,6 +1553,40 @@ impl Services {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_extension_covers_all_lists_and_all_subscriptions_unless_it_says_otherwise() {
+        let room = OwnedRoomId::try_from("!r:x.test").unwrap();
+        let other = OwnedRoomId::try_from("!o:x.test").unwrap();
+        let in_list = ["all_rooms".to_owned()];
+        let scope = |lists: Option<&[&str]>, rooms: Option<Vec<ScopeRoom>>| ExtensionScope {
+            lists: lists.map(|l| l.iter().map(|s| (*s).to_owned()).collect()),
+            rooms,
+        };
+        // Nothing said: every room of the request.
+        assert!(scope(None, None).applies_to(&room, &in_list, false));
+        assert!(scope(None, None).applies_to(&room, &[], true));
+        // Only `rooms` said (what the Rust SDK and the report's client send): the lists are
+        // still all of them. This is the case that left a list's rooms without receipts.
+        let all_subscribed = || Some(vec![ScopeRoom::AllSubscribed]);
+        assert!(scope(None, all_subscribed()).applies_to(&room, &in_list, false));
+        assert!(scope(None, all_subscribed()).applies_to(&room, &[], true));
+        // Only `lists` said: the subscriptions are still all of them.
+        assert!(scope(Some(&["all_rooms"]), None).applies_to(&room, &[], true));
+        assert!(scope(Some(&["*"]), None).applies_to(&room, &in_list, false));
+        // Said and not matching.
+        assert!(!scope(Some(&["favourites"]), None).applies_to(&room, &in_list, false));
+        assert!(!scope(Some(&[]), Some(vec![])).applies_to(&room, &in_list, true));
+        let only_other = Some(vec![ScopeRoom::Room(other.clone())]);
+        assert!(!scope(Some(&[]), only_other).applies_to(&room, &in_list, true));
+        assert!(
+            scope(Some(&[]), Some(vec![ScopeRoom::Room(room.clone())])).applies_to(
+                &room,
+                &[],
+                false
+            )
+        );
+    }
 
     /// A state event for these tests: only its type, state key and ID matter.
     fn state_event(ty: &str, key: &str, n: u32) -> StoredEvent {

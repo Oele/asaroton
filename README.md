@@ -53,6 +53,7 @@ scripts/refreshtest.py           # a refresh whose answer is lost does not end t
 scripts/stoptest.py              # a server that is told to stop answers who waits, finishes the writes and leaves no message to be sent twice (starts its own server)
 scripts/dehydratedtest.py        # dehydrated devices (MSC3814): others see the device and send it keys, its owner reads them out page by page, replacing and deleting (starts its own server)
 scripts/closedservertest.py      # a server with federation disabled still calls push gateways and feeds application services (starts its own server)
+scripts/ssreceiptstest.py        # sliding sync hands out read receipts for the rooms of a list, whichever of `lists` and `rooms` the extension names, and again after a lost answer (starts its own server)
 scripts/deploy.sh [status]      # check, build and deploy: this machine first, then the remote host (see docs/deployment.md)
 watch/                          # weekly watch job: spec, Synapse, tests and server logs become issues, see its README
 ```
