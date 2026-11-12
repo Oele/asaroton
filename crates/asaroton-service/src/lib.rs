@@ -227,7 +227,18 @@ impl Services {
         }
         let (store, notifier) = (Arc::clone(&self.store), self.notifier.clone());
         tokio::spawn(async move {
+            let held = std::time::Instant::now();
             store.stream_position_settles(stream, position).await;
+            // Normally a matter of milliseconds. A wake-up that was held for long is worth
+            // knowing about: its sync sat waiting all that time (issue #53).
+            if held.elapsed() >= std::time::Duration::from_secs(1) {
+                tracing::warn!(
+                    ?stream,
+                    position,
+                    millis = u64::try_from(held.elapsed().as_millis()).unwrap_or(u64::MAX),
+                    "a wake-up waited for an earlier write to the stream to end"
+                );
+            }
             for n in wake {
                 notifier.notify(n);
             }

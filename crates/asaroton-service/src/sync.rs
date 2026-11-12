@@ -264,9 +264,6 @@ pub struct SyncResult {
     /// Profile updates per user (MSC4429): the fields that changed, with `null` for one that
     /// was cleared; `None` for a user whose profile the client can stop tracking.
     pub profile_updates: BTreeMap<OwnedUserId, Option<BTreeMap<String, Value>>>,
-    /// A room of the user is left out because `createRoom` is still writing it; it comes
-    /// when it is done.
-    pub(crate) room_held_back: bool,
 }
 
 impl SyncResult {
@@ -310,10 +307,11 @@ impl Services {
                 .map(|m| m.room_id)
                 .collect();
             let deadline = tokio::time::Instant::now() + req.timeout;
-            // What woke the sync is answered, with one exception: the membership event of a
-            // room that `createRoom` is still writing wakes the creator's sync before there
-            // is anything to show. That goes back to waiting; the end of the creation wakes
-            // it again.
+            // A sync is woken by more than concerns it: anybody's presence or device list,
+            // and the membership event of a room that `createRoom` is still writing, which
+            // wakes the creator's sync before there is anything to show. When there turns out
+            // to be nothing to tell, it goes back to waiting; an empty answer long before the
+            // timeout only makes the client ask again.
             for _ in 0..20 {
                 let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
                 if remaining.is_zero() {
@@ -336,7 +334,7 @@ impl Services {
                     break;
                 }
                 result = self.compute_sync(&req).await?;
-                if !(result.is_empty() && result.room_held_back) {
+                if !result.is_empty() {
                     break;
                 }
             }
@@ -390,20 +388,17 @@ impl Services {
         // short of the room's first event, so that the next one finds the room joined inside
         // its window and sends it in full. Until the room is done, which takes a moment, the
         // events of other rooms that came after wait with it.
-        let mut room_held_back = false;
         for unfinished in self.rooms_in_the_making.under_way(user) {
             let before = all_memberships.len();
             all_memberships.retain(|m| m.room_id != unfinished.room_id);
-            if all_memberships.len() < before {
-                room_held_back = true;
-                if let Some(first) = unfinished.first_event {
-                    now.events = now.events.min(first - 1).max(since.map_or(0, |s| s.events));
-                }
+            if all_memberships.len() < before
+                && let Some(first) = unfinished.first_event
+            {
+                now.events = now.events.min(first - 1).max(since.map_or(0, |s| s.events));
             }
         }
         let mut out = SyncResult {
             next_batch: now,
-            room_held_back,
             ..Default::default()
         };
         // Every joined room and the membership changes in them since the token: device lists
