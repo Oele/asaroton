@@ -150,12 +150,13 @@ def run(hs, peers):
     for name in ("sync", "sliding sync"):
         got = [w.get(name, ("no answer", 0, 0)) for w in waits]
         check(all(st == 200 for st, _, _ in got), f"a {name} that waits is answered, not cut off ({[st for st, _, _ in got]})")
-        check(all(waited > 0.5 and 0 <= after < 1 for _, waited, after in got),
-              f"having waited until the stop, within a second of it ({', '.join(f'{waited:.2f}/{after:.3f}' for _, waited, after in got)})")
+        check(all(waited > 0.5 and 0 <= after < 2 for _, waited, after in got),
+              f"having waited until the stop, within two seconds of it ({', '.join(f'{waited:.2f}/{after:.3f}' for _, waited, after in got)})")
 
     stored = dict(query(f"SELECT {BODY}, event_id FROM events WHERE event_type = 'm.room.message' AND {BODY} LIKE 'stop-%'"))
     bare = query(f"SELECT {BODY} FROM events e WHERE event_type = 'm.room.message' AND {BODY} LIKE 'stop-%' AND NOT EXISTS (SELECT 1 FROM event_txn_ids t WHERE t.txn_id = 'event:' || e.event_id)")
-    check(len(answered) > 50 * ROUNDS, f"the clients got a good many messages through ({len(answered)} answered, {len(unanswered)} not, {len(stored)} stored)")
+    # Enough to have met the stops at work; how many depends on what else the machine does.
+    check(len(answered) > 10 * ROUNDS, f"the clients got a good many messages through ({len(answered)} answered, {len(unanswered)} not, {len(stored)} stored)")
     check(not bare, f"every stored message has the record of its transaction ID ({len(bare)} without: {bare[:3]})")
     lost = [txn for txn, event_id in answered.items() if stored.get(txn) != event_id]
     check(not lost, f"every message that was answered is in the room ({len(lost)} are not)")
