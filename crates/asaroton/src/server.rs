@@ -212,6 +212,12 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     tracing::info!(server_name = %config.server_name, key = %services.signing_key.key_id(), "asaroton starting");
 
     let federation = if config.federation.disabled {
+        // A closed server still wakes its own users and feeds its application services.
+        asaroton_federation::start_without_federation(
+            &services,
+            &federation_config(&config).allowed_internal_ranges,
+        )
+        .context("starting the push and application service workers")?;
         None
     } else {
         let fed = Federation::new(Arc::clone(&services), federation_config(&config))

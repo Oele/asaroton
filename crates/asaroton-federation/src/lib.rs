@@ -111,6 +111,26 @@ impl std::fmt::Debug for Federation {
     }
 }
 
+/// Starts the workers that carry what happens here to those who asked to be told: push
+/// gateways for the users with a pusher, and application services. They live in this crate
+/// for the HTTP client they share with federation, and are no part of it: a server with
+/// federation disabled starts them by themselves ([`start_without_federation`]).
+fn start_local_workers(services: &Arc<Services>, outbound: outbound::Outbound) {
+    appservice::start(services);
+    push::start(Arc::clone(services), outbound);
+}
+
+/// What a server with federation disabled still does for its own users: see
+/// [`start_local_workers`]. `allowed_internal_ranges` is the federation setting of that
+/// name, which also says which internal addresses a pusher may name.
+pub fn start_without_federation(
+    services: &Arc<Services>,
+    allowed_internal_ranges: &[String],
+) -> Result<()> {
+    start_local_workers(services, outbound::Outbound::new(allowed_internal_ranges)?);
+    Ok(())
+}
+
 impl Federation {
     /// Build the federation subsystem and start the outbound sender.
     pub fn new(services: Arc<Services>, config: FederationConfig) -> Result<Arc<Self>> {
@@ -138,8 +158,7 @@ impl Federation {
         sender::start(Arc::clone(&fed));
         housekeeping::start(Arc::clone(&fed.services));
         recheck::start(&fed);
-        appservice::start(&fed);
-        push::start(&fed);
+        start_local_workers(&fed.services, fed.outbound.clone());
         // Keep the event cache bounded.
         let cache_owner = Arc::clone(&fed);
         tokio::spawn(async move {

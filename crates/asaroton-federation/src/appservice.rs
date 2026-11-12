@@ -171,14 +171,14 @@ fn urlencode(s: &str) -> String {
 }
 
 /// Start one transaction worker per appservice with a URL.
-pub fn start(fed: &Arc<Federation>) {
-    for a in fed.services.appservices.all() {
+pub fn start(services: &Arc<Services>) {
+    for a in services.appservices.all() {
         if a.url.is_none() {
             continue;
         }
-        let fed = Arc::clone(fed);
+        let services = Arc::clone(services);
         let a = Arc::clone(a);
-        tokio::spawn(async move { worker(fed, a).await });
+        tokio::spawn(async move { worker(services, a).await });
     }
 }
 
@@ -191,8 +191,8 @@ struct EphemeralCursor {
     presence: i64,
 }
 
-async fn worker(fed: Arc<Federation>, a: Arc<asaroton_service::appservice::Appservice>) {
-    let services: &Services = &fed.services;
+async fn worker(services: Arc<Services>, a: Arc<asaroton_service::appservice::Appservice>) {
+    let services: &Services = &services;
     let mut rx = services.notifier.subscribe();
     let mut retry = MIN_RETRY;
     let mut ephemeral = EphemeralCursor {

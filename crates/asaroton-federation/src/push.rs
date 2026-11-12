@@ -11,15 +11,13 @@ use asaroton_store::{Pusher, StoredEvent};
 use ruma::{OwnedUserId, RoomId, events::StateEventType};
 use serde_json::{Value, json};
 
-use crate::{Federation, outbound::Outbound};
+use crate::outbound::Outbound;
 
-pub fn start(fed: &Arc<Federation>) {
-    let fed = Arc::clone(fed);
-    tokio::spawn(async move { worker(&fed).await });
+pub fn start(services: Arc<Services>, outbound: Outbound) {
+    tokio::spawn(async move { worker(&services, &outbound).await });
 }
 
-async fn worker(fed: &Arc<Federation>) {
-    let services: &Services = &fed.services;
+async fn worker(services: &Services, outbound: &Outbound) {
     let mut rx = services.notifier.subscribe();
     // Most users have no pusher; the set of those who do is kept here rather than queried
     // per member per event. It is read again when a pusher is set or removed, and every few
@@ -55,14 +53,8 @@ async fn worker(fed: &Arc<Federation>) {
         if with_pushers.is_empty() {
             continue;
         }
-        if let Err(e) = handle_event(
-            services,
-            &fed.outbound,
-            room_id,
-            *stream_ordering,
-            &with_pushers,
-        )
-        .await
+        if let Err(e) =
+            handle_event(services, outbound, room_id, *stream_ordering, &with_pushers).await
         {
             tracing::warn!(%room_id, error = %e, "push delivery failed");
         }
