@@ -366,11 +366,13 @@ impl Services {
         } else {
             cursor.0
         };
-        // Backwards, an empty page past the start of the room's history (or the `to` bound)
-        // carries no `end`, as the spec says and as Synapse does; a page with events always
-        // has one, and forwards `end` points at the live edge so clients can keep polling.
+        // An empty page with nothing beyond it carries no `end`, as the spec says and as
+        // Synapse does: backwards that is the start of the room's history (or the `to`
+        // bound), forwards the newest event. A client that pages until `end` is missing
+        // (the Rust SDK's timeline around one event does) would otherwise never stop. A page
+        // with events always has one.
         let end = match direction {
-            Direction::Backwards if exhausted && events.is_empty() => None,
+            _ if exhausted && events.is_empty() => None,
             Direction::Backwards => Some(StreamToken(last - 1)),
             Direction::Forwards => Some(StreamToken(last)),
         };

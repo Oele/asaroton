@@ -4,6 +4,9 @@
   - `GET /capabilities` is served under the old `r0` prefix as well as under `v3`.
   - `GET /account/3pid` is an empty list on a server that keeps no e-mail addresses or phone
     numbers, not an unknown endpoint.
+  - `GET /rooms/{roomId}/messages` leaves `end` out of an empty page with nothing beyond it,
+    forwards at the newest event as well as backwards at the first: a client that pages
+    until `end` is missing has to come to a stop.
   - `GET /keys/changes` reports, like sync does, whoever came to share a room with the user
     between two tokens (their device list was not followed until then) and whoever stopped
     sharing one.
@@ -108,6 +111,41 @@ def run(hs, peers):
         because = deleted[0].get("unsigned", {}).get("redacted_because", {}) if deleted else {}
         check(got == [(target, target)] and deleted and deleted[0]["content"] == {} and because.get("redacts") == target,
               f"room version {version}, /messages: the same, and the deleted message says what deleted it ({got}, {because.get('redacts') == target})")
+
+    print("-- paging through a room comes to an end, both ways")
+    st, r = hs.req("POST", "/_matrix/client/v3/createRoom", {}, carol_token := c)
+    assert st == 200, r
+    pages = f"/_matrix/client/v3/rooms/{q(r['room_id'])}"
+    sent = []
+    for n in range(5):
+        st, r = hs.req("PUT", f"{pages}/send/m.room.message/{uuid.uuid4().hex}", {"msgtype": "m.text", "body": str(n)}, carol_token)
+        assert st == 200, r
+        sent.append(r["event_id"])
+    # Around the second message, with the first before it and the third after it.
+    st, around = hs.req("GET", f"{pages}/context/{q(sent[1])}?limit=2", None, carol_token)
+    assert st == 200 and [e["event_id"] for e in around["events_after"]] == [sent[2]], around
+
+    def page(direction, token):
+        """Follow `end` from `token` until it is missing; the events seen and the answers it
+        took, or None when it had not stopped after 30."""
+        seen = []
+        for answers in range(1, 31):
+            st, r = hs.req("GET", f"{pages}/messages?dir={direction}&limit=2&from={q(token)}", None, carol_token)
+            assert st == 200, r
+            seen += [e["event_id"] for e in r["chunk"]]
+            if "end" not in r:
+                return seen, answers, r["chunk"]
+            token = r["end"]
+        return seen, None, None
+
+    seen, answers, last = page("f", around["end"])
+    check(answers is not None and last == [], f"forwards from the second message: `end` is left out of the empty page at the newest event ({answers} answers)")
+    check(seen == sent[3:], f"after every later message was handed out, once and in order ({len(seen)} events)")
+    seen, answers, last = page("b", around["start"])
+    check(answers is not None and last == [], f"backwards: `end` is left out of the empty page at the start of the room ({answers} answers)")
+    check(seen and len(seen) == len(set(seen)) and not set(seen) & set(sent), f"after what the room began with was handed out, once ({len(seen)} events)")
+    st, r = hs.req("GET", f"{pages}/messages?dir=b&limit=3", None, carol_token)
+    check(st == 200 and len(r["chunk"]) == 3 and "end" in r, "a page with events on it has its `end`")
 
 
 if __name__ == "__main__":
