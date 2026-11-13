@@ -6,9 +6,9 @@ members = ["crates/*"]
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.94"
-license = "AGPL-3.0-or-later"
+license = "MIT"
 repository = "https://github.com/Oele/asaroton"
-authors = ["Sander Oele <sander@oele.net>"]
+authors = ["The asaroton authors"]
 
 [workspace.dependencies]
 html-escape = "0.3.0"

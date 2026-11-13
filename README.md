@@ -60,4 +60,4 @@ watch/                          # weekly watch job: spec, Synapse, tests and ser
 
 ## License
 
-AGPL-3.0-or-later.
+MIT, see [LICENSE](LICENSE).
