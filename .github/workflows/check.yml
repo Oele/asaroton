@@ -1,0 +1,51 @@
+# What scripts/check.sh does, on every push to main and every pull request: formatting,
+# clippy with warnings as errors, and all unit and store tests against a PostgreSQL.
+#
+# The end-to-end tests (scripts/README.md) and the Complement suite are not run here: they
+# take a built server and, for Complement, Docker images and a quarter of an hour.
+name: check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          # The role and database of .env.example. The store tests create a database each.
+          POSTGRES_USER: asaroton
+          POSTGRES_PASSWORD: asaroton
+          POSTGRES_DB: asaroton
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U asaroton"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgres://asaroton:asaroton@localhost/asaroton
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - run: scripts/check.sh
