@@ -49,7 +49,7 @@ impl Services {
                 || matches!(b, b'.' | b'_' | b'=' | b'-' | b'/' | b'+')
         }) {
             return Err(Error::invalid_username(
-                "User ID can only contain characters a-z, 0-9, or '=_-./+'.",
+                "A user name is made of lowercase letters, digits and the characters . _ = - / + only.",
             ));
         }
         let id = format!("@{localpart}:{}", self.config.server_name);

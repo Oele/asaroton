@@ -6,6 +6,10 @@ import base64, hashlib, hmac, json, os, subprocess, sys, time, urllib.request, u
 HS = os.environ.get("HS", "http://127.0.0.1:8008")
 LK_URL = os.environ.get("LK_URL", "ws://127.0.0.1:7880")
 LK_HTTP = LK_URL.replace("ws://", "http://")
+# A key for a throwaway LiveKit on this machine, and public: it is printed here. Whoever has a
+# LiveKit server's key and secret can create rooms on it and let anybody into its calls, so
+# never start a server that others can reach with this one. Generate a pair for that
+# (`livekit-server generate-keys`) and pass it in LK_KEY and LK_SECRET.
 LK_KEY = os.environ.get("LK_KEY", "APISXUj3b3J5g32")
 LK_SECRET = os.environ.get("LK_SECRET", "MD6h9BYv5sqtN6Ao4JWpTiHXhXMdOO5juiYmfaTqqsI")
 LK = os.environ.get("LK_CLI", "lk")

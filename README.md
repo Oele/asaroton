@@ -1,61 +1,87 @@
 # asaroton
 
-A Matrix homeserver written in Rust, built from scratch against the current Matrix
-specification (v1.19, room version 12 by default).
+A [Matrix](https://matrix.org) homeserver written in Rust, from scratch, against the current
+Matrix specification (v1.19, room version 12 by default). One binary and a PostgreSQL
+database.
 
 The name is that of the *asarotos oikos*, the "unswept floor": an ancient mosaic that shows
-everything that ever fell on it. A homeserver never sweeps an event away either. The project
-was called tessera until November 2026.
+everything that ever fell on it. A homeserver never sweeps an event away either.
 
-- Client-server API: registration and login (password and application-service), rooms,
-  membership (incl. knocking, restricted rooms, upgrades), `/sync`, Simplified Sliding Sync
-  (MSC4186), relations and threads, search, media (authenticated and legacy), end-to-end
-  encryption support (device and cross-signing keys, to-device messages, key backups), push
-  rules and push gateway delivery, spaces, server notices.
-- Server-server API: signing keys, joins/leaves/invites/knocks, transactions with full auth
-  chain and state fetching, backfill, server ACLs, media, hierarchy.
-- Application services (registration files, namespaces, transactions, third-party lookups).
-- Authentication delegated to Matrix Authentication Service (MSC3861), or classic tokens.
-- Synapse-compatible admin API subset, rate limiting, message retention.
-- Voice and video calls: MatrixRTC over LiveKit (MSC4195) with the token service built in;
-  a LiveKit server is the only extra component.
-- PostgreSQL behind a storage trait; one binary; distroless container image.
+## Where it stands
 
-Conformance is measured with [Complement](https://github.com/matrix-org/complement); the
-coverage matrix and known deviations are in `docs/spec-coverage.md`. The design is described in
-`docs/ARCHITECTURE.md`, and running it in `docs/deployment.md`.
+asaroton is young: the first commit is from October 2026. It runs two small homeservers
+that federate with the public network, one of them moved over from Synapse with its history,
+and people use it every day with Element Web, Element X and other clients. It has not been
+run with many users or in many rooms of the largest size, and nobody outside its author has
+operated it yet. Expect rough edges, and read `docs/deployment.md` before trusting it with
+data you cannot lose.
 
-## Development
+It was written by one person working with an AI coding assistant, Claude, which wrote most
+of the code; the commit history says so commit by commit. What keeps it honest is its tests:
+the unit and store tests, a set of end-to-end tests that run a real server against scripted
+clients and homeservers, and [Complement](https://github.com/matrix-org/complement), the
+conformance suite that Synapse is tested with. 207 of Complement's tests pass. Eleven tests
+and one subtest are skipped by decision, ten for features that are not implemented and two
+for deliberate deviations, each with its reason in `tests/complement/expected-failures.txt`.
 
-Requirements: Rust stable (nightly for `scripts/fuzz.sh`), PostgreSQL 15+, Docker and Go (for
-the Complement conformance suite).
+## What it does
+
+- **Client-server API:** registration and login, rooms and membership (knocking, restricted
+  rooms, upgrades), `/sync` and Simplified Sliding Sync (MSC4186), relations and threads,
+  search, media, push rules and push gateways, spaces, server notices, delayed events
+  (MSC4140).
+- **End-to-end encryption support:** device keys and cross-signing, one-time and fallback
+  keys, to-device messages, key backups, dehydrated devices (MSC3814). The server stores and
+  delivers; the cryptography is the clients'.
+- **Federation:** signing keys, joins, leaves, invites and knocks, transactions with the full
+  checks on authorisation and state, backfill, server ACLs, media, space hierarchy.
+- **Application services:** registration files, namespaces, transactions, third-party
+  lookups.
+- **Authentication:** its own passwords and tokens, or delegated to Matrix Authentication
+  Service (MSC3861).
+- **Voice and video calls:** MatrixRTC over LiveKit (MSC4195) with the token service built
+  in; a LiveKit server is the only extra component.
+- **For the operator:** a subset of Synapse's admin API, rate limiting, message retention, an
+  importer for an existing Synapse database (`asaroton import-synapse`), a container image.
+
+What is implemented, what is not and where it deviates on purpose is in
+[docs/spec-coverage.md](docs/spec-coverage.md).
+
+## Running it
+
+[docs/deployment.md](docs/deployment.md) covers the container image, federation, the first
+admin account, the reverse proxy, calls and the systemd units in `deploy/`. The settings are
+described in [deploy/asaroton.example.toml](deploy/asaroton.example.toml).
+
+To try it from a checkout, with PostgreSQL running and a role as in `.env.example`:
 
 ```sh
-cp .env.example .env            # DATABASE_URL etc.
+cp .env.example .env
 cargo run -p asaroton -- --config deploy/asaroton.example.toml serve
-scripts/check.sh                # fmt + clippy + tests
-scripts/complement.sh -run TestRegistration   # conformance suite (builds a Docker image)
-scripts/loadtest.py --users 50  # synthetic client swarm against a running server
-scripts/emulab/                 # Element X in an Android emulator + headless Element Web, see its README
-scripts/fedpresencetest.py LAB   # presence fan-out over federation stays bounded (two-server lab)
-scripts/ssinvitetest.py URL      # a pending invite does not stop sliding sync from long-polling (test server with open registration)
-scripts/syncaccesstest.py URL    # sync shows a user only what they may read: knocks, bans, declined invites, history visibility
-scripts/syncwaketest.py URL      # a waiting sync wakes for an invitation or a room created on another device
-scripts/sslazytest.py            # sliding sync with lazily loaded members hands out the memberships a timeline is about (starts its own server)
-scripts/createroomtest.py        # createRoom under pressure: several rooms at once, and a sync that shows a new room whole or not yet (starts its own server)
-scripts/clientendpointstest.py   # small client endpoints: capabilities under r0, the empty 3pid list, /keys/changes (starts its own server)
-scripts/fedinvitetest.py         # an invitation to another server goes there once, over /invite (starts its own server)
-scripts/softfailtest.py          # a soft-failed event (a banned user's message that builds on older history) is kept and not shown to clients (starts its own server)
-scripts/todevicetest.py          # to-device messages all arrive, however many are waiting, over both sync flavours (starts its own server)
-scripts/devicelisttest.py        # device lists as other servers see them: cross-signing signatures, prev_id, one stream ID per device (starts its own server)
-scripts/droppedrequesttest.py    # requests cut off halfway leave nothing half done: no open transaction, nothing twice on a second attempt, from a client or from another server (starts its own server)
-scripts/refreshtest.py           # a refresh whose answer is lost does not end the session: the old refresh token is good until the new pair is used (starts its own server)
-scripts/stoptest.py              # a server that is told to stop answers who waits, finishes the writes and leaves no message to be sent twice (starts its own server)
-scripts/dehydratedtest.py        # dehydrated devices (MSC3814): others see the device and send it keys, its owner reads them out page by page, replacing and deleting (starts its own server)
-scripts/closedservertest.py      # a server with federation disabled still calls push gateways and feeds application services (starts its own server)
-scripts/ssreceiptstest.py        # sliding sync hands out read receipts for the rooms of a list, whichever of `lists` and `rooms` the extension names, and again after a lost answer (starts its own server)
-scripts/deploy.sh [status]      # check, build and deploy: this machine first, then the remote host (see docs/deployment.md)
 ```
+
+## Working on it
+
+Rust stable and PostgreSQL 15 or newer are enough for most things; Docker and Go are needed
+for Complement, and the nightly toolchain for fuzzing.
+
+```sh
+scripts/check.sh                              # formatting, clippy, all unit and store tests
+scripts/complement.sh -run TestRegistration   # part of the conformance suite
+scripts/droppedrequesttest.py                 # one of the end-to-end tests
+```
+
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) describes how the crates fit together, how an
+event travels through the server and what a request may rely on.
+[scripts/README.md](scripts/README.md) lists the end-to-end tests and the operator's tools.
+
+Bug reports and pull requests are welcome. A report is most useful with the request that
+went wrong and what the server logged for it; a change, with a test that fails without it.
+
+## Security
+
+Please report a vulnerability privately, not in a public issue: see
+[SECURITY.md](SECURITY.md).
 
 ## License
 

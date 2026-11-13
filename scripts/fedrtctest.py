@@ -2,6 +2,7 @@
 """MSC4195 over federation: a user on hs2 joins a call hosted on hs1's SFU."""
 import base64, hashlib, hmac, json, sys, time, urllib.request, urllib.error, urllib.parse
 H1, H2, S1, S2 = "http://127.0.0.1:18008", "http://127.0.0.1:28008", "localhost:18448", "localhost:28448"
+# The secret of the throwaway LiveKit key in rtctest.py: public, for a local test server only.
 LK_URL, LK_SECRET = "ws://127.0.0.1:7880", "MD6h9BYv5sqtN6Ao4JWpTiHXhXMdOO5juiYmfaTqqsI"
 PREFIX = "/_matrix/client/unstable/io.element.msc4195/rtc/livekit"
 fails = 0

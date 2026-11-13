@@ -4,9 +4,9 @@ Target: Matrix spec v1.19, default room version 12 (all versions 1–12 supporte
 The conformance gate is Complement (`scripts/complement.sh`). The tests that fail by decision
 are listed with their reasons in `tests/complement/expected-failures.txt` and skipped, so a
 clean run exits 0 and every failure it reports is a real one; `COMPLEMENT_ALL=1` runs
-everything. Last full run (2026-11-06): 206 top-level tests pass and none fail; the 13
-expected failures (12 tests and one subtest) are skipped: 10 for features that are not
-implemented, 3 deliberate deviations (see the end of this page).
+everything. Last full run (2026-11-13): 207 top-level tests pass and none fail; the 12
+expected failures (11 tests and one subtest) are skipped: 10 for features that are not
+implemented, 2 deliberate deviations (see the end of this page).
 
 | Area | Status |
 |---|---|
