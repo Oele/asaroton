@@ -38,6 +38,7 @@ They need `cargo build`, the development database role from `.env.example`, and 
 | `scripts/dehydratedtest.py` | Dehydrated devices (MSC3814): others see the device and send it keys, its owner reads them out page by page, replacing and deleting |
 | `scripts/closedservertest.py` | A server with federation disabled still calls push gateways and feeds application services |
 | `scripts/ssreceiptstest.py` | Sliding sync hands out read receipts for the rooms of a list, whichever of `lists` and `rooms` the extension names, and again after a lost answer |
+| `scripts/ssaccountdatatest.py [ROUNDS]` | A change to global account data reaches the user's sliding sync, also when the connection is being answered for another reason at that moment |
 | `scripts/fedsendertest.py` | The federation sender: order, retries, what a failing destination costs the others |
 | `scripts/fedrechecktest.py` | Events that could not be checked when they came are checked again later |
 | `scripts/fedrelaytest.py` | Events that arrive through a third server |

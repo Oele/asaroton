@@ -593,6 +593,7 @@ impl Services {
             device: req.device_id.clone(),
             conn_id: req.conn_id.clone().unwrap_or_default(),
         };
+        let began = std::time::Instant::now();
         let (base, request) = self.sliding_sync.resolve(&key, req.pos.as_deref())?;
         let mut rx = self.notifier.subscribe();
         let (mut result, mut state) = self.compute_sliding_sync(&req, base.as_ref()).await?;
@@ -635,6 +636,30 @@ impl Services {
                 }
             }
         }
+        // What each answer carried, by count: when a client reports that something did not
+        // reach it, this says whether the server sent it (the bodies are logged nowhere).
+        tracing::debug!(
+            user = %req.user_id,
+            conn = %key.conn_id,
+            from = req.pos.as_deref().unwrap_or("-"),
+            pos = %result.pos,
+            waited_ms = u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX),
+            quiet = result.quiet,
+            rooms = result.rooms.len(),
+            account_data = result
+                .extensions
+                .account_data
+                .as_ref()
+                .map_or(0, |a| a.global.len() + a.rooms.values().map(Vec::len).sum::<usize>()),
+            receipts = result.extensions.receipts.len(),
+            typing = result.extensions.typing.len(),
+            to_device = result
+                .extensions
+                .to_device
+                .as_ref()
+                .map_or(0, |(_, events)| events.len()),
+            "sliding sync answered"
+        );
         self.sliding_sync.store_pending(&key, state, request);
         Ok(result)
     }
