@@ -176,14 +176,10 @@ impl SyncFilter {
         {
             return false;
         }
-        if self
+        !self
             .timeline_not_senders
             .iter()
             .any(|s| s == ev.pdu.sender())
-        {
-            return false;
-        }
-        true
     }
 
     fn state_allows(&self, ev: &StoredEvent) -> bool {

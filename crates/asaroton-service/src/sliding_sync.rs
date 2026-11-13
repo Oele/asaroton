@@ -442,10 +442,7 @@ impl ListFilters {
         {
             return false;
         }
-        if self.not_room_types.contains(&facts.room_type) {
-            return false;
-        }
-        true
+        !self.not_room_types.contains(&facts.room_type)
     }
 }
 
