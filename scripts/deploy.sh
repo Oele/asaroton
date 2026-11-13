@@ -11,12 +11,14 @@
 # scripts/check.sh must pass. The work on each host is done by /usr/local/sbin/asaroton-deploy
 # (deploy/systemd/), which verifies the checksum, checks health and rolls back.
 #
-# The remote host is reached with the key in ~/.config/asaroton-deploy/ when there is one (a key
-# that can run nothing but asaroton-deploy), otherwise with whatever ssh access the caller has.
+# The remote host is named in ASAROTON_DEPLOY_REMOTE or, on one line, in
+# ~/.config/asaroton-deploy/remote (`root@matrix.example.org`). It is reached with the key in
+# ~/.config/asaroton-deploy/ when there is one (a key that can run nothing but
+# asaroton-deploy), otherwise with whatever ssh access the caller has.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 MODE=${1:-all}
-REMOTE=${ASAROTON_DEPLOY_REMOTE:-root@cluephone.org}
+REMOTE=${ASAROTON_DEPLOY_REMOTE:-$(cat "$HOME/.config/asaroton-deploy/remote" 2>/dev/null || true)}
 KEY=${ASAROTON_DEPLOY_KEY:-$HOME/.config/asaroton-deploy/id_ed25519}
 TOOL=/usr/local/sbin/asaroton-deploy
 SOAK=${ASAROTON_DEPLOY_SOAK:-30}
@@ -25,23 +27,20 @@ BINARY=target/release/asaroton
 die() { echo "deploy: $*" >&2; exit 1; }
 here() { sudo -n "$TOOL" "$@"; }
 there() {   # there REQUEST: the binary, if any, is passed on standard input
+  [ -n "$REMOTE" ] || die "no remote host: name it in ASAROTON_DEPLOY_REMOTE or ~/.config/asaroton-deploy/remote, or deploy with 'local'"
   if [ -f "$KEY" ]; then
     ssh -i "$KEY" -o IdentitiesOnly=yes -o IdentityAgent=none -o BatchMode=yes -o ConnectTimeout=20 "$REMOTE" "$1"
   else
     ssh -o BatchMode=yes -o ConnectTimeout=20 "$REMOTE" "$TOOL $1"
   fi
 }
-announce() {   # best effort: a line in the watch room, so every deploy leaves a trace
-  python3 - "$1" <<'PY' 2>/dev/null || true
-import pathlib, sys, tomllib
-sys.path.insert(0, "watch")
-import publish
-publish.send_matrix(tomllib.loads(pathlib.Path("watch/config.toml").read_text()), sys.argv[1])
-PY
+announce() {   # best effort: an executable ~/.config/asaroton-deploy/announce is told what was deployed
+  local hook="$HOME/.config/asaroton-deploy/announce"
+  if [ -x "$hook" ]; then "$hook" "$1" >/dev/null 2>&1 || true; fi
 }
 
 case "$MODE" in
-  status) here status; there status; exit 0 ;;
+  status) here status; if [ -n "$REMOTE" ]; then there status; fi; exit 0 ;;
   rollback-local) here rollback; exit ;;
   rollback-remote) there rollback; exit ;;
   all | local | remote) ;;

@@ -5,3 +5,4 @@
 /.sqlx-offline
 .env
 __pycache__/
+/logs

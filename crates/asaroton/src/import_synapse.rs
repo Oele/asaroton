@@ -1,6 +1,6 @@
 //! `asaroton import-synapse`: copy a Synapse homeserver's data into an empty asaroton database.
 //!
-//! The selection follows docs/migration-from-synapse.md: every user row (deactivated accounts as
+//! What is taken along: every user row (deactivated accounts as
 //! names only), the rooms a non-deactivated local account is or was a member of, every event of
 //! those rooms, and the sessions, keys, account data, pushers and media of the active accounts.
 //! Stream orderings and state group ids are kept, so the imported history keeps its order and
