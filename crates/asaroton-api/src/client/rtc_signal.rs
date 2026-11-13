@@ -15,11 +15,11 @@ use axum::{
         RawQuery, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
-    http::{StatusCode, Uri},
+    http::{HeaderMap, HeaderValue, StatusCode, Uri, header::AUTHORIZATION},
     response::{IntoResponse, Response},
 };
 use futures::{SinkExt, StreamExt};
-use tokio_tungstenite::tungstenite;
+use tokio_tungstenite::tungstenite::{self, client::IntoClientRequest};
 
 use crate::AppState;
 
@@ -34,6 +34,26 @@ fn sfu_path(uri: &Uri) -> &str {
     uri.path().strip_prefix(SIGNAL_PATH).unwrap_or("/rtc")
 }
 
+/// The SFU takes a client's token from the `access_token` parameter or from the
+/// `Authorization` header. Browsers cannot set a header on a WebSocket and use the parameter;
+/// `LiveKit`'s native SDKs (Rust, and Android and iOS on top of it) send the header. The
+/// parameter travels with the query; this is the header, to be passed on as it came.
+fn token_header(headers: &HeaderMap) -> Option<HeaderValue> {
+    headers.get(AUTHORIZATION).cloned()
+}
+
+/// The request that opens the signalling connection to the SFU.
+fn sfu_request(
+    url: &str,
+    authorization: Option<HeaderValue>,
+) -> tungstenite::Result<tungstenite::handshake::client::Request> {
+    let mut request = url.into_client_request()?;
+    if let Some(authorization) = authorization {
+        request.headers_mut().insert(AUTHORIZATION, authorization);
+    }
+    Ok(request)
+}
+
 /// `GET .../signal/rtc/validate` and `.../signal/rtc/v1/validate`: the SFU's token check,
 /// which `LiveKit` clients call to get a readable error when the WebSocket connection is
 /// refused.
@@ -41,6 +61,7 @@ pub async fn validate(
     State(app): State<AppState>,
     uri: Uri,
     RawQuery(query): RawQuery,
+    headers: HeaderMap,
 ) -> Response {
     let Some((api_url, _)) = upstream(&app) else {
         return StatusCode::NOT_FOUND.into_response();
@@ -50,7 +71,11 @@ pub async fn validate(
         sfu_path(&uri),
         query.map_or(String::new(), |q| format!("?{q}"))
     );
-    match reqwest::Client::new().get(&url).send().await {
+    let mut request = reqwest::Client::new().get(&url);
+    if let Some(authorization) = token_header(&headers) {
+        request = request.header(AUTHORIZATION, authorization);
+    }
+    match request.send().await {
         Ok(resp) => {
             let status =
                 StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
@@ -69,6 +94,7 @@ pub async fn websocket(
     State(app): State<AppState>,
     uri: Uri,
     RawQuery(query): RawQuery,
+    headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
     let Some((api_url, turn_port)) = upstream(&app) else {
@@ -89,16 +115,21 @@ pub async fn websocket(
         query.map_or(String::new(), |q| format!("?{q}"))
     );
     let closing = app.closing.clone();
-    ws.on_upgrade(move |socket| relay(socket, url, turn_port, closing))
+    let authorization = token_header(&headers);
+    ws.on_upgrade(move |socket| relay(socket, url, authorization, turn_port, closing))
 }
 
 async fn relay(
     client: WebSocket,
     upstream_url: String,
+    authorization: Option<HeaderValue>,
     turn_port: Option<u16>,
     closing: asaroton_service::closing::Closing,
 ) {
-    let (sfu, _) = match tokio_tungstenite::connect_async(&upstream_url).await {
+    let connecting = async {
+        tokio_tungstenite::connect_async(sfu_request(&upstream_url, authorization)?).await
+    };
+    let (sfu, _) = match connecting.await {
         Ok(conn) => conn,
         Err(e) => {
             tracing::warn!(error = %e, "could not open the SFU signalling connection");
@@ -156,6 +187,50 @@ async fn relay(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_token_in_the_authorization_header_goes_on_to_the_sfu() {
+        let mut headers = HeaderMap::new();
+        assert!(token_header(&headers).is_none());
+        let none = sfu_request("ws://127.0.0.1:7880/rtc?access_token=x", None).unwrap();
+        assert!(none.headers().get(AUTHORIZATION).is_none());
+        assert_eq!(none.uri().query(), Some("access_token=x"));
+
+        headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer a.b.c"));
+        headers.insert("cookie", HeaderValue::from_static("not for the SFU"));
+        let with = sfu_request("ws://127.0.0.1:7880/rtc/v1", token_header(&headers)).unwrap();
+        assert_eq!(with.headers().get(AUTHORIZATION).unwrap(), "Bearer a.b.c");
+        assert!(with.headers().get("cookie").is_none());
+    }
+
+    /// The relay, with a WebSocket server in the SFU's place that says what it was sent.
+    #[tokio::test]
+    #[allow(clippy::result_large_err)] // the shape of the callback is the library's
+    async fn the_sfu_sees_the_header_on_the_signalling_connection() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let sfu = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut seen = None;
+            let callback =
+                |request: &tungstenite::handshake::server::Request,
+                 response: tungstenite::handshake::server::Response| {
+                    seen = request.headers().get(AUTHORIZATION).cloned();
+                    Ok(response)
+                };
+            let _socket = tokio_tungstenite::accept_hdr_async(stream, callback)
+                .await
+                .unwrap();
+            seen
+        });
+        let request = sfu_request(
+            &format!("ws://{address}/rtc"),
+            Some(HeaderValue::from_static("Bearer a.b.c")),
+        )
+        .unwrap();
+        let _connection = tokio_tungstenite::connect_async(request).await.unwrap();
+        assert_eq!(sfu.await.unwrap().unwrap(), "Bearer a.b.c");
+    }
 
     #[test]
     fn the_path_for_the_sfu_is_what_follows_the_prefix() {
