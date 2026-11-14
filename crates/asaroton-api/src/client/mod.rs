@@ -216,16 +216,6 @@ pub fn routes(router: Router<AppState>) -> Router<AppState> {
     .fold(r, |r, (path, handler)| {
         r.route(&format!("{}/{path}", rtc::PREFIX), handler)
     });
-    // The SFU's two ways to open the signalling connection, the older `/rtc` and `/rtc/v1`,
-    // each with its token check.
-    let r = ["/rtc", "/rtc/v1"].into_iter().fold(r, |r, path| {
-        let path = format!("{}{path}", asaroton_service::rtc::signal::SIGNAL_PATH);
-        r.route(&path, axum::routing::get(rtc_signal::websocket))
-            .route(
-                &format!("{path}/validate"),
-                axum::routing::get(rtc_signal::validate),
-            )
-    });
     let r =
         route::<c::account::request_openid_token::v3::Request, _, _>(r, rtc::request_openid_token);
     let r = route::<c::redact::redact_event::v3::Request, _, _>(r, rooms::redact);
@@ -836,3 +826,17 @@ raw_json_handler!(
     ruma::api::client::profile::delete_profile_field::v3::Request,
     account::delete_profile_field
 );
+
+/// The relay to an external SFU's signalling: its two ways to open the connection, the older
+/// `/rtc` and `/rtc/v1`, each with its token check. Not mounted when an SFU runs in this
+/// process (`App::sfu_router`).
+pub(crate) fn signal_relay_routes(r: Router<AppState>) -> Router<AppState> {
+    ["/rtc", "/rtc/v1"].into_iter().fold(r, |r, path| {
+        let path = format!("{}{path}", asaroton_service::rtc::signal::SIGNAL_PATH);
+        r.route(&path, axum::routing::get(rtc_signal::websocket))
+            .route(
+                &format!("{path}/validate"),
+                axum::routing::get(rtc_signal::validate),
+            )
+    })
+}

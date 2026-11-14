@@ -29,6 +29,9 @@ pub struct App {
     pub federation: Option<Arc<Federation>>,
     /// Request rate limiting state.
     pub limiter: ratelimit::Limiter,
+    /// The signalling and room API of an SFU that runs in this process. When set it is served
+    /// under the signalling path itself, in place of the relay to an external SFU.
+    pub sfu_router: Option<axum::Router>,
 }
 
 impl std::fmt::Debug for App {

@@ -251,6 +251,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         limiter: asaroton_api::ratelimit::Limiter::default(),
         services: Arc::clone(&services),
         federation,
+        sfu_router: None,
     }));
 
     let mut tasks = tokio::task::JoinSet::new();

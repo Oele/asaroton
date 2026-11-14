@@ -9,6 +9,13 @@ const WEBHOOK_PATH: &str = "/_matrix/client/unstable/io.element.msc4195/rtc/live
 
 /// Writes the `livekit.yaml` for this server's SFU to standard output.
 pub fn print(config: &Config, config_path: &Path) -> anyhow::Result<()> {
+    print!("{}", render(config, config_path)?);
+    Ok(())
+}
+
+/// The `livekit.yaml` for this server's SFU: what `print` writes, and what an SFU that runs
+/// in this process reads. Warnings go to standard error.
+pub fn render(config: &Config, config_path: &Path) -> anyhow::Result<String> {
     let Some(lk) = &config.rtc.livekit else {
         anyhow::bail!(
             "[rtc.livekit] is not configured in {}",
@@ -85,8 +92,7 @@ pub fn print(config: &Config, config_path: &Path) -> anyhow::Result<()> {
             }
         }
     }
-    print!("{out}");
-    Ok(())
+    Ok(out)
 }
 
 /// A double-quoted YAML scalar.

@@ -92,6 +92,11 @@ where
 pub fn build_router(state: AppState) -> Router {
     let router = Router::new();
     let router = crate::client::routes(router);
+    // The SFU's signalling: served by an SFU in this process, or relayed to an external one.
+    let router = match &state.sfu_router {
+        Some(sfu) => router.nest_service(asaroton_service::rtc::signal::SIGNAL_PATH, sfu.clone()),
+        None => crate::client::signal_relay_routes(router),
+    };
     let router = crate::federation::routes(router);
     router
         .route("/_matrix/client/{*rest}", axum::routing::any(unrecognized))
