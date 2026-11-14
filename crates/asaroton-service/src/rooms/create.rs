@@ -38,6 +38,28 @@ pub struct CreateRoomRequest {
 }
 
 impl Services {
+    /// Makes a room known to this server. Every way a room comes in goes through here: a
+    /// room that is created, joined or knocked on, and one a user is invited to. Returns
+    /// whether the room is new.
+    ///
+    /// A new room of version 1 is worth a warning: state resolution for that version is
+    /// not implemented (see `Federation::resolve_states`), and whoever runs the server
+    /// should know that it is in such a room before the approximation matters.
+    pub async fn register_room(&self, room: RoomInfo) -> Result<bool> {
+        let approximated = room_version::rules(&room.room_version)
+            .is_ok_and(|rules| asaroton_core::state::needs_state_res_v1(&rules));
+        let (room_id, version) = (room.room_id.clone(), room.room_version.clone());
+        let is_new = self.store.create_room(room).await?;
+        if is_new && approximated {
+            tracing::warn!(
+                %room_id,
+                room_version = %version,
+                "a room of version 1 has come to this server (created, joined, knocked on or invited to): state resolution for that version is approximated here (docs/spec-coverage.md), and the server can come to disagree with other servers about the room's state"
+            );
+        }
+        Ok(is_new)
+    }
+
     /// Create a room, sending the whole initial event sequence under the room lock.
     pub async fn create_room(&self, req: CreateRoomRequest) -> Result<OwnedRoomId> {
         let version = req
@@ -385,15 +407,14 @@ impl Services {
     ) -> Result<(OwnedRoomId, InTheMaking<'_>)> {
         if ctx.rules.room_id_format == RoomIdFormatVersion::V1 {
             let room_id = ctx.room_id.clone();
-            self.store
-                .create_room(RoomInfo {
-                    room_id: room_id.clone(),
-                    room_version: version.clone(),
-                    creator: Some(creator.to_owned()),
-                    is_public: false,
-                    created_ts: now_ts(),
-                })
-                .await?;
+            self.register_room(RoomInfo {
+                room_id: room_id.clone(),
+                room_version: version.clone(),
+                creator: Some(creator.to_owned()),
+                is_public: false,
+                created_ts: now_ts(),
+            })
+            .await?;
             let making = self
                 .rooms_in_the_making
                 .begin(&self.notifier, creator, &room_id);
@@ -426,8 +447,7 @@ impl Services {
             .origin_server_ts(ts)
             .build(&ctx.rules, &self.signing_key, &self.config.server_name)?;
             let is_new = self
-                .store
-                .create_room(RoomInfo {
+                .register_room(RoomInfo {
                     room_id: pdu.room_id().to_owned(),
                     room_version: version.clone(),
                     creator: Some(creator.to_owned()),

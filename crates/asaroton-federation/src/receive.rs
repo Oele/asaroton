@@ -1393,8 +1393,18 @@ impl Federation {
         maps: &[StateMap<OwnedEventId>],
     ) -> Result<StateMap<OwnedEventId>> {
         if state::needs_state_res_v1(rules) {
-            // Room versions 1: ruma does not implement v1 resolution. Take the most recent
-            // state map as an approximation; this only affects very old rooms.
+            // Room version 1: ruma does not implement its state resolution. The most recent
+            // state map is taken as an approximation, which only affects very old rooms, and
+            // there only when the states really differ. That is the moment this server can
+            // come to disagree with the others, so it is said, once for a room.
+            let differ = maps.windows(2).any(|pair| pair[0] != pair[1]);
+            if differ && self.approximated_rooms.insert(room_id.to_owned()) {
+                tracing::warn!(
+                    %room_id,
+                    states = maps.len(),
+                    "the state of a room of version 1 was resolved by approximation: the newest of the diverging states was taken (docs/spec-coverage.md)"
+                );
+            }
             return Ok(maps.last().cloned().unwrap_or_default());
         }
         let mut chains: Vec<EventIdSet<OwnedEventId>> = Vec::new();

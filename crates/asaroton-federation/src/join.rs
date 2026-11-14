@@ -267,8 +267,7 @@ impl Federation {
     ) -> Result<()> {
         let services = &self.services;
         services
-            .store
-            .create_room(RoomInfo {
+            .register_room(RoomInfo {
                 room_id: room_id.to_owned(),
                 room_version: version.clone(),
                 creator: state_events
@@ -717,8 +716,7 @@ impl Federation {
                 Ok(resp) => {
                     if services.store.get_room(room_id).await?.is_none() {
                         services
-                            .store
-                            .create_room(RoomInfo {
+                            .register_room(RoomInfo {
                                 room_id: room_id.to_owned(),
                                 room_version: version.clone(),
                                 creator: None,
@@ -1252,8 +1250,7 @@ impl Federation {
         }
         if services.store.get_room(room_id).await?.is_none() {
             services
-                .store
-                .create_room(RoomInfo {
+                .register_room(RoomInfo {
                     room_id: room_id.to_owned(),
                     room_version: room_version.clone(),
                     creator: None,

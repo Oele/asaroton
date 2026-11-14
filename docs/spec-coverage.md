@@ -36,6 +36,10 @@ Known deviations (Complement): UIA accepts an `auth` dict without a session like
 (TestRegistration's strictness subtest, skipped for Synapse too); TestIsDirectFlagFederation sends
 a room-version-12 invite without `m.room.create` in `invite_room_state`, which v1.16 (MSC4311)
 requires receivers to reject (it passes on servers that still default to room version 11).
+State resolution for room version 1 is approximated: where the room's history has diverged, the
+newest state is taken instead of running the version 1 algorithm, which the state resolution
+library does not implement. Only rooms created with version 1 and never upgraded are affected;
+the server logs a warning when it comes to be in such a room and when the approximation is used.
 Experimental Complement packages
 still not targeted: faster joins (MSC3902), owned state (MSC3757, needs the `org.matrix.msc3757.10`
 room version), MSC2836, MSC3389, MSC4242.

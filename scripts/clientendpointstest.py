@@ -4,6 +4,8 @@
   - `GET /capabilities` is served under the old `r0` prefix as well as under `v3`.
   - `GET /account/3pid` is an empty list on a server that keeps no e-mail addresses or phone
     numbers, not an unknown endpoint.
+  - A room of version 1 is announced in the server's log when it comes to the server, because
+    state resolution for that version is approximated; a room of the current version is not.
   - `GET /rooms/{roomId}/messages` leaves `end` out of an empty page with nothing beyond it,
     forwards at the newest event as well as backwards at the first: a client that pages
     until `end` is missing has to come to a stop.
@@ -111,6 +113,18 @@ def run(hs, peers):
         because = deleted[0].get("unsigned", {}).get("redacted_because", {}) if deleted else {}
         check(got == [(target, target)] and deleted and deleted[0]["content"] == {} and because.get("redacts") == target,
               f"room version {version}, /messages: the same, and the deleted message says what deleted it ({got}, {because.get('redacts') == target})")
+
+    print("-- a room of version 1 is announced in the log")
+    announced = lambda room_id: [l for l in hs.log_lines("a room of version 1 has come to this server") if room_id in l]
+    st, r = hs.req("POST", "/_matrix/client/v3/createRoom", {"room_version": "1"}, c)
+    check(st == 200, f"a room of version 1 can still be created ({st} {r.get('errcode')})")
+    old_room = r.get("room_id", "!none")
+    st, r = hs.req("POST", f"/_matrix/client/v3/join/{q(old_room)}", {}, c)
+    lines = announced(old_room)
+    check(len(lines) == 1 and " WARN " in lines[0], f"and the server warns about it, once ({len(lines)} lines)")
+    st, r = hs.req("POST", "/_matrix/client/v3/createRoom", {}, c)
+    assert st == 200, r
+    check(not announced(r["room_id"]) and len(hs.log_lines("a room of version 1 has come to this server")) == 1, "a room of the current version is not announced")
 
     print("-- paging through a room comes to an end, both ways")
     st, r = hs.req("POST", "/_matrix/client/v3/createRoom", {}, carol_token := c)

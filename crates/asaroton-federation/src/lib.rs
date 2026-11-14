@@ -101,6 +101,9 @@ pub struct Federation {
     foreign_room_events: dashmap::DashMap<ruma::OwnedRoomId, (u64, ruma::OwnedServerName)>,
     /// Signing keys that could not be obtained, and when that was last tried.
     key_misses: dashmap::DashMap<(ruma::OwnedServerName, String), std::time::Instant>,
+    /// Rooms of version 1 whose state was resolved by approximation since the start: each
+    /// is reported once (see `resolve_states`).
+    approximated_rooms: dashmap::DashSet<ruma::OwnedRoomId>,
     /// Weak handle to ourselves, for code paths that need an `Arc<Federation>`.
     weak_self: std::sync::OnceLock<std::sync::Weak<Federation>>,
 }
@@ -152,6 +155,7 @@ impl Federation {
             auth_misses: dashmap::DashMap::new(),
             foreign_room_events: dashmap::DashMap::new(),
             key_misses: dashmap::DashMap::new(),
+            approximated_rooms: dashmap::DashSet::new(),
             weak_self: std::sync::OnceLock::new(),
         });
         let _ = fed.weak_self.set(Arc::downgrade(&fed));
