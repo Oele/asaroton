@@ -12,9 +12,19 @@ use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitEx
 use crate::config::Config;
 
 /// Initialise `tracing`. `RUST_LOG` overrides the configured filter.
+/// The WebRTC library under the SFU in the process (webrtc-rs) logs what goes wrong on single
+/// connections at WARN, which is what `LiveKit` keeps at its `pion_level` of `error`: a client
+/// that goes away in the middle of setting up a connection is not something to warn about. The
+/// configured filter comes after these and can set them otherwise.
+const WEBRTC_LOG_DEFAULTS: &str = "rtc=error,rtc_crypto=error,rtc_datachannel=error,rtc_dtls=error,\
+    rtc_ice=error,rtc_interceptor=error,rtc_mdns=error,rtc_media=error,rtc_rtcp=error,\
+    rtc_rtp=error,rtc_sctp=error,rtc_sdp=error,rtc_shared=error,rtc_srtp=error,rtc_stun=error,\
+    rtc_turn=error";
+
 pub fn init_tracing(config: &Config) {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(config.logging.filter.clone()));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::new(format!("{WEBRTC_LOG_DEFAULTS},{}", config.logging.filter))
+    });
     let registry = tracing_subscriber::registry().with(filter);
     if config.logging.json {
         registry
@@ -211,6 +221,20 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     let services = Services::new(service_config(&config)?, store).await?;
     tracing::info!(server_name = %config.server_name, key = %services.signing_key.key_id(), "asaroton starting");
 
+    // The SFU in the process, when `[rtc.livekit] in_process` asks for it: it takes the room
+    // calls, its events come to the homeserver directly, and its routes are served below. It
+    // starts before the workers, so that the delegated-leave worker asks it and not an SFU
+    // over HTTP. It is not stopped with the server: see `crate::sfu`.
+    let sfu_router = match config.rtc.livekit.as_ref().filter(|lk| lk.in_process) {
+        Some(_) => {
+            let started = crate::sfu::InProcessSfu::start(&config).await?;
+            services.rtc.use_in_process(started.sfu);
+            crate::sfu::forward_events(started.events, Arc::clone(&services));
+            Some(started.router)
+        }
+        None => None,
+    };
+
     let federation = if config.federation.disabled {
         // A closed server still wakes its own users and feeds its application services.
         asaroton_federation::start_without_federation(
@@ -251,7 +275,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         limiter: asaroton_api::ratelimit::Limiter::default(),
         services: Arc::clone(&services),
         federation,
-        sfu_router: None,
+        sfu_router,
     }));
 
     let mut tasks = tokio::task::JoinSet::new();
@@ -313,7 +337,8 @@ async fn told_to_stop() -> &'static str {
 
 /// The orderly way out (see `asaroton_service::closing`): no new connections, the requests
 /// that wait for news are answered at once, and those that are being worked on get `within`
-/// to finish. A request that writes is waited for even when its client is gone.
+/// to finish. A request that writes is waited for even when its client is gone. The calls of
+/// an SFU in the process go on meanwhile and end with the process.
 async fn stop(
     services: &Services,
     handle: &axum_server::Handle<std::net::SocketAddr>,

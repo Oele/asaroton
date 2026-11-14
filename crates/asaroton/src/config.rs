@@ -289,6 +289,12 @@ pub struct LivekitConfig {
     /// `asaroton livekit-config`.
     #[serde(default)]
     pub turn: Option<TurnConfig>,
+    /// Run the SFU in asaroton's own process (musivum, which speaks `LiveKit`'s protocol)
+    /// instead of reaching a separate `livekit-server`. It takes its listeners from `sfu` and
+    /// `turn` as `livekit-config` writes them for `livekit-server`; `url` and `api_url` are
+    /// then not used, and the signalling is served under asaroton's own address.
+    #[serde(default)]
+    pub in_process: bool,
 }
 
 impl std::fmt::Debug for LivekitConfig {
@@ -300,6 +306,7 @@ impl std::fmt::Debug for LivekitConfig {
             .field("remote_can_publish", &self.remote_can_publish)
             .field("sfu", &self.sfu)
             .field("turn", &self.turn)
+            .field("in_process", &self.in_process)
             .finish_non_exhaustive()
     }
 }

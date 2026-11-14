@@ -7,6 +7,7 @@ mod config;
 mod import_synapse;
 mod livekit_config;
 mod server;
+mod sfu;
 
 use std::path::PathBuf;
 

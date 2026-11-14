@@ -39,8 +39,10 @@ for deliberate deviations, each with its reason in `tests/complement/expected-fa
   lookups.
 - **Authentication:** its own passwords and tokens, or delegated to Matrix Authentication
   Service (MSC3861).
-- **Voice and video calls:** MatrixRTC over LiveKit (MSC4195) with the token service built
-  in; a LiveKit server is the only extra component.
+- **Voice and video calls:** MatrixRTC over LiveKit's protocol (MSC4195) with the token service
+  built in, and with the media server built in too if you like
+  ([musivum](https://github.com/Oele/musivum), a port of LiveKit's SFU to Rust): one process for
+  chat and calls. A separate LiveKit server works as well.
 - **For the operator:** a subset of Synapse's admin API, rate limiting, message retention, an
   importer for an existing Synapse database (`asaroton import-synapse`), a container image.
 

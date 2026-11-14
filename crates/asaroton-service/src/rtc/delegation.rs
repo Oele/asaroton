@@ -22,6 +22,12 @@ const CLEANUP_INTERVAL: Duration = Duration::from_mins(10);
 /// Participant records older than this are dropped.
 const PARTICIPANT_MAX_AGE_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
+/// How long participants who were connected before an SFU in the process started (that is,
+/// before the server restarted) are given to connect again before their leave is sent. The
+/// clients reconnect by themselves within seconds; `LiveKit`'s JavaScript SDK gives up after
+/// about 45 s.
+const RECONNECT_GRACE_MS: i64 = 60 * 1000;
+
 /// Starts the worker; does nothing when no SFU is configured.
 pub fn start_worker(services: Arc<Services>) {
     tokio::spawn(async move {
@@ -70,6 +76,8 @@ async fn poll(services: &Services) -> crate::Result<()> {
         by_room.entry(&leave.lk_room).or_default().push(leave);
     }
     let now = now_ts();
+    let sfu_started = rooms.started_at();
+    let reconnecting = |connected_ts: i64| may_be_reconnecting(connected_ts, sfu_started, now);
     for (lk_room, leaves) in by_room {
         let connected: Vec<String> = match rooms.list_participants(lk_room).await {
             Ok(list) => list
@@ -104,6 +112,8 @@ async fn poll(services: &Services) -> crate::Result<()> {
                         .await?;
                     services.delayed.wake.notify_one();
                 }
+            } else if leave.connected_ts.is_some_and(reconnecting) {
+                // Not gone: the server restarted under it.
             } else if leave.connected_ts.is_some() {
                 services.send_delegated_leave(leave).await;
             } else if now - leave.created_ts > CONNECT_WAIT_MS.min(ev.delay_ms) {
@@ -116,4 +126,41 @@ async fn poll(services: &Services) -> crate::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Whether a participant that connected at `connected_ts` and is not in the SFU now may still
+/// come back to it: the SFU started (with this server) after the participant connected, and
+/// not long ago.
+fn may_be_reconnecting(connected_ts: i64, sfu_started: Option<i64>, now: i64) -> bool {
+    sfu_started.is_some_and(|started| connected_ts < started && now - started < RECONNECT_GRACE_MS)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RECONNECT_GRACE_MS, may_be_reconnecting};
+
+    #[test]
+    fn participants_from_before_a_restart_get_time_to_reconnect() {
+        let started = 1_000_000;
+        // connected before the SFU in the process started: waited for, for a while
+        assert!(may_be_reconnecting(started - 5, Some(started), started + 1));
+        assert!(may_be_reconnecting(
+            started - 5,
+            Some(started),
+            started + RECONNECT_GRACE_MS - 1
+        ));
+        assert!(!may_be_reconnecting(
+            started - 5,
+            Some(started),
+            started + RECONNECT_GRACE_MS
+        ));
+        // connected to this SFU and gone from it: gone
+        assert!(!may_be_reconnecting(
+            started + 5,
+            Some(started),
+            started + 10
+        ));
+        // an SFU of its own: it did not restart with this server
+        assert!(!may_be_reconnecting(started - 5, None, started + 1));
+    }
 }

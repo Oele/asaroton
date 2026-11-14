@@ -33,6 +33,9 @@ clap.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 rustls.workspace = true
+musivum.workspace = true
+musivum-server.workspace = true
+async-trait.workspace = true
 
 [[bin]]
 name = "asaroton"

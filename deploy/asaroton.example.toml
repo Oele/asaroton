@@ -53,6 +53,7 @@ mode = "word"
 # tokens itself, relays the SFU's signalling and writes its livekit.yaml with
 # `asaroton livekit-config`; see docs/deployment.md.
 # [rtc.livekit]
+# in_process = true                        # the SFU inside asaroton (musivum): no livekit-server
 # api_key = "APIabc123"
 # api_secret = "the-secret-from-livekit-server-generate-keys"
 # url = "wss://livekit.example.org"         # only if the SFU's WebSocket is exposed separately

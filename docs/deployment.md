@@ -142,12 +142,28 @@ search table.
 
 Calls (Element Call, in Element Web, Element X and the standalone app) use MatrixRTC over
 LiveKit: the clients exchange call membership as room events and send media through a LiveKit
-SFU. asaroton implements the homeserver side of MSC4195 itself, relays the SFU's signalling, and
-writes the SFU's configuration, so the only extra service is `livekit-server` on the same host.
+SFU. asaroton implements the homeserver side of MSC4195 itself. The SFU can run in two ways:
+
+- **In asaroton's own process** (`in_process = true`): asaroton has
+  [musivum](https://github.com/Oele/musivum) built in, a port of LiveKit's media server to Rust
+  that speaks LiveKit's protocol. There is no other service to run and no `livekit.yaml`:
+  asaroton opens the media and TURN ports itself and serves the signalling under its own
+  address. This is new (November 2026) and has carried calls with Element Call in browsers and
+  Element X on Android, also through TURN; Safari and iOS are untested. A restart of asaroton
+  (an upgrade) now also interrupts the calls: their clients reconnect to the new process by
+  themselves, which in tests took about two seconds. At such a reconnect musivum logs
+  `could not handle new participant ... could not restart participant` once per participant,
+  as LiveKit does: the client asked to resume a session the new process does not have, and is
+  told to join again.
+- **As a separate `livekit-server`** on the same host: asaroton relays its signalling and writes
+  its configuration (`asaroton livekit-config`). The long-tried way.
+
+Everything below applies to both, except where it names `livekit-server`.
 
 ```toml
 [rtc.livekit]
-api_key = "APIabc123"                        # from `livekit-server generate-keys`
+# in_process = true                          # the SFU inside asaroton: no livekit-server
+api_key = "APIabc123"                        # from `livekit-server generate-keys`, or any pair of random strings
 api_secret = "the-secret-from-livekit-server-generate-keys"
 # remote_can_publish = true                  # users of other servers may publish here
 

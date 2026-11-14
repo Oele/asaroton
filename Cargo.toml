@@ -11,6 +11,11 @@ repository = "https://github.com/Oele/asaroton"
 authors = ["The asaroton authors"]
 
 [workspace.dependencies]
+# The SFU that runs in asaroton's process (`[rtc.livekit] in_process`): musivum, a port of
+# LiveKit's media server, Apache-2.0 like asaroton. Pinned to a commit: its main moves, and it is
+# not on crates.io. Move the three revs together.
+musivum = { git = "https://github.com/Oele/musivum", rev = "c5d4479050182ff7ca820e7d09c88b0e3a204434" }
+musivum-server = { git = "https://github.com/Oele/musivum", rev = "c5d4479050182ff7ca820e7d09c88b0e3a204434" }
 html-escape = "0.3.0"
 percent-encoding = "2"
 # internal crates
@@ -141,3 +146,10 @@ debug = 1
 
 [profile.dev.package."*"]
 opt-level = 2
+
+# musivum builds against patched copies of two webrtc-rs crates (its third_party/); a patch
+# applies only from the workspace that is built, so it is repeated here, from the same rev.
+# Without it the build takes the unpatched crates and lacks musivum's codec and RTP fixes.
+[patch.crates-io]
+rtc-rtp = { git = "https://github.com/Oele/musivum", rev = "c5d4479050182ff7ca820e7d09c88b0e3a204434" }
+rtc = { git = "https://github.com/Oele/musivum", rev = "c5d4479050182ff7ca820e7d09c88b0e3a204434" }

@@ -13,9 +13,19 @@ pub fn print(config: &Config, config_path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The `livekit.yaml` for this server's SFU: what `print` writes, and what an SFU that runs
-/// in this process reads. Warnings go to standard error.
+/// The `livekit.yaml` for this server's SFU, as `print` writes it. Warnings go to standard
+/// error.
 pub fn render(config: &Config, config_path: &Path) -> anyhow::Result<String> {
+    render_with(config, config_path, true)
+}
+
+/// The configuration of the SFU that runs in this process: the same, without the webhook,
+/// whose events reach asaroton without HTTP.
+pub fn render_in_process(config: &Config, config_path: &Path) -> anyhow::Result<String> {
+    render_with(config, config_path, false)
+}
+
+fn render_with(config: &Config, config_path: &Path, webhook: bool) -> anyhow::Result<String> {
     let Some(lk) = &config.rtc.livekit else {
         anyhow::bail!(
             "[rtc.livekit] is not configured in {}",
@@ -50,12 +60,14 @@ pub fn render(config: &Config, config_path: &Path) -> anyhow::Result<String> {
         yaml_str(&lk.api_key),
         yaml_str(&lk.api_secret)
     )?;
-    writeln!(
-        out,
-        "webhook:\n  api_key: {}\n  urls:\n    - {}",
-        yaml_str(&lk.api_key),
-        yaml_str(&webhook_url)
-    )?;
+    if webhook {
+        writeln!(
+            out,
+            "webhook:\n  api_key: {}\n  urls:\n    - {}",
+            yaml_str(&lk.api_key),
+            yaml_str(&webhook_url)
+        )?;
+    }
     out.push_str("room:\n  auto_create: true\n");
     if let Some(turn) = lk.turn.as_ref().filter(|t| t.enabled) {
         let domain = turn.domain.as_deref().unwrap_or_else(|| {

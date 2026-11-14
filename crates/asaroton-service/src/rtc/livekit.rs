@@ -55,6 +55,12 @@ pub trait SfuRooms: Send + Sync + std::fmt::Debug {
     async fn list_participants(&self, room: &str) -> Result<Vec<Participant>, ApiError>;
     /// Removes a participant; an absent participant is not an error.
     async fn remove_participant(&self, room: &str, identity: &str) -> Result<(), ApiError>;
+    /// When this SFU started (ms since the epoch), if it started with this server: an SFU in
+    /// the process knows nobody who was connected before, and those clients get time to come
+    /// back before they count as gone. `None` for an SFU that runs on its own.
+    fn started_at(&self) -> Option<i64> {
+        None
+    }
 }
 
 /// Access to one `LiveKit` SFU's management API.

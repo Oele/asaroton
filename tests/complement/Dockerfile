@@ -12,6 +12,7 @@ FROM rust:1-bookworm AS builder
 WORKDIR /src
 COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/src/target \
     cargo build --release -p asaroton && cp target/release/asaroton /asaroton
 
