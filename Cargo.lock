@@ -2496,7 +2496,7 @@ dependencies = [
 [[package]]
 name = "musivum"
 version = "0.0.0"
-source = "git+https://github.com/Oele/musivum?rev=7c226357d5b6d0d9107b9baf3b93690e0b2fc64b#7c226357d5b6d0d9107b9baf3b93690e0b2fc64b"
+source = "git+https://github.com/Oele/musivum?rev=73e76fd4e05804e3c5e654cc507ebcce88a0b1c7#73e76fd4e05804e3c5e654cc507ebcce88a0b1c7"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -2530,7 +2530,7 @@ dependencies = [
 [[package]]
 name = "musivum-protocol"
 version = "0.0.0"
-source = "git+https://github.com/Oele/musivum?rev=7c226357d5b6d0d9107b9baf3b93690e0b2fc64b#7c226357d5b6d0d9107b9baf3b93690e0b2fc64b"
+source = "git+https://github.com/Oele/musivum?rev=73e76fd4e05804e3c5e654cc507ebcce88a0b1c7#73e76fd4e05804e3c5e654cc507ebcce88a0b1c7"
 dependencies = [
  "pbjson",
  "pbjson-build",
@@ -2544,7 +2544,7 @@ dependencies = [
 [[package]]
 name = "musivum-server"
 version = "0.0.0"
-source = "git+https://github.com/Oele/musivum?rev=7c226357d5b6d0d9107b9baf3b93690e0b2fc64b#7c226357d5b6d0d9107b9baf3b93690e0b2fc64b"
+source = "git+https://github.com/Oele/musivum?rev=73e76fd4e05804e3c5e654cc507ebcce88a0b1c7#73e76fd4e05804e3c5e654cc507ebcce88a0b1c7"
 dependencies = [
  "axum",
  "bytes",
@@ -3414,7 +3414,7 @@ dependencies = [
 [[package]]
 name = "rtc"
 version = "0.21.1"
-source = "git+https://github.com/Oele/musivum?rev=7c226357d5b6d0d9107b9baf3b93690e0b2fc64b#7c226357d5b6d0d9107b9baf3b93690e0b2fc64b"
+source = "git+https://github.com/Oele/musivum?rev=73e76fd4e05804e3c5e654cc507ebcce88a0b1c7#73e76fd4e05804e3c5e654cc507ebcce88a0b1c7"
 dependencies = [
  "bytes",
  "hex",
@@ -3501,8 +3501,7 @@ dependencies = [
 [[package]]
 name = "rtc-ice"
 version = "0.21.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "099984f1be120b2e5692f232f8cbb82e53f6b4261c5c2eeda5be6223ba1adaa9"
+source = "git+https://github.com/Oele/musivum?rev=73e76fd4e05804e3c5e654cc507ebcce88a0b1c7#73e76fd4e05804e3c5e654cc507ebcce88a0b1c7"
 dependencies = [
  "bytes",
  "crc",
@@ -3571,7 +3570,7 @@ dependencies = [
 [[package]]
 name = "rtc-rtp"
 version = "0.21.1"
-source = "git+https://github.com/Oele/musivum?rev=7c226357d5b6d0d9107b9baf3b93690e0b2fc64b#7c226357d5b6d0d9107b9baf3b93690e0b2fc64b"
+source = "git+https://github.com/Oele/musivum?rev=73e76fd4e05804e3c5e654cc507ebcce88a0b1c7#73e76fd4e05804e3c5e654cc507ebcce88a0b1c7"
 dependencies = [
  "bytes",
  "memchr",

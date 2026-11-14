@@ -13,9 +13,9 @@ authors = ["The asaroton authors"]
 [workspace.dependencies]
 # The SFU that runs in asaroton's process (`[rtc.livekit] in_process`): musivum, a port of
 # LiveKit's media server, Apache-2.0 like asaroton. Pinned to a commit: its main moves, and it is
-# not on crates.io. Move the four revs together.
-musivum = { git = "https://github.com/Oele/musivum", rev = "7c226357d5b6d0d9107b9baf3b93690e0b2fc64b" }
-musivum-server = { git = "https://github.com/Oele/musivum", rev = "7c226357d5b6d0d9107b9baf3b93690e0b2fc64b" }
+# not on crates.io. Move the five revs together.
+musivum = { git = "https://github.com/Oele/musivum", rev = "73e76fd4e05804e3c5e654cc507ebcce88a0b1c7" }
+musivum-server = { git = "https://github.com/Oele/musivum", rev = "73e76fd4e05804e3c5e654cc507ebcce88a0b1c7" }
 html-escape = "0.3.0"
 percent-encoding = "2"
 # internal crates
@@ -147,9 +147,10 @@ debug = 1
 [profile.dev.package."*"]
 opt-level = 2
 
-# musivum builds against patched copies of two webrtc-rs crates (its third_party/); a patch
+# musivum builds against patched copies of three webrtc-rs crates (its third_party/); a patch
 # applies only from the workspace that is built, so it is repeated here, from the same rev.
 # Without it the build takes the unpatched crates and lacks musivum's codec and RTP fixes.
 [patch.crates-io]
-rtc-rtp = { git = "https://github.com/Oele/musivum", rev = "7c226357d5b6d0d9107b9baf3b93690e0b2fc64b" }
-rtc = { git = "https://github.com/Oele/musivum", rev = "7c226357d5b6d0d9107b9baf3b93690e0b2fc64b" }
+rtc-rtp = { git = "https://github.com/Oele/musivum", rev = "73e76fd4e05804e3c5e654cc507ebcce88a0b1c7" }
+rtc = { git = "https://github.com/Oele/musivum", rev = "73e76fd4e05804e3c5e654cc507ebcce88a0b1c7" }
+rtc-ice = { git = "https://github.com/Oele/musivum", rev = "73e76fd4e05804e3c5e654cc507ebcce88a0b1c7" }
