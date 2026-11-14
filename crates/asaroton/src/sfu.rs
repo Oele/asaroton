@@ -15,13 +15,14 @@
 //! musivum runs on asaroton's runtime and starts some threads of its own: see the
 //! documentation of `musivum_server::embed`.
 //!
-//! It is not shut down when the server stops: that would tell every client that the call is
-//! over (a leave with the action `DISCONNECT`), and they would not come back. Ending with the
-//! process cuts their connections instead; they try to resume them on the server that comes up,
-//! which tells them to reconnect, and they do (seconds). Their leaves wait meanwhile (see
-//! `SfuRooms::started_at`).
+//! When the server stops it is shut down for a restart: every participant is told to
+//! reconnect (a leave with the action `RECONNECT`, reason `MIGRATION`), and the clients join
+//! the server that comes up (seconds). The events of that shutdown carry the same reason, and
+//! are not taken for participants leaving: their call memberships stay. Their delegated leaves
+//! wait until they are back (see `SfuRooms::started_at`). After a crash the clients find their
+//! session gone when they try to resume it, and are sent to join again all the same.
 
-use std::{path::Path, sync::Arc};
+use std::{path::Path, sync::Arc, time::Duration};
 
 use anyhow::Context;
 use asaroton_service::{
@@ -30,13 +31,13 @@ use asaroton_service::{
 };
 use musivum::protocol::livekit;
 use musivum_server::embed::{EmbedOptions, Embedded, twirp_code};
-use tokio::sync::broadcast;
+use tokio::sync::{RwLock, broadcast};
 
 use crate::config::Config;
 
-/// The SFU in the process.
+/// The SFU in the process. Its calls fail once it has been shut down.
 pub struct InProcessSfu {
-    embedded: Embedded,
+    embedded: RwLock<Option<Embedded>>,
     started_at: i64,
 }
 
@@ -92,13 +93,32 @@ impl InProcessSfu {
         );
         Ok(Started {
             sfu: Arc::new(Self {
-                embedded,
+                embedded: RwLock::new(Some(embedded)),
                 started_at: asaroton_store::now_ts(),
             }),
             router,
             events,
         })
     }
+
+    /// Ends the calls for a restart: the participants are sent to reconnect, and get until
+    /// `timeout` to go before they are closed with the media and TURN listeners.
+    pub async fn shutdown_for_restart(&self, timeout: Duration) {
+        if let Some(embedded) = self.embedded.write().await.take() {
+            embedded.shutdown_for_restart(timeout).await;
+            tracing::info!("SFU in the process stopped; its participants were sent to reconnect");
+        }
+    }
+}
+
+/// Whether an event comes from a shutdown for a restart, whose participants come back: such a
+/// leave or end of a room ends no call membership.
+fn is_restart(event: &livekit::WebhookEvent) -> bool {
+    event
+        .participant
+        .as_ref()
+        .is_some_and(|p| p.disconnect_reason == livekit::DisconnectReason::Migration as i32)
+        || event.room_end_reason == livekit::RoomEndReason::RoomEndSuperseded as i32
 }
 
 /// Hands the SFU's events to the homeserver until the SFU stops.
@@ -116,6 +136,9 @@ pub fn forward_events(
                         .as_ref()
                         .map_or("", |p| p.identity.as_str());
                     tracing::debug!(kind = %event.event, lk_room = room, identity, "SFU event");
+                    if is_restart(&event) {
+                        continue;
+                    }
                     if let Err(e) = services.rtc_sfu_event(&event.event, room, identity).await {
                         tracing::warn!(error = %e, kind = %event.event, "handling an SFU event failed");
                     }
@@ -130,6 +153,10 @@ pub fn forward_events(
     });
 }
 
+fn stopped() -> ApiError {
+    ApiError::Transport("the SFU in the process has stopped".to_owned())
+}
+
 fn api_error(err: &musivum::service::Error) -> ApiError {
     ApiError::Remote {
         status: 0,
@@ -141,7 +168,9 @@ fn api_error(err: &musivum::service::Error) -> ApiError {
 #[async_trait::async_trait]
 impl SfuRooms for InProcessSfu {
     async fn create_room(&self, name: &str) -> Result<(), ApiError> {
-        self.embedded
+        let guard = self.embedded.read().await;
+        let embedded = guard.as_ref().ok_or_else(stopped)?;
+        embedded
             .create_room(livekit::CreateRoomRequest {
                 name: name.to_owned(),
                 empty_timeout: 300,
@@ -155,8 +184,9 @@ impl SfuRooms for InProcessSfu {
     }
 
     async fn list_participants(&self, room: &str) -> Result<Vec<Participant>, ApiError> {
-        match self
-            .embedded
+        let guard = self.embedded.read().await;
+        let embedded = guard.as_ref().ok_or_else(stopped)?;
+        match embedded
             .list_participants(livekit::ListParticipantsRequest {
                 room: room.to_owned(),
             })
@@ -184,8 +214,9 @@ impl SfuRooms for InProcessSfu {
     }
 
     async fn remove_participant(&self, room: &str, identity: &str) -> Result<(), ApiError> {
-        match self
-            .embedded
+        let guard = self.embedded.read().await;
+        let embedded = guard.as_ref().ok_or_else(stopped)?;
+        match embedded
             .remove_participant(livekit::RoomParticipantIdentity {
                 room: room.to_owned(),
                 identity: identity.to_owned(),

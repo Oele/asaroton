@@ -224,15 +224,15 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     // The SFU in the process, when `[rtc.livekit] in_process` asks for it: it takes the room
     // calls, its events come to the homeserver directly, and its routes are served below. It
     // starts before the workers, so that the delegated-leave worker asks it and not an SFU
-    // over HTTP. It is not stopped with the server: see `crate::sfu`.
-    let sfu_router = match config.rtc.livekit.as_ref().filter(|lk| lk.in_process) {
+    // over HTTP. It stops with the server, sending its participants to the next one.
+    let (sfu, sfu_router) = match config.rtc.livekit.as_ref().filter(|lk| lk.in_process) {
         Some(_) => {
             let started = crate::sfu::InProcessSfu::start(&config).await?;
-            services.rtc.use_in_process(started.sfu);
+            services.rtc.use_in_process(Arc::clone(&started.sfu) as _);
             crate::sfu::forward_events(started.events, Arc::clone(&services));
-            Some(started.router)
+            (Some(started.sfu), Some(started.router))
         }
-        None => None,
+        None => (None, None),
     };
 
     let federation = if config.federation.disabled {
@@ -306,7 +306,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
             return Ok(());
         }
     }
-    stop(&services, &handle, tasks, STOP_WITHIN).await;
+    stop(&services, &handle, tasks, STOP_WITHIN, sfu.as_deref()).await;
     Ok(())
 }
 
@@ -337,16 +337,23 @@ async fn told_to_stop() -> &'static str {
 
 /// The orderly way out (see `asaroton_service::closing`): no new connections, the requests
 /// that wait for news are answered at once, and those that are being worked on get `within`
-/// to finish. A request that writes is waited for even when its client is gone. The calls of
-/// an SFU in the process go on meanwhile and end with the process.
+/// to finish. A request that writes is waited for even when its client is gone. An SFU in the
+/// process sends its participants to reconnect at the same time; they come back to the next
+/// server.
 async fn stop(
     services: &Services,
     handle: &axum_server::Handle<std::net::SocketAddr>,
     mut listeners: tokio::task::JoinSet<anyhow::Result<()>>,
     within: std::time::Duration,
+    sfu: Option<&crate::sfu::InProcessSfu>,
 ) {
     let started = std::time::Instant::now();
     services.closing.begin();
+    let sfu_stopped = async {
+        if let Some(sfu) = sfu {
+            sfu.shutdown_for_restart(within).await;
+        }
+    };
     // The listeners close what is idle, let each connection finish the request it is in, and
     // cut off what is left when the time is up.
     handle.graceful_shutdown(Some(within));
@@ -357,7 +364,8 @@ async fn stop(
     // A little longer than the listeners get, so that a write whose connection was cut off
     // at the limit is not reported while it is still counted.
     let limit = within + std::time::Duration::from_secs(1);
-    if tokio::time::timeout(limit, finished).await.is_ok() {
+    let (finished, ()) = tokio::join!(tokio::time::timeout(limit, finished), sfu_stopped);
+    if finished.is_ok() {
         tracing::info!(
             millis = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
             "stopped: every request was finished"

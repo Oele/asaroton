@@ -150,11 +150,11 @@ SFU. asaroton implements the homeserver side of MSC4195 itself. The SFU can run 
   asaroton opens the media and TURN ports itself and serves the signalling under its own
   address. This is new (November 2026) and has carried calls with Element Call in browsers and
   Element X on Android, also through TURN; Safari and iOS are untested. A restart of asaroton
-  (an upgrade) now also interrupts the calls: their clients reconnect to the new process by
-  themselves, which in tests took about two seconds. At such a reconnect musivum logs
+  (an upgrade) now also interrupts the calls: a stopping asaroton tells their clients to
+  reconnect, and they join the new process by themselves, which in tests took a few seconds.
+  After a crash they find out by themselves; musivum then logs
   `could not handle new participant ... could not restart participant` once per participant,
-  as LiveKit does: the client asked to resume a session the new process does not have, and is
-  told to join again.
+  as LiveKit does.
 - **As a separate `livekit-server`** on the same host: asaroton relays its signalling and writes
   its configuration (`asaroton livekit-config`). The long-tried way.
 
