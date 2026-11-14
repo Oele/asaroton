@@ -49,7 +49,7 @@ pub async fn set_rule(
     req: Ruma<set_pushrule::v3::Request>,
 ) -> Result<set_pushrule::v3::Response> {
     let user_id = &req.sender()?.user_id;
-    let mut rules = services.push_rules(user_id).await?;
+    let (_turn, mut rules) = services.push_rules_to_change(user_id).await?;
     rules
         .insert(
             req.body.rule.clone(),
@@ -81,7 +81,7 @@ pub async fn delete_rule(
     req: Ruma<delete_pushrule::v3::Request>,
 ) -> Result<delete_pushrule::v3::Response> {
     let user_id = &req.sender()?.user_id;
-    let mut rules = services.push_rules(user_id).await?;
+    let (_turn, mut rules) = services.push_rules_to_change(user_id).await?;
     rules
         .remove(req.body.kind.clone(), &req.body.rule_id)
         .map_err(|e| match e {
@@ -110,7 +110,7 @@ pub async fn set_enabled(
     req: Ruma<set_pushrule_enabled::v3::Request>,
 ) -> Result<set_pushrule_enabled::v3::Response> {
     let user_id = &req.sender()?.user_id;
-    let mut rules = services.push_rules(user_id).await?;
+    let (_turn, mut rules) = services.push_rules_to_change(user_id).await?;
     rules
         .set_enabled(req.body.kind.clone(), &req.body.rule_id, req.body.enabled)
         .map_err(|_| rule_not_found())?;
@@ -136,7 +136,7 @@ pub async fn set_actions(
     req: Ruma<set_pushrule_actions::v3::Request>,
 ) -> Result<set_pushrule_actions::v3::Response> {
     let user_id = &req.sender()?.user_id;
-    let mut rules = services.push_rules(user_id).await?;
+    let (_turn, mut rules) = services.push_rules_to_change(user_id).await?;
     rules
         .set_actions(
             req.body.kind.clone(),

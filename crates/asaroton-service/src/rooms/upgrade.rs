@@ -232,6 +232,7 @@ impl Services {
         old_room: &RoomId,
         new_room: &RoomId,
     ) -> Result<()> {
+        let _turn = self.push_rules_turn(user).await;
         let Some((mut rules, _)) = self.store.get_push_rules(user).await? else {
             return Ok(());
         };
@@ -291,7 +292,16 @@ impl Services {
         }
         if changed {
             let at = self.store.set_push_rules(user, &rules).await?;
-            self.push_rules_cache.remove(user);
+            // Nothing older may stay in the cache (see `remember_push_rules`); a ruleset
+            // that does not parse is not cached at all.
+            match serde_json::from_value::<ruma::push::Ruleset>(rules) {
+                Ok(parsed) => {
+                    self.remember_push_rules(user, std::sync::Arc::new((parsed, at)));
+                }
+                Err(_) => {
+                    self.push_rules_cache.remove(user);
+                }
+            }
             self.wake_when_reportable(
                 asaroton_store::SyncStream::AccountData,
                 at,

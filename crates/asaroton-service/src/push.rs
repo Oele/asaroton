@@ -10,7 +10,7 @@ use ruma::{
 };
 use serde_json::Value;
 
-use crate::{Error, Notification, Result, Services};
+use crate::{Error, Notification, Result, Services, txn::TxnTurn};
 
 /// The server default ruleset. The poll rules (MSC3930) match the event type with
 /// `event_match`, as the MSC and Synapse do, rather than ruma's `event_property_is`.
@@ -60,20 +60,50 @@ impl Services {
         if let Some(c) = self.push_rules_cache.get(user_id) {
             return Ok(Arc::clone(&c));
         }
-        let entry = match self.store.get_push_rules(user_id).await? {
-            Some((json, stream)) => Arc::new((
+        let entry = Arc::new(self.stored_push_rules(user_id).await?);
+        Ok(self.remember_push_rules(user_id, entry))
+    }
+
+    /// The ruleset as stored, with the stream id of its last change.
+    async fn stored_push_rules(&self, user_id: &UserId) -> Result<(Ruleset, i64)> {
+        Ok(match self.store.get_push_rules(user_id).await? {
+            Some((json, stream)) => (
                 serde_json::from_value(json)
                     .map_err(|e| Error::internal(format!("stored push rules: {e}")))?,
                 stream,
-            )),
-            None => Arc::new((default_ruleset(user_id), 0)),
-        };
+            ),
+            None => (default_ruleset(user_id), 0),
+        })
+    }
+
+    /// Puts a ruleset in the cache unless the cache has a later one, and returns what the
+    /// cache has. A request that read the store just before a change must not put back what
+    /// the change replaced: later changes would start from it and undo this one.
+    pub(crate) fn remember_push_rules(
+        &self,
+        user_id: &UserId,
+        entry: Arc<(Ruleset, i64)>,
+    ) -> Arc<(Ruleset, i64)> {
         if self.push_rules_cache.len() > 50_000 {
             self.push_rules_cache.clear();
         }
-        self.push_rules_cache
-            .insert(user_id.to_owned(), Arc::clone(&entry));
-        Ok(entry)
+        let mut cached = self
+            .push_rules_cache
+            .entry(user_id.to_owned())
+            .or_insert_with(|| Arc::clone(&entry));
+        if cached.1 < entry.1 {
+            *cached = entry;
+        }
+        Arc::clone(&cached)
+    }
+
+    /// The user's ruleset for a change, with the user's turn: changes of one user's push rules
+    /// are made one at a time, each on what the one before it saved, as each saves the whole
+    /// ruleset. Hold the turn until the changed ruleset is saved.
+    pub async fn push_rules_to_change(&self, user_id: &UserId) -> Result<(TxnTurn<'_>, Ruleset)> {
+        let turn = self.push_rules_turn(user_id).await;
+        let (rules, _) = self.stored_push_rules(user_id).await?;
+        Ok((turn, rules))
     }
 
     /// The ruleset as the `m.push_rules` account data content.
@@ -87,11 +117,11 @@ impl Services {
         Ok(self.cached_push_rules(user_id).await?.1)
     }
 
-    /// Persist a modified ruleset and wake the user's syncs.
+    /// Persist a ruleset from [`Services::push_rules_to_change`] and wake the user's syncs.
     pub async fn save_push_rules(&self, user_id: &UserId, rules: &Ruleset) -> Result<()> {
         let json = serde_json::to_value(rules)?;
         let at = self.store.set_push_rules(user_id, &json).await?;
-        self.push_rules_cache.remove(user_id);
+        self.remember_push_rules(user_id, Arc::new((rules.clone(), at)));
         self.wake_when_reportable(
             asaroton_store::SyncStream::AccountData,
             at,

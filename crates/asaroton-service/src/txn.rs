@@ -98,6 +98,14 @@ impl Services {
             .await
     }
 
+    /// Waits for the turn to change this user's push rules: see
+    /// [`Services::push_rules_to_change`].
+    pub(crate) async fn push_rules_turn(&self, user_id: &UserId) -> TxnTurn<'_> {
+        self.txn_turns
+            .take(format!("\npush rules\n{user_id}"))
+            .await
+    }
+
     /// Waits for the turn of a refresh token: a client that asks again with the same one
     /// waits for the first request, and gets the same answer.
     pub(crate) async fn refresh_turn(&self, refresh_token: &str) -> TxnTurn<'_> {
