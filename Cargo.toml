@@ -56,7 +56,7 @@ ruma = { version = "0.17.2", features = [
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
 axum = { version = "0.8", features = ["http2", "macros", "ws"] }
-axum-server = { version = "0.8", features = ["tls-rustls"] }
+axum-server = { version = "0.9", features = ["tls-rustls"] }
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
 tower = "0.5"
 tower-http = { version = "0.7", features = ["trace", "cors", "limit", "timeout", "compression-gzip"] }
