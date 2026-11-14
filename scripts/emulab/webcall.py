@@ -76,8 +76,23 @@ with sync_playwright() as p:
     time.sleep(3)
     page.screenshot(path=f"{OUT}/web-room.png")
     # Start a video call: the header "Video call" button; if a call is active, it's "Join".
-    btn = page.locator("button[aria-label='Video call'], button[aria-label='Join']").first
-    btn.click(timeout=30000)
+    # When a call is already going, Element Web may also show a "Group call started" toast
+    # with its own Join button; any of them will do.
+    clicked = False
+    for attempt in range(15):
+        for loc in (page.locator("button[aria-label='Video call'], button[aria-label='Join']").first,
+                    page.get_by_role("button", name="Join").first):
+            try:
+                if loc.is_visible(timeout=1000):
+                    loc.click(timeout=5000); clicked = True; break
+            except Exception:
+                pass
+        if clicked:
+            break
+        time.sleep(2)
+    if not clicked:
+        page.screenshot(path=f"{OUT}/web-no-call-button.png")
+        raise SystemExit("no call button found")
     note("clicked call button")
     # Possibly a menu offering Element Call vs legacy.
     try:
@@ -106,7 +121,8 @@ with sync_playwright() as p:
         for fr in page.frames:
             if fr != page.main_frame:
                 try:
-                    n = fr.evaluate("Array.from(document.querySelectorAll('video')).map(v=>`${v.videoWidth}x${v.videoHeight}`).join(',')")
+                    # WIDTHxHEIGHT/FRAMES for each video: the frame count shows whether it is live
+                    n = fr.evaluate("Array.from(document.querySelectorAll('video')).map(v=>`${v.videoWidth}x${v.videoHeight}/${v.getVideoPlaybackQuality ? v.getVideoPlaybackQuality().totalVideoFrames : '?'}`).join(',')")
                     note(f"videos in frame {fr.url[:40]}: {n}")
                 except Exception as e:
                     note(f"eval failed: {e}")
