@@ -85,4 +85,4 @@ Please report a vulnerability privately, not in a public issue: see
 
 ## License
 
-MIT, see [LICENSE](LICENSE).
+Apache License 2.0, see [LICENSE](LICENSE) and [NOTICE](NOTICE).

@@ -11,6 +11,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 FROM gcr.io/distroless/cc-debian12:nonroot
 COPY --from=builder /asaroton /usr/local/bin/asaroton
+# The Apache License asks for the licence and the notice to travel with the binary.
+COPY LICENSE NOTICE /usr/share/doc/asaroton/
 # Signing keys and media live here; mount a volume.
 VOLUME ["/data"]
 EXPOSE 8008 8448
