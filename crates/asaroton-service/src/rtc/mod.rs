@@ -45,8 +45,12 @@ const TOKEN_TTL_SECS: i64 = 60 * 60;
 /// Runtime state for the `LiveKit` integration.
 #[derive(Debug, Default)]
 pub struct RtcState {
-    /// The SFU's management API, when a `LiveKit` transport is configured.
-    pub api: Option<Arc<livekit::LivekitApi>>,
+    /// The keys tokens are signed with, when a `LiveKit` transport is configured.
+    pub keys: Option<livekit::SfuKeys>,
+    /// The SFU's management API over HTTP, when a `LiveKit` transport is configured.
+    http: Option<Arc<dyn livekit::SfuRooms>>,
+    /// An SFU that runs in this process, set at start-up; it takes the place of `http`.
+    in_process: std::sync::OnceLock<Arc<dyn livekit::SfuRooms>>,
     /// Wakes the delegation worker after a delegation is added.
     pub wake: tokio::sync::Notify,
 }
@@ -54,15 +58,28 @@ pub struct RtcState {
 impl RtcState {
     pub fn new(settings: Option<&LivekitSettings>) -> Self {
         Self {
-            api: settings.map(|s| {
+            keys: settings.map(|s| livekit::SfuKeys::new(&s.api_key, &s.api_secret)),
+            http: settings.map(|s| {
                 Arc::new(livekit::LivekitApi::new(
                     &s.api_url,
                     &s.api_key,
                     &s.api_secret,
-                ))
+                )) as Arc<dyn livekit::SfuRooms>
             }),
+            in_process: std::sync::OnceLock::new(),
             wake: tokio::sync::Notify::new(),
         }
+    }
+
+    /// The SFU's rooms: the one in this process when there is one, else the HTTP API.
+    pub fn rooms(&self) -> Option<&Arc<dyn livekit::SfuRooms>> {
+        self.in_process.get().or(self.http.as_ref())
+    }
+
+    /// Hands the room calls to an SFU that runs in this process. To be called at start-up,
+    /// once; returns false when one was set already.
+    pub fn use_in_process(&self, rooms: Arc<dyn livekit::SfuRooms>) -> bool {
+        self.in_process.set(rooms).is_ok()
     }
 }
 
@@ -202,8 +219,12 @@ impl Services {
         self.config.rtc.as_ref().ok_or_else(not_configured)
     }
 
-    fn livekit_api(&self) -> Result<&Arc<livekit::LivekitApi>> {
-        self.rtc.api.as_ref().ok_or_else(not_configured)
+    fn sfu_keys(&self) -> Result<&livekit::SfuKeys> {
+        self.rtc.keys.as_ref().ok_or_else(not_configured)
+    }
+
+    fn sfu_rooms(&self) -> Result<&Arc<dyn livekit::SfuRooms>> {
+        self.rtc.rooms().ok_or_else(not_configured)
     }
 
     /// Whether a `LiveKit` transport is configured.
@@ -285,7 +306,7 @@ impl Services {
         identity: &str,
         can_publish: bool,
     ) -> Result<String> {
-        let api = self.livekit_api()?;
+        let keys = self.sfu_keys()?;
         let now = livekit::now_secs();
         let video = json!({
             "room": lk_room,
@@ -297,10 +318,13 @@ impl Services {
             "hidden": false,
         });
         let jwt = jwt::sign(
-            api.api_secret(),
-            &jwt::livekit_claims(api.api_key(), Some(identity), &video, now, TOKEN_TTL_SECS),
+            keys.api_secret(),
+            &jwt::livekit_claims(keys.api_key(), Some(identity), &video, now, TOKEN_TTL_SECS),
         );
-        api.create_room(lk_room).await.map_err(|e| api_error(&e))?;
+        self.sfu_rooms()?
+            .create_room(lk_room)
+            .await
+            .map_err(|e| api_error(&e))?;
         self.store
             .add_rtc_participant(&RtcParticipant {
                 lk_room: lk_room.to_owned(),
@@ -566,17 +590,17 @@ impl Services {
 
     // ------------------------------------------------------------------------ SFU webhooks
 
-    /// A webhook from the SFU: verifies the signature over the body and reacts to
-    /// participants connecting and disconnecting.
+    /// A webhook from the SFU: verifies the signature over the body, then handles the event
+    /// ([`Services::rtc_sfu_event`]).
     pub async fn rtc_webhook(&self, authorization: Option<&str>, body: &[u8]) -> Result<()> {
-        let api = self.livekit_api()?;
+        let keys = self.sfu_keys()?;
         let token = authorization
             .ok_or_else(|| Error::forbidden("Missing webhook signature."))?
             .trim();
         let token = token.strip_prefix("Bearer ").unwrap_or(token);
-        let claims = jwt::verify(api.api_secret(), token, livekit::now_secs())
+        let claims = jwt::verify(keys.api_secret(), token, livekit::now_secs())
             .map_err(|e| Error::forbidden(format!("Bad webhook signature: {e}")))?;
-        if claims.get("iss").and_then(Value::as_str) != Some(api.api_key()) {
+        if claims.get("iss").and_then(Value::as_str) != Some(keys.api_key()) {
             return Err(Error::forbidden("Webhook signed with an unknown key."));
         }
         let expected = base64::engine::general_purpose::STANDARD.encode(Sha256::digest(body));
@@ -597,6 +621,13 @@ impl Services {
             .and_then(Value::as_str)
             .unwrap_or("");
         tracing::debug!(kind, lk_room, identity, "SFU webhook");
+        self.rtc_sfu_event(kind, lk_room, identity).await
+    }
+
+    /// An event of the SFU, whichever way it came (a webhook, or an SFU in this process):
+    /// reacts to participants connecting and disconnecting and to rooms that close. `kind` is
+    /// the webhook event's name (`participant_joined`, `participant_left`, ...).
+    pub async fn rtc_sfu_event(&self, kind: &str, lk_room: &str, identity: &str) -> Result<()> {
         match kind {
             "participant_joined" => {
                 if let Some(leave) = self.store.delegated_leave_for(lk_room, identity).await? {
@@ -610,7 +641,11 @@ impl Services {
                     && !self.is_joined(&p.room_id, &p.user_id).await?
                 {
                     tracing::info!(user_id = %p.user_id, room_id = %p.room_id, "removing SFU participant that is no longer in the room");
-                    if let Err(e) = api.remove_participant(lk_room, identity).await {
+                    if let Err(e) = self
+                        .sfu_rooms()?
+                        .remove_participant(lk_room, identity)
+                        .await
+                    {
                         tracing::warn!(error = %e, "removing SFU participant failed");
                     }
                 }
@@ -652,7 +687,7 @@ impl Services {
     /// A membership event was persisted: a user who left or was removed is also removed
     /// from the SFU rooms this server issued tokens for.
     pub fn rtc_on_event(&self, pdu: &Pdu) {
-        let Some(api) = self.rtc.api.as_ref() else {
+        let Some(rooms) = self.rtc.rooms() else {
             return;
         };
         if pdu.event_type() != &ruma::events::TimelineEventType::RoomMember {
@@ -669,10 +704,10 @@ impl Services {
             return;
         }
         let store = Arc::clone(&self.store);
-        let api = Arc::clone(api);
+        let rooms = Arc::clone(rooms);
         let room_id = pdu.room_id().to_owned();
         tokio::spawn(async move {
-            if let Err(e) = remove_user(&*store, &api, &room_id, &user_id).await {
+            if let Err(e) = remove_user(&*store, &*rooms, &room_id, &user_id).await {
                 tracing::warn!(error = %e, "removing SFU participants after membership change failed");
             }
         });
@@ -682,13 +717,13 @@ impl Services {
 /// Removes every SFU participant identity issued to the user for the room.
 async fn remove_user(
     store: &dyn asaroton_store::Store,
-    api: &livekit::LivekitApi,
+    rooms: &dyn livekit::SfuRooms,
     room_id: &RoomId,
     user_id: &UserId,
 ) -> Result<()> {
     for p in store.rtc_participants_for(room_id, user_id).await? {
         tracing::info!(%user_id, %room_id, lk_room = %p.lk_room, "removing SFU participant: no longer in the room");
-        if let Err(e) = api.remove_participant(&p.lk_room, &p.lk_identity).await {
+        if let Err(e) = rooms.remove_participant(&p.lk_room, &p.lk_identity).await {
             tracing::warn!(error = %e, "removing SFU participant failed");
         }
         store

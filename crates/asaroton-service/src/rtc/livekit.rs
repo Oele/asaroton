@@ -1,11 +1,61 @@
 //! The `LiveKit` server API (Twirp over HTTP with JSON bodies), for the few calls a
 //! homeserver makes: creating rooms, listing participants and removing them.
+//!
+//! The calls are a trait, [`SfuRooms`], so that an SFU that runs in this process can answer
+//! them directly instead of over HTTP. The keys tokens are signed with are not part of it:
+//! they come from the configuration either way ([`SfuKeys`]).
 
 use std::time::Duration;
 
 use serde_json::{Value, json};
 
 use super::jwt;
+
+/// The `LiveKit` API key and secret: access tokens and the management API's own tokens are
+/// signed with them, and the SFU's webhooks are checked against them.
+#[derive(Clone)]
+pub struct SfuKeys {
+    api_key: String,
+    api_secret: String,
+}
+
+impl std::fmt::Debug for SfuKeys {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SfuKeys")
+            .field("api_key", &self.api_key)
+            .finish_non_exhaustive()
+    }
+}
+
+impl SfuKeys {
+    pub fn new(api_key: &str, api_secret: &str) -> Self {
+        Self {
+            api_key: api_key.to_owned(),
+            api_secret: api_secret.to_owned(),
+        }
+    }
+
+    pub fn api_key(&self) -> &str {
+        &self.api_key
+    }
+
+    pub fn api_secret(&self) -> &[u8] {
+        self.api_secret.as_bytes()
+    }
+}
+
+/// What the homeserver asks of the SFU's rooms.
+#[async_trait::async_trait]
+pub trait SfuRooms: Send + Sync + std::fmt::Debug {
+    /// Creates the room, or leaves the existing one as it is. The room stays open five
+    /// minutes while empty and twenty seconds after the last participant leaves, as the
+    /// reference service does.
+    async fn create_room(&self, name: &str) -> Result<(), ApiError>;
+    /// The participants of a room. An unknown room is reported as empty.
+    async fn list_participants(&self, room: &str) -> Result<Vec<Participant>, ApiError>;
+    /// Removes a participant; an absent participant is not an error.
+    async fn remove_participant(&self, room: &str, identity: &str) -> Result<(), ApiError>;
+}
 
 /// Access to one `LiveKit` SFU's management API.
 pub struct LivekitApi {
@@ -127,7 +177,7 @@ impl LivekitApi {
     /// Creates the room, or returns the existing one. The room stays open five minutes while
     /// empty and twenty seconds after the last participant leaves, as the reference service
     /// does.
-    pub async fn create_room(&self, name: &str) -> Result<(), ApiError> {
+    async fn http_create_room(&self, name: &str) -> Result<(), ApiError> {
         self.call(
             "CreateRoom",
             json!({ "roomCreate": true }),
@@ -143,7 +193,7 @@ impl LivekitApi {
     }
 
     /// The participants of a room. An unknown room is reported as empty.
-    pub async fn list_participants(&self, room: &str) -> Result<Vec<Participant>, ApiError> {
+    async fn http_list_participants(&self, room: &str) -> Result<Vec<Participant>, ApiError> {
         let value = match self
             .call(
                 "ListParticipants",
@@ -177,7 +227,7 @@ impl LivekitApi {
     }
 
     /// Removes a participant; an absent participant is not an error.
-    pub async fn remove_participant(&self, room: &str, identity: &str) -> Result<(), ApiError> {
+    async fn http_remove_participant(&self, room: &str, identity: &str) -> Result<(), ApiError> {
         match self
             .call(
                 "RemoveParticipant",
@@ -190,6 +240,21 @@ impl LivekitApi {
             Err(e) if e.is_not_found() => Ok(()),
             Err(e) => Err(e),
         }
+    }
+}
+
+#[async_trait::async_trait]
+impl SfuRooms for LivekitApi {
+    async fn create_room(&self, name: &str) -> Result<(), ApiError> {
+        self.http_create_room(name).await
+    }
+
+    async fn list_participants(&self, room: &str) -> Result<Vec<Participant>, ApiError> {
+        self.http_list_participants(room).await
+    }
+
+    async fn remove_participant(&self, room: &str, identity: &str) -> Result<(), ApiError> {
+        self.http_remove_participant(room, identity).await
     }
 }
 

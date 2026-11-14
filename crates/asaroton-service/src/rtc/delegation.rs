@@ -30,7 +30,7 @@ pub fn start_worker(services: Arc<Services>) {
             if let Err(e) = cleanup(&services, &mut last_cleanup).await {
                 tracing::warn!(error = %e, "RTC cleanup failed");
             }
-            if services.rtc.api.is_some()
+            if services.rtc.rooms().is_some()
                 && let Err(e) = poll(&services).await
             {
                 tracing::warn!(error = %e, "delegated leave poll failed");
@@ -62,7 +62,7 @@ async fn poll(services: &Services) -> crate::Result<()> {
     if leaves.is_empty() {
         return Ok(());
     }
-    let Some(api) = services.rtc.api.as_ref() else {
+    let Some(rooms) = services.rtc.rooms() else {
         return Ok(());
     };
     let mut by_room: HashMap<&str, Vec<&asaroton_store::DelegatedLeave>> = HashMap::new();
@@ -71,7 +71,7 @@ async fn poll(services: &Services) -> crate::Result<()> {
     }
     let now = now_ts();
     for (lk_room, leaves) in by_room {
-        let connected: Vec<String> = match api.list_participants(lk_room).await {
+        let connected: Vec<String> = match rooms.list_participants(lk_room).await {
             Ok(list) => list
                 .into_iter()
                 .filter(super::livekit::Participant::is_connected)
