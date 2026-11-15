@@ -104,13 +104,18 @@ fn bearer(headers: &HeaderMap) -> Option<&str> {
         .map(str::trim)
 }
 
+/// The client's address: the peer's, or behind a trusted reverse proxy the LAST entry of
+/// `X-Forwarded-For`, the one that proxy added. Entries before it come from the client or
+/// proxies nobody vouches for (a proxy that appends, like nginx's `$proxy_add_x_forwarded_for`
+/// or Apache's `mod_proxy`, keeps whatever the client sent in front), and taking one of those
+/// would let a client choose the address it is rate-limited by.
 fn client_ip(headers: &HeaderMap, addr: SocketAddr, trust_forwarded: bool) -> String {
     if trust_forwarded
         && let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok())
-        && let Some(first) = xff.split(',').next().map(str::trim)
-        && !first.is_empty()
+        && let Some(last) = xff.rsplit(',').next().map(str::trim)
+        && !last.is_empty()
     {
-        return first.to_owned();
+        return last.to_owned();
     }
     addr.ip().to_string()
 }
@@ -198,6 +203,19 @@ fn token_key(token: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_client_address_is_the_entry_the_proxy_added() {
+        let addr: SocketAddr = "127.0.0.1:5000".parse().unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", "1.2.3.4, 203.0.113.9".parse().unwrap());
+        assert_eq!(super::client_ip(&headers, addr, true), "203.0.113.9");
+        assert_eq!(super::client_ip(&headers, addr, false), "127.0.0.1");
+        headers.insert("x-forwarded-for", "203.0.113.9".parse().unwrap());
+        assert_eq!(super::client_ip(&headers, addr, true), "203.0.113.9");
+        headers.insert("x-forwarded-for", "".parse().unwrap());
+        assert_eq!(super::client_ip(&headers, addr, true), "127.0.0.1");
+    }
+
     use super::*;
 
     #[test]

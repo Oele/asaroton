@@ -124,7 +124,10 @@ of port 8448 (the federation listener can then be disabled). Proxy `/_matrix`, `
 `/.well-known/matrix` to the client listener with `nocanon` and `AllowEncodedSlashes NoDecode`
 (Apache) or the equivalent, keep the proxy timeout above the longest `/sync` long-poll, let
 WebSocket upgrades through on `/_matrix` if calls are enabled (Apache: `upgrade=websocket` on the
-`ProxyPass`), and set `rate_limiting.trust_x_forwarded_for = true`.
+`ProxyPass`; nginx: `proxy_http_version 1.1` and the `Upgrade`/`Connection` headers), and set
+`rate_limiting.trust_x_forwarded_for = true`. asaroton then takes the client's address from the
+last entry of `X-Forwarded-For`, the one the proxy added (nginx `$remote_addr` or
+`$proxy_add_x_forwarded_for`, Apache's mod_proxy), so put no second proxy in front of it.
 
 ## Message search
 

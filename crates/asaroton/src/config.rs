@@ -166,7 +166,8 @@ pub struct RegistrationConfig {
 pub struct RateLimitingConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// Take the client address from `X-Forwarded-For` (only behind a trusted reverse proxy).
+    /// Take the client address from `X-Forwarded-For` (only behind a trusted reverse proxy):
+    /// its last entry, the one that proxy added.
     #[serde(default)]
     pub trust_x_forwarded_for: bool,
     /// Per client address.
