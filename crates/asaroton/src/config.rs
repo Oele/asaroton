@@ -316,10 +316,13 @@ impl std::fmt::Debug for LivekitConfig {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SfuConfig {
-    /// Address of the signalling (WebSocket and API) listener; the reverse proxy forwards
-    /// `url` to it. `0.0.0.0` to listen on every interface.
+    /// Address of `livekit-server`'s signalling (WebSocket and API) listener; the reverse
+    /// proxy forwards `url` to it. `0.0.0.0` to listen on every interface. Only this listener:
+    /// the media ports below listen on every address unless `ips` limits them. Not used with
+    /// `in_process`, where asaroton serves the signalling itself.
     #[serde(default = "default_sfu_bind")]
     pub bind: String,
+    /// Port of that listener; not used with `in_process` either.
     #[serde(default = "default_sfu_port")]
     pub port: u16,
     /// Media over TCP, for clients whose UDP is blocked (open it in the firewall).
