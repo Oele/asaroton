@@ -150,10 +150,8 @@ SFU. asaroton implements the homeserver side of MSC4195 itself. The SFU can run 
   asaroton opens the media and TURN ports itself and serves the signalling under its own
   address. This is new (November 2026). It has carried calls with Element Call in browsers,
   Element X on Android and on iOS (also over mobile networks and through a phone's hotspot), and
-  calls with users of a server that runs `livekit-server`. One known gap: on a host behind NAT
-  (port forwarding on a router), a client that can reach the SFU only through its own TURN
-  server (no UDP and no TCP to `tcp_port`) does not get its media through yet; clients that can
-  use UDP or TCP are not affected. With a public address on the host this was not tried yet.
+  calls with users of a server that runs `livekit-server`, and, on a host behind NAT (port
+  forwarding on a router), clients that could reach it only through its TURN server.
   A restart of asaroton
   (an upgrade) now also interrupts the calls: a stopping asaroton tells their clients to
   reconnect, and they join the new process by themselves, which in tests took a few seconds.
