@@ -651,6 +651,11 @@ impl Services {
                 .account_data
                 .as_ref()
                 .map_or(0, |a| a.global.len() + a.rooms.values().map(Vec::len).sum::<usize>()),
+            // The account-data stream positions the answer covered, after `from` up to `upto`:
+            // compared with the stream of a write ("global account data set"), they say
+            // whether an answer should have carried it (tracker issue 56).
+            ad_from = base.as_ref().map_or(0, |b| b.token.account_data),
+            ad_upto = state.token.account_data,
             receipts = result.extensions.receipts.len(),
             typing = result.extensions.typing.len(),
             to_device = result

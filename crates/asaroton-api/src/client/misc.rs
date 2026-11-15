@@ -47,6 +47,8 @@ pub async fn set_global_account_data(
         .store
         .set_account_data(&sender.user_id, None, &ty, &content)
         .await?;
+    // Settles whether a sync that should carry it was too early (tracker issue 56).
+    tracing::debug!(user = %sender.user_id, %ty, stream = at, "global account data set");
     services.wake_when_reportable(
         SyncStream::AccountData,
         at,
@@ -75,6 +77,7 @@ pub async fn set_room_account_data(
         .store
         .set_account_data(&sender.user_id, Some(&req.body.room_id), &ty, &content)
         .await?;
+    tracing::debug!(user = %sender.user_id, room = %req.body.room_id, %ty, stream = at, "room account data set");
     services.wake_when_reportable(
         SyncStream::AccountData,
         at,
