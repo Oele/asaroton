@@ -13,9 +13,9 @@ authors = ["The asaroton authors"]
 [workspace.dependencies]
 # The SFU that runs in asaroton's process (`[rtc.livekit] in_process`): musivum, a port of
 # LiveKit's media server, Apache-2.0 like asaroton. Pinned to a commit: its main moves, and it is
-# not on crates.io. Move the five revs together.
-musivum = { git = "https://github.com/Oele/musivum", rev = "e1f1a8457d9caa45936726a9b8c53de0f0433754" }
-musivum-server = { git = "https://github.com/Oele/musivum", rev = "e1f1a8457d9caa45936726a9b8c53de0f0433754" }
+# not on crates.io. Move the six revs together.
+musivum = { git = "https://github.com/Oele/musivum", rev = "53576a345eaf44939115a44e254aad73dbbfaf8e" }
+musivum-server = { git = "https://github.com/Oele/musivum", rev = "53576a345eaf44939115a44e254aad73dbbfaf8e" }
 html-escape = "0.3.0"
 percent-encoding = "2"
 # internal crates
@@ -147,10 +147,11 @@ debug = 1
 [profile.dev.package."*"]
 opt-level = 2
 
-# musivum builds against patched copies of three webrtc-rs crates (its third_party/); a patch
+# musivum builds against patched copies of four webrtc-rs crates (its third_party/); a patch
 # applies only from the workspace that is built, so it is repeated here, from the same rev.
 # Without it the build takes the unpatched crates and lacks musivum's codec and RTP fixes.
 [patch.crates-io]
-rtc-rtp = { git = "https://github.com/Oele/musivum", rev = "e1f1a8457d9caa45936726a9b8c53de0f0433754" }
-rtc = { git = "https://github.com/Oele/musivum", rev = "e1f1a8457d9caa45936726a9b8c53de0f0433754" }
-rtc-ice = { git = "https://github.com/Oele/musivum", rev = "e1f1a8457d9caa45936726a9b8c53de0f0433754" }
+rtc-rtp = { git = "https://github.com/Oele/musivum", rev = "53576a345eaf44939115a44e254aad73dbbfaf8e" }
+rtc = { git = "https://github.com/Oele/musivum", rev = "53576a345eaf44939115a44e254aad73dbbfaf8e" }
+rtc-ice = { git = "https://github.com/Oele/musivum", rev = "53576a345eaf44939115a44e254aad73dbbfaf8e" }
+rtc-dtls = { git = "https://github.com/Oele/musivum", rev = "53576a345eaf44939115a44e254aad73dbbfaf8e" }
