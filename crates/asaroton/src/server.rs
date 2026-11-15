@@ -7,7 +7,7 @@ use asaroton_api::App;
 use asaroton_federation::{Federation, FederationConfig, hooks::Hooks};
 use asaroton_service::Services;
 use asaroton_store::{EventStore, PostgresStore, Store};
-use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::{EnvFilter, Layer as _, layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::config::Config;
 
@@ -22,17 +22,96 @@ const WEBRTC_LOG_DEFAULTS: &str = "rtc=error,rtc_crypto=error,rtc_datachannel=er
     rtc_turn=error";
 
 pub fn init_tracing(config: &Config) {
+    let sfu_debug = &config.logging.sfu_debug_components;
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        EnvFilter::new(format!("{WEBRTC_LOG_DEFAULTS},{}", config.logging.filter))
+        // musivum's DEBUG lines are let through here, and all but the listed components'
+        // are taken out again by `SfuDebugComponents`.
+        let musivum = if sfu_debug.is_empty() {
+            ""
+        } else {
+            ",musivum=debug"
+        };
+        EnvFilter::new(format!(
+            "{WEBRTC_LOG_DEFAULTS},{}{musivum}",
+            config.logging.filter
+        ))
     });
+    let components = SfuDebugComponents(sfu_debug.clone());
     let registry = tracing_subscriber::registry().with(filter);
     if config.logging.json {
         registry
-            .with(tracing_subscriber::fmt::layer().json())
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .json()
+                    .with_filter(components),
+            )
             .init();
     } else {
-        registry.with(tracing_subscriber::fmt::layer()).init();
+        registry
+            .with(tracing_subscriber::fmt::layer().with_filter(components))
+            .init();
     }
+}
+
+/// Lets the DEBUG and TRACE events of the SFU in the process (target `musivum`) through only
+/// for the components in `logging.sfu_debug_components`; musivum names the component in each
+/// event's `component` field, as `LiveKit`'s logger does. Everything else passes as the
+/// filter before it decided.
+struct SfuDebugComponents(Vec<String>);
+
+impl<S> tracing_subscriber::layer::Filter<S> for SfuDebugComponents {
+    fn enabled(
+        &self,
+        _: &tracing::Metadata<'_>,
+        _: &tracing_subscriber::layer::Context<'_, S>,
+    ) -> bool {
+        true
+    }
+
+    fn event_enabled(
+        &self,
+        event: &tracing::Event<'_>,
+        _: &tracing_subscriber::layer::Context<'_, S>,
+    ) -> bool {
+        let meta = event.metadata();
+        // More verbose levels compare greater.
+        if *meta.level() <= tracing::Level::INFO || !meta.target().starts_with("musivum") {
+            return true;
+        }
+        let mut field = ComponentField(None);
+        event.record(&mut field);
+        field
+            .0
+            .is_some_and(|component| sfu_component_listed(&self.0, &component))
+    }
+}
+
+/// The `component` field of an event.
+struct ComponentField(Option<String>);
+
+impl tracing::field::Visit for ComponentField {
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        if field.name() == "component" {
+            self.0 = Some(value.to_owned());
+        }
+    }
+
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "component" {
+            self.0 = Some(format!("{value:?}").trim_matches('"').to_owned());
+        }
+    }
+}
+
+/// Whether `component` is one of `listed` or under one of them (`transport.pion` under
+/// `transport`).
+fn sfu_component_listed(listed: &[String], component: &str) -> bool {
+    listed.iter().any(|l| {
+        component == l
+            || component
+                .strip_prefix(l.as_str())
+                .is_some_and(|rest| rest.starts_with('.'))
+    })
 }
 
 pub async fn connect_store(config: &Config) -> anyhow::Result<Arc<PostgresStore>> {
@@ -481,6 +560,18 @@ fn parse_registration(text: &str) -> anyhow::Result<asaroton_service::appservice
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sfu_debug_components_cover_their_sub_components() {
+        let listed = vec!["pion.turn".to_owned(), "transport".to_owned()];
+        assert!(sfu_component_listed(&listed, "transport"));
+        assert!(sfu_component_listed(&listed, "transport.pion"));
+        assert!(sfu_component_listed(&listed, "pion.turn"));
+        assert!(!sfu_component_listed(&listed, "pion"));
+        assert!(!sfu_component_listed(&listed, "transporter"));
+        assert!(!sfu_component_listed(&listed, "sfu.downtrack"));
+        assert!(!sfu_component_listed(&[], "transport"));
+    }
 
     #[test]
     fn a_registration_file_as_a_bridge_writes_it_is_read() {

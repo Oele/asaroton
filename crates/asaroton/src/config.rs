@@ -437,6 +437,12 @@ pub struct LoggingConfig {
     pub filter: String,
     #[serde(default)]
     pub json: bool,
+    /// Components of the SFU in the process (musivum) whose DEBUG lines are logged, for
+    /// looking into calls: `["pion.turn", "transport"]` shows its TURN server and the
+    /// connections' ICE. A component includes its sub-components (`transport` covers
+    /// `transport.pion`). musivum's other DEBUG lines stay out. Ignored when `RUST_LOG` is set.
+    #[serde(default)]
+    pub sfu_debug_components: Vec<String>,
 }
 
 impl Default for LoggingConfig {
@@ -444,6 +450,7 @@ impl Default for LoggingConfig {
         Self {
             filter: default_log_filter(),
             json: false,
+            sfu_debug_components: Vec::new(),
         }
     }
 }

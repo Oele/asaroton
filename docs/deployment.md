@@ -165,6 +165,11 @@ SFU. asaroton implements the homeserver side of MSC4195 itself. The SFU can run 
 
 Everything below applies to both, except where it names `livekit-server`.
 
+To look into calls with the SFU in the process, list musivum's components whose DEBUG lines
+you want under `[logging]`, e.g. `sfu_debug_components = ["pion.turn", "transport"]` for its
+TURN server and the connections' ICE; musivum's other DEBUG lines stay out. (Its own
+`logging` settings do not apply inside asaroton.)
+
 ```toml
 [rtc.livekit]
 # in_process = true                          # the SFU inside asaroton: no livekit-server
