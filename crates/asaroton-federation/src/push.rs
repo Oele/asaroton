@@ -1,7 +1,14 @@
 //! Push gateway delivery: events that notify a user are sent to the user's HTTP pushers.
+//!
+//! One worker reads the room events in order and works out who is to be notified of what.
+//! It does not wait for gateways: each pusher has a queue of its own, drained by a task that
+//! runs while the queue has something in it, so a slow or dead gateway (three attempts over
+//! seven seconds) delays only that pusher's notifications, and each pusher still gets its
+//! notifications in the order of the events.
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet, VecDeque},
+    hash::Hash,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -14,10 +21,71 @@ use serde_json::{Value, json};
 use crate::outbound::Outbound;
 
 pub fn start(services: Arc<Services>, outbound: Outbound) {
-    tokio::spawn(async move { worker(&services, &outbound).await });
+    tokio::spawn(async move { worker(services, outbound).await });
 }
 
-async fn worker(services: &Services, outbound: &Outbound) {
+/// How many notifications wait for one pusher at most. When a gateway falls this far behind
+/// (it is down: each notification then takes seven seconds of attempts), the oldest go: a
+/// notification is only worth something while it is new.
+const MOST_QUEUED_PER_PUSHER: usize = 100;
+
+/// Queues of work per key, each drained by one task at a time.
+struct PerKeyQueues<K, J> {
+    queues: parking_lot::Mutex<HashMap<K, VecDeque<J>>>,
+    cap: usize,
+}
+
+impl<K: Eq + Hash + Clone, J> PerKeyQueues<K, J> {
+    fn new(cap: usize) -> Self {
+        Self {
+            queues: parking_lot::Mutex::new(HashMap::new()),
+            cap,
+        }
+    }
+
+    /// Queues a job; true when no task is draining this key's queue, so the caller starts
+    /// one. Past the cap the oldest waiting job is dropped (the second value says so).
+    fn push(&self, key: &K, job: J) -> (bool, bool) {
+        let mut queues = self.queues.lock();
+        match queues.get_mut(key) {
+            Some(queue) => {
+                queue.push_back(job);
+                let dropped = queue.len() > self.cap;
+                if dropped {
+                    queue.pop_front();
+                }
+                (false, dropped)
+            }
+            None => {
+                queues.insert(key.clone(), VecDeque::from([job]));
+                (true, false)
+            }
+        }
+    }
+
+    /// The next job for a key's draining task. The key stays known (so a push meanwhile
+    /// joins the queue instead of starting a second task) until the task asks again and
+    /// finds the queue empty: then the key is forgotten and `None` tells the task to end.
+    fn next(&self, key: &K) -> Option<J> {
+        let mut queues = self.queues.lock();
+        let job = queues.get_mut(key).and_then(VecDeque::pop_front);
+        if job.is_none() {
+            queues.remove(key);
+        }
+        job
+    }
+}
+
+/// A pusher, as its queue knows it.
+type PusherKey = (OwnedUserId, String, String);
+
+/// What a pusher's queue holds: the pusher as it was when the notification was made, and the
+/// notification.
+type PushJob = (Arc<Pusher>, Arc<Value>);
+
+async fn worker(services: Arc<Services>, outbound: Outbound) {
+    let queues: Arc<PerKeyQueues<PusherKey, PushJob>> =
+        Arc::new(PerKeyQueues::new(MOST_QUEUED_PER_PUSHER));
     let mut rx = services.notifier.subscribe();
     // Most users have no pusher; the set of those who do is kept here rather than queried
     // per member per event. It is read again when a pusher is set or removed, and every few
@@ -28,7 +96,13 @@ async fn worker(services: &Services, outbound: &Outbound) {
     loop {
         let n = match rx.recv().await {
             Ok(n) => n,
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(lost)) => {
+                tracing::warn!(
+                    lost,
+                    "the push worker fell behind: notifications of these events are not pushed"
+                );
+                continue;
+            }
             Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
         };
         let Notification::RoomEvent {
@@ -53,20 +127,42 @@ async fn worker(services: &Services, outbound: &Outbound) {
         if with_pushers.is_empty() {
             continue;
         }
+        let enqueue = |pusher: Pusher, notification: Arc<Value>| {
+            let key: PusherKey = (
+                pusher.user_id.clone(),
+                pusher.app_id.clone(),
+                pusher.pushkey.clone(),
+            );
+            let (start, dropped) = queues.push(&key, (Arc::new(pusher), notification));
+            if dropped {
+                tracing::warn!(user = %key.0, app = %key.1, "push gateway too far behind: its oldest notification was dropped");
+            }
+            if start {
+                let (services, outbound, queues) =
+                    (Arc::clone(&services), outbound.clone(), Arc::clone(&queues));
+                tokio::spawn(async move {
+                    while let Some((pusher, notification)) = queues.next(&key) {
+                        deliver(&services, &outbound, &pusher, &notification).await;
+                    }
+                });
+            }
+        };
         if let Err(e) =
-            handle_event(services, outbound, room_id, *stream_ordering, &with_pushers).await
+            handle_event(&services, room_id, *stream_ordering, &with_pushers, enqueue).await
         {
             tracing::warn!(%room_id, error = %e, "push delivery failed");
         }
     }
 }
 
+/// Works out who of the room's members is to be notified of the event, and hands each of
+/// their HTTP pushers the notification (`enqueue`, which does not wait for the gateway).
 async fn handle_event(
     services: &Services,
-    outbound: &Outbound,
     room_id: &RoomId,
     stream_ordering: i64,
     with_pushers: &HashSet<OwnedUserId>,
+    enqueue: impl Fn(Pusher, Arc<Value>),
 ) -> ServiceResult<()> {
     let Some(ev) = services
         .store
@@ -99,10 +195,11 @@ async fn handle_event(
             continue;
         };
         let unread = unread_total(services, &m.user_id).await;
-        let notification =
-            build_notification(services, room_id, &ev, &m.user_id, highlight, unread).await?;
+        let notification = Arc::new(
+            build_notification(services, room_id, &ev, &m.user_id, highlight, unread).await?,
+        );
         for pusher in pushers {
-            deliver(services, outbound, &pusher, &notification).await;
+            enqueue(pusher, Arc::clone(&notification));
         }
     }
     Ok(())
@@ -241,5 +338,40 @@ async fn deliver(services: &Services, outbound: &Outbound, pusher: &Pusher, noti
         }
         tokio::time::sleep(delay).await;
         delay *= 2;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PerKeyQueues;
+
+    #[test]
+    fn a_queue_per_key_drained_in_order_by_one_task() {
+        let q: PerKeyQueues<&str, u32> = PerKeyQueues::new(2);
+        // the first job of a key starts a task; more jobs join its queue
+        assert_eq!(q.push(&"a", 1), (true, false));
+        assert_eq!(q.push(&"a", 2), (false, false));
+        assert_eq!(
+            q.push(&"b", 10),
+            (true, false),
+            "another key has a task of its own"
+        );
+        // the task takes the jobs in order; while it works on the last one, the key stays
+        // known and a new job joins the queue rather than starting a second task
+        assert_eq!(q.next(&"a"), Some(1));
+        assert_eq!(q.next(&"a"), Some(2));
+        assert_eq!(q.push(&"a", 3), (false, false));
+        assert_eq!(q.next(&"a"), Some(3));
+        // empty: the task ends and the key is forgotten, the next job starts a new task
+        assert_eq!(q.next(&"a"), None);
+        assert_eq!(q.push(&"a", 4), (true, false));
+        // past the cap the oldest waiting job goes, not the one being worked on
+        assert_eq!(q.next(&"b"), Some(10));
+        assert_eq!(q.push(&"b", 11), (false, false));
+        assert_eq!(q.push(&"b", 12), (false, false));
+        assert_eq!(q.push(&"b", 13), (false, true));
+        assert_eq!(q.next(&"b"), Some(12));
+        assert_eq!(q.next(&"b"), Some(13));
+        assert_eq!(q.next(&"b"), None);
     }
 }
