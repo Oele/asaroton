@@ -337,6 +337,16 @@ pub struct SfuConfig {
     /// calls from outside the network get no media.
     #[serde(default)]
     pub public_ip: Option<std::net::Ipv4Addr>,
+    /// With `public_ip`: also tell clients the machine's own addresses (the default), so that
+    /// clients on the same network connect to them directly, or only the public address
+    /// (`false`), which clients on the same network then reach through the router.
+    #[serde(default = "default_true")]
+    pub advertise_local_ips: bool,
+    /// The addresses (CIDRs) the SFU uses for media, e.g. `["192.168.2.4/32"]`; empty for all
+    /// of the machine's addresses. Leaves out docker bridges, VPN interfaces and the like, which
+    /// clients cannot reach and only make them try in vain before they connect.
+    #[serde(default)]
+    pub ips: Vec<String>,
 }
 
 impl Default for SfuConfig {
@@ -348,6 +358,8 @@ impl Default for SfuConfig {
             udp_ports: default_udp_ports(),
             external_ip: true,
             public_ip: None,
+            advertise_local_ips: true,
+            ips: Vec::new(),
         }
     }
 }

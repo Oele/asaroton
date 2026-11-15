@@ -119,17 +119,25 @@ fn rtc_section(sfu: &SfuConfig) -> String {
         sfu.tcp_port, sfu.udp_ports.0, sfu.udp_ports.1
     );
     match sfu.public_ip {
-        // A fixed public address is advertised as given, next to the machine's own
-        // addresses so that clients on the same network still connect directly. Nothing is
-        // discovered or checked at start, so what clients are told does not vary.
+        // A fixed public address is advertised as given, next to the machine's own addresses
+        // so that clients on the same network still connect directly, unless only the public
+        // one is wanted. Nothing is discovered or checked at start, so what clients are told
+        // does not vary.
         Some(ip) => {
             let _ = writeln!(
                 out,
-                "  use_external_ip: false\n  node_ip: {ip}\n  advertise_internal_ip: true"
+                "  use_external_ip: false\n  node_ip: {ip}\n  advertise_internal_ip: {}",
+                sfu.advertise_local_ips
             );
         }
         None => {
             let _ = writeln!(out, "  use_external_ip: {}", sfu.external_ip);
+        }
+    }
+    if !sfu.ips.is_empty() {
+        out.push_str("  ips:\n    includes:\n");
+        for ip in &sfu.ips {
+            let _ = writeln!(out, "      - {}", yaml_str(ip));
         }
     }
     out
@@ -157,6 +165,22 @@ mod tests {
             rtc_section(&sfu),
             "rtc:\n  tcp_port: 7881\n  port_range_start: 50000\n  port_range_end: 60000\n  \
              use_external_ip: false\n  node_ip: 203.0.113.7\n  advertise_internal_ip: true\n"
+        );
+    }
+
+    #[test]
+    fn only_the_public_address_and_only_the_listed_interfaces_when_asked() {
+        let sfu = SfuConfig {
+            public_ip: Some(std::net::Ipv4Addr::new(203, 0, 113, 7)),
+            advertise_local_ips: false,
+            ips: vec!["192.0.2.4/32".to_owned()],
+            ..SfuConfig::default()
+        };
+        assert_eq!(
+            rtc_section(&sfu),
+            "rtc:\n  tcp_port: 7881\n  port_range_start: 50000\n  port_range_end: 60000\n  \
+             use_external_ip: false\n  node_ip: 203.0.113.7\n  advertise_internal_ip: false\n  \
+             ips:\n    includes:\n      - \"192.0.2.4/32\"\n"
         );
     }
 
