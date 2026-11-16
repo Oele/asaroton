@@ -81,23 +81,64 @@ pub(crate) async fn apply_current_state_delta(
     let up_ids: Vec<String> = upserts.values().map(ToString::to_string).collect();
     let rm_types: Vec<String> = delta.remove.iter().map(|(t, _)| t.to_string()).collect();
     let rm_keys: Vec<String> = delta.remove.iter().map(|(_, k)| k.clone()).collect();
-    // Membership rows are denormalised from the member events' JSON in the same statement.
+    // Membership rows are denormalised from the member events, read here and not by casting
+    // their JSON to jsonb in SQL: jsonb cannot hold a NUL character, and one anywhere in a
+    // state event (a display name, a topic) made the whole statement fail and the room stall
+    // (tracker issue 67). The text columns get the strings without NUL.
+    let member_ids: Vec<&str> = upserts
+        .iter()
+        .filter(|((t, _), _)| t.to_string() == "m.room.member")
+        .map(|(_, id)| id.as_str())
+        .collect();
+    let rows = if member_ids.is_empty() {
+        Vec::new()
+    } else {
+        sqlx::query(
+            "SELECT event_id, json, sender, stream_ordering FROM events WHERE event_id = ANY($1)",
+        )
+        .bind(&member_ids)
+        .fetch_all(&mut *conn)
+        .await?
+    };
+    let no_nul = |s: &str| s.replace('\0', "");
+    let (mut m_ids, mut m_memberships, mut m_senders) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut m_names, mut m_avatars, mut m_orderings) = (Vec::new(), Vec::new(), Vec::new());
+    for row in &rows {
+        let json: String = row.get("json");
+        let Ok(event) = serde_json::from_str::<serde_json::Value>(&json) else {
+            continue;
+        };
+        let content = event.get("content");
+        let text = |key: &str| {
+            content
+                .and_then(|c| c.get(key))
+                .and_then(serde_json::Value::as_str)
+                .map(no_nul)
+        };
+        // As before: a member event whose membership is not a string has no membership row.
+        let Some(membership) = text("membership") else {
+            continue;
+        };
+        m_ids.push(row.get::<String, _>("event_id"));
+        m_memberships.push(membership);
+        m_senders.push(row.get::<String, _>("sender"));
+        m_names.push(text("displayname"));
+        m_avatars.push(text("avatar_url"));
+        m_orderings.push(row.get::<i64, _>("stream_ordering"));
+    }
     sqlx::query(
         "WITH up AS (
             SELECT * FROM UNNEST($2::text[], $3::text[], $4::text[]) AS u(event_type, state_key, event_id)
          ),
-         ev AS (
-            SELECT up.event_type, up.state_key, up.event_id, e.sender, e.stream_ordering,
-                   (e.json::jsonb)->'content' AS c
-            FROM up JOIN events e ON e.event_id = up.event_id
+         m AS (
+            SELECT * FROM UNNEST($7::text[], $8::text[], $9::text[], $10::text[], $11::text[], $12::bigint[])
+                AS m(event_id, membership, sender, display_name, avatar_url, stream_ordering)
          ),
          mem AS (
             INSERT INTO room_memberships (room_id, user_id, membership, event_id, sender, display_name, avatar_url, stream_ordering)
-            SELECT $1, state_key, c->>'membership', event_id, sender,
-                   CASE WHEN jsonb_typeof(c->'displayname') = 'string' THEN c->>'displayname' END,
-                   CASE WHEN jsonb_typeof(c->'avatar_url') = 'string' THEN c->>'avatar_url' END,
-                   stream_ordering
-            FROM ev WHERE event_type = 'm.room.member' AND jsonb_typeof(c->'membership') = 'string'
+            SELECT $1, up.state_key, m.membership, m.event_id, m.sender, m.display_name, m.avatar_url, m.stream_ordering
+            FROM up JOIN m ON m.event_id = up.event_id
+            WHERE up.event_type = 'm.room.member'
             ON CONFLICT (room_id, user_id) DO UPDATE SET membership = EXCLUDED.membership,
                 event_id = EXCLUDED.event_id, sender = EXCLUDED.sender,
                 display_name = EXCLUDED.display_name, avatar_url = EXCLUDED.avatar_url,
@@ -107,8 +148,7 @@ pub(crate) async fn apply_current_state_delta(
             INSERT INTO current_state_events (room_id, event_type, state_key, event_id, membership)
             SELECT $1, up.event_type, up.state_key, up.event_id,
                    CASE WHEN up.event_type = 'm.room.member' THEN
-                        (SELECT CASE WHEN jsonb_typeof(c->'membership') = 'string' THEN c->>'membership' END
-                         FROM ev WHERE ev.event_id = up.event_id)
+                        (SELECT m.membership FROM m WHERE m.event_id = up.event_id)
                    END
             FROM up
             ON CONFLICT (room_id, event_type, state_key) DO UPDATE SET event_id = EXCLUDED.event_id,
@@ -127,6 +167,12 @@ pub(crate) async fn apply_current_state_delta(
     .bind(&up_ids)
     .bind(&rm_types)
     .bind(&rm_keys)
+    .bind(&m_ids)
+    .bind(&m_memberships)
+    .bind(&m_senders)
+    .bind(&m_names)
+    .bind(&m_avatars)
+    .bind(&m_orderings)
     .execute(&mut *conn)
     .await?;
     Ok(())

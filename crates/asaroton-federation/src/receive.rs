@@ -206,6 +206,12 @@ impl Federation {
         }
 
         for edu in &req.edus {
+            // A NUL character cannot be stored in the JSON columns EDUs end up in; such an
+            // EDU is dropped here rather than failing in the database (tracker issue 67).
+            if edu.json().get().contains("\\u0000") {
+                tracing::debug!(%origin, "ignoring an EDU with a NUL character");
+                continue;
+            }
             match edu.deserialize() {
                 Ok(edu) => {
                     if let Err(e) = self.handle_edu(origin, edu).await {
@@ -411,6 +417,7 @@ impl Federation {
     ) -> Result<Pdu> {
         let pdu = Pdu::from_canonical(raw, rules)
             .map_err(|e| Error::Rejected(format!("malformed event: {e}")))?;
+        auth::check_storable(&pdu).map_err(|e| Error::Rejected(format!("malformed event: {e}")))?;
         // Oversized fields are not a format error here: the event is accepted into the
         // pipeline, which rejects it (and stores it as rejected) like any auth failure.
         if auth::check_size_limits(&pdu).is_ok() {

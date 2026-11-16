@@ -353,6 +353,7 @@ impl Services {
             })?;
 
         // checks
+        auth::check_storable(&pdu).map_err(|e| Error::invalid_param(e.to_string()))?;
         auth::check_format(&pdu, &rules)
             .and_then(|()| auth::check_size_limits(&pdu))
             .map_err(|e| {

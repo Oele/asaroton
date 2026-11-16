@@ -246,6 +246,10 @@ fn relation_of(pdu: &Pdu) -> Option<(String, String)> {
     let rel = content.get("m.relates_to")?;
     let rel_type = rel.get("rel_type")?.as_str()?;
     let target = rel.get("event_id")?.as_str()?;
+    // Text columns cannot hold NUL (tracker issue 67): such a relation is not indexed.
+    if rel_type.contains('\0') || target.contains('\0') {
+        return None;
+    }
     ruma::EventId::parse(target).ok()?;
     Some((target.to_owned(), rel_type.to_owned()))
 }

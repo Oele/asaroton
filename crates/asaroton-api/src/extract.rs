@@ -211,6 +211,16 @@ where
                 Err(_) => Vec::new(),
             };
         let path_args: Vec<&str> = path_args.iter().map(String::as_str).collect();
+        // No Matrix identifier, type or key holds a NUL character, and the database cannot
+        // store one (tracker issue 67): refused here, before it fails deeper down.
+        if path_args
+            .iter()
+            .any(|a| a.contains('\0') || a.to_ascii_lowercase().contains("%00"))
+        {
+            return Err(Error::invalid_param(
+                "NUL characters are not allowed in the request path.",
+            ));
+        }
 
         // --- body -----------------------------------------------------------------------
         let bytes = axum::body::to_bytes(body, MAX_BODY_BYTES)
@@ -242,6 +252,14 @@ where
         } else {
             serde_json::from_slice(&bytes).ok()
         };
+        // A client's JSON may not carry a NUL character either: account data, filters, keys
+        // and the rest are stored as jsonb, which cannot hold one. Federation requests are
+        // left alone here; their events and EDUs are dealt with one by one.
+        if auth != Auth::Server && json.as_ref().is_some_and(holds_nul) {
+            return Err(Error::bad_json(
+                "NUL characters are not allowed in request bodies.",
+            ));
+        }
 
         let query = parts.uri.query().map(str::to_owned);
         let http_req = http::Request::from_parts(parts, bytes.as_ref());
@@ -266,6 +284,16 @@ where
             json,
             query,
         })
+    }
+}
+
+/// Whether any string or object key in the JSON holds a NUL character.
+fn holds_nul(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::String(s) => s.contains('\0'),
+        serde_json::Value::Array(items) => items.iter().any(holds_nul),
+        serde_json::Value::Object(map) => map.iter().any(|(k, v)| k.contains('\0') || holds_nul(v)),
+        _ => false,
     }
 }
 
@@ -327,4 +355,20 @@ pub(crate) fn add_cors(headers: &mut http::HeaderMap) {
         header::ACCESS_CONTROL_ALLOW_HEADERS,
         http::HeaderValue::from_static("X-Requested-With, Content-Type, Authorization"),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn nul_anywhere_in_a_body_is_found() {
+        let found = |s: &str| super::holds_nul(&serde_json::from_str(s).unwrap());
+        assert!(found(r#"{"displayname": "a\u0000b"}"#));
+        assert!(found(r#"{"a": [1, {"b": "\u0000"}]}"#));
+        assert!(found(r#"{"a\u0000": 1}"#));
+        assert!(
+            !found(r#"{"body": "a\\u0000b", "n": 0}"#),
+            "an escaped backslash is no NUL"
+        );
+        assert!(!found(r#"["plain", 1, null, true]"#));
+    }
 }

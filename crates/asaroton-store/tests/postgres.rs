@@ -207,6 +207,67 @@ async fn build_room(store: &PostgresStore, version: &RoomVersionId) -> RoomDrive
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn state_with_a_nul_character_is_stored_and_the_room_goes_on(pool: PgPool) {
+    // Tracker issue 67: jsonb cannot hold NUL, and current state used to be worked out by
+    // casting the stored event JSON to jsonb, so one such state event stalled the room.
+    let store = PostgresStore::from_pool(pool.clone());
+    let mut d = build_room(&store, &RoomVersionId::V11).await;
+    let bob = user_id!("@bob:example.org");
+    d.send(
+        bob,
+        TimelineEventType::RoomMember,
+        Some(bob.as_str()),
+        json!({ "membership": "join", "displayname": "a\u{0}b", "avatar_url": "mxc://x/\u{0}" }),
+    )
+    .await;
+    d.send(
+        user_id!("@alice:example.org"),
+        TimelineEventType::RoomTopic,
+        Some(""),
+        json!({ "topic": "nul \u{0} in a topic" }),
+    )
+    .await;
+    // a relation whose type holds NUL is stored, only not indexed as a relation
+    let target = d.events.last().unwrap().event_id().to_owned();
+    d.send(
+        bob,
+        TimelineEventType::Reaction,
+        None,
+        json!({ "m.relates_to": { "rel_type": "m.\u{0}annotation", "event_id": target, "key": "a\u{0}b" } }),
+    )
+    .await;
+    d.send(
+        bob,
+        TimelineEventType::RoomMessage,
+        None,
+        json!({ "msgtype": "m.text", "body": "still here" }),
+    )
+    .await;
+    let (membership, name, avatar): (String, Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT membership, display_name, avatar_url FROM room_memberships WHERE user_id = $1",
+    )
+    .bind(bob.as_str())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(membership, "join");
+    assert_eq!(
+        name.as_deref(),
+        Some("ab"),
+        "the text column gets the name without NUL"
+    );
+    assert_eq!(avatar.as_deref(), Some("mxc://x/"));
+    let current: (Option<String>,) = sqlx::query_as(
+        "SELECT membership FROM current_state_events WHERE event_type = 'm.room.member' AND state_key = $1",
+    )
+    .bind(bob.as_str())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(current.0.as_deref(), Some("join"));
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn users_devices_tokens(pool: PgPool) {
     let store = PostgresStore::from_pool(pool);
     let alice = user_id!("@alice:example.org");

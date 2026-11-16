@@ -52,6 +52,31 @@ pub fn check_size_limits(pdu: &Pdu) -> Result<()> {
     Ok(())
 }
 
+/// Whether the event can be stored at all: its type, state key and IDs go into text columns,
+/// and PostgreSQL text cannot hold a NUL character. Such an event is not merely rejected (a
+/// rejected event is stored too) but refused outright; a server that accepts it cannot hand
+/// it to us. NUL elsewhere in the event, in its content, is fine (tracker issue 67). The
+/// message names the field, not its value.
+pub fn check_storable(pdu: &Pdu) -> Result<()> {
+    let nul = |what: &str, value: &str| -> Result<()> {
+        if value.contains('\0') {
+            Err(Error::InvalidPdu(format!(
+                "a NUL character in `{what}`, which this server cannot store"
+            )))
+        } else {
+            Ok(())
+        }
+    };
+    nul("type", &pdu.event_type().to_string())?;
+    if let Some(key) = pdu.state_key() {
+        nul("state_key", key)?;
+    }
+    nul("sender", pdu.sender().as_str())?;
+    nul("room_id", pdu.room_id().as_str())?;
+    nul("event_id", pdu.event_id().as_str())?;
+    Ok(())
+}
+
 /// The `(type, state_key)` pairs that must make up the event's `auth_events`.
 pub fn auth_types(pdu: &Pdu, rules: &RoomVersionRules) -> Result<Vec<(StateEventType, String)>> {
     auth_types_for_event(

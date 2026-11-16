@@ -307,7 +307,12 @@ impl FederationStore for PostgresStore {
         )
         .bind(room_id.as_str())
         .bind(user_id.as_str())
-        .bind(serde_json::Value::Array(state.to_vec()))
+        // jsonb cannot hold a NUL character (tracker issue 67): a stripped event with one,
+        // which comes from the inviting server, is left out of the invite's preview rather
+        // than failing the invite.
+        .bind(serde_json::Value::Array(
+            state.iter().filter(|e| !holds_nul(e)).cloned().collect(),
+        ))
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -343,4 +348,14 @@ fn json_path(pointer: &str) -> Vec<String> {
         .filter(|p| !p.is_empty())
         .map(str::to_owned)
         .collect()
+}
+
+/// Whether any string or object key in the JSON holds a NUL character, which jsonb rejects.
+fn holds_nul(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::String(s) => s.contains('\0'),
+        serde_json::Value::Array(items) => items.iter().any(holds_nul),
+        serde_json::Value::Object(map) => map.iter().any(|(k, v)| k.contains('\0') || holds_nul(v)),
+        _ => false,
+    }
 }
