@@ -26,6 +26,12 @@ cd "$COMPLEMENT_DIR"
 export COMPLEMENT_BASE_IMAGE="$IMAGE"
 export COMPLEMENT_SPAWN_HS_TIMEOUT_SECS=${COMPLEMENT_SPAWN_HS_TIMEOUT_SECS:-60}
 export COMPLEMENT_ENABLE_DIRTY_RUNS=${COMPLEMENT_ENABLE_DIRTY_RUNS:-1}
+# The homeserver containers call back to servers the tests run on this machine. With rootless
+# Docker (DOCKER_HOST pointing into /run/user/...) "host.docker.internal" is not this machine;
+# its loopback is reachable as 10.0.2.2 (host loopback enabled for that dockerd).
+if [ -z "${COMPLEMENT_HOSTNAME_RUNNING_COMPLEMENT:-}" ] && [[ "${DOCKER_HOST:-}" == unix:///run/user/* ]]; then
+    export COMPLEMENT_HOSTNAME_RUNNING_COMPLEMENT=10.0.2.2
+fi
 
 # Tests that fail by decision are skipped, so that every failure of a run is a real one and a
 # clean run exits 0. Each name becomes an anchored pattern, level by level for subtests;
