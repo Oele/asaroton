@@ -32,6 +32,11 @@ export COMPLEMENT_ENABLE_DIRTY_RUNS=${COMPLEMENT_ENABLE_DIRTY_RUNS:-1}
 if [ -z "${COMPLEMENT_HOSTNAME_RUNNING_COMPLEMENT:-}" ] && [[ "${DOCKER_HOST:-}" == unix:///run/user/* ]]; then
     export COMPLEMENT_HOSTNAME_RUNNING_COMPLEMENT=10.0.2.2
 fi
+# Complement's own federation servers write their certificate to $TMPDIR/complement.crt and .key.
+# In a shared /tmp another user's leftover copy makes every federation test fail with
+# "permission denied", so each user gets a directory of their own.
+export TMPDIR=${COMPLEMENT_TMPDIR:-${XDG_CACHE_HOME:-$HOME/.cache}/asaroton-complement/tmp}
+mkdir -p "$TMPDIR"
 
 # Tests that fail by decision are skipped, so that every failure of a run is a real one and a
 # clean run exits 0. Each name becomes an anchored pattern, level by level for subtests;
