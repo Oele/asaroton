@@ -11,10 +11,16 @@
 FROM rust:1-bookworm AS builder
 WORKDIR /src
 COPY . .
+# A copy taken right after linking can come out with zeroes where the binary's data should be
+# (the kernel still reports the unwritten pages as a hole and cp skips them); the server then
+# dies at its first random number. Flush the file before copying it and compare the copy.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/src/target \
-    cargo build --release -p asaroton && cp target/release/asaroton /asaroton
+    cargo build --release -p asaroton \
+    && sync target/release/asaroton \
+    && cp target/release/asaroton /asaroton \
+    && cmp target/release/asaroton /asaroton
 
 FROM debian:bookworm-slim
 # scripts/complement.sh removes the untagged images this label marks.
