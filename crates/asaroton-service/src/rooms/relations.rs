@@ -55,6 +55,12 @@ impl Services {
             })
         };
         let prev_batch = from;
+        // After the tokens, which follow the store's page as it was.
+        let ignored = self.ignored_users(user).await?;
+        let events = events
+            .into_iter()
+            .filter(|e| !super::timeline::sent_by_ignored(e, &ignored))
+            .collect();
         Ok(RelationsPage {
             events,
             next_batch,
@@ -91,6 +97,11 @@ impl Services {
                 .last()
                 .map(|t| StreamToken(t.latest_stream_ordering))
         };
+        let ignored = self.ignored_users(user).await?;
+        let threads = threads
+            .into_iter()
+            .filter(|t| !super::timeline::sent_by_ignored(&t.root, &ignored))
+            .collect();
         Ok((threads, next))
     }
 

@@ -190,6 +190,16 @@ async fn handle_event(
         if pushers.is_empty() {
             continue;
         }
+        // Nobody is woken for an event of someone they ignore (as Synapse does; tracker
+        // issue 68). State events are not exempt here: they do not push anyway unless a rule
+        // says so, and a member event of an ignored user is no reason to.
+        if services
+            .ignored_users(&m.user_id)
+            .await?
+            .contains(ev.pdu.sender())
+        {
+            continue;
+        }
         let (ruleset, ctx) = services.push_rule_context(room_id, &m.user_id).await?;
         let Some(highlight) = services.push_actions_for(&ruleset, &ctx, &ev).await else {
             continue;

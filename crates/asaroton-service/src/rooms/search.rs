@@ -71,11 +71,13 @@ impl Services {
             )
             .await?;
         let page_full = hits.len() >= limit;
+        let ignored = self.ignored_users(user).await?;
         let mut results = Vec::with_capacity(hits.len());
         for hit in hits {
             let ev = hit.event;
             let ty = ev.pdu.event_type().to_string();
-            if req.types.as_ref().is_some_and(|t| !t.contains(&ty))
+            if super::timeline::sent_by_ignored(&ev, &ignored)
+                || req.types.as_ref().is_some_and(|t| !t.contains(&ty))
                 || req.not_types.contains(&ty)
                 || req
                     .senders

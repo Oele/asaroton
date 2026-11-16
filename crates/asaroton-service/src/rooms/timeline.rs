@@ -612,8 +612,12 @@ impl Services {
         })
     }
 
-    /// Whether `user` may see `ev` under the room's history visibility rules.
+    /// Whether `user` may see `ev` under the room's history visibility rules, and does not
+    /// ignore its sender (see `sent_by_ignored`).
     pub async fn event_visible_to(&self, ev: &StoredEvent, user: &UserId) -> Result<bool> {
+        if sent_by_ignored(ev, &self.ignored_users(user).await?) {
+            return Ok(false);
+        }
         let currently_joined = self.is_joined(ev.pdu.room_id(), user).await?;
         let mut cache = HashMap::new();
         self.event_visible_cached(ev, user, currently_joined, &mut cache)
@@ -656,13 +660,24 @@ impl Services {
         Ok(visible)
     }
 
-    /// Keep only the events `user` may see.
+    /// Keep only the events `user` may see: those the room's history visibility allows, and
+    /// none sent by a user `user` ignores (state events aside, see `sent_by_ignored`). Sync,
+    /// sliding sync, `/messages` and `/context` all come through here.
     pub async fn filter_visible(
         &self,
         room_id: &RoomId,
         user: &UserId,
         events: Vec<StoredEvent>,
     ) -> Result<Vec<StoredEvent>> {
+        let events = if events.is_empty() {
+            events
+        } else {
+            let ignored = self.ignored_users(user).await?;
+            events
+                .into_iter()
+                .filter(|e| !sent_by_ignored(e, &ignored))
+                .collect()
+        };
         let currently_joined = self.is_joined(room_id, user).await?;
         // A joined user sees everything under `shared` or `world_readable`. When every
         // visibility change inside the slice keeps it that open, one lookup at the first
@@ -878,4 +893,16 @@ fn membership_of(ev: &StoredEvent) -> String {
                 .map(str::to_owned)
         })
         .unwrap_or_else(|| "leave".to_owned())
+}
+
+/// Whether `ev` is to be kept from a user who ignores its sender. The Client-Server API:
+/// "Once ignored, the client will no longer receive events sent by that user, with the
+/// exception of state events." That holds for every API that hands out events, not only
+/// sync: matrix-rust-sdk refills its timelines from `/messages` after the list changes
+/// (tracker issue 68).
+pub(crate) fn sent_by_ignored(
+    ev: &StoredEvent,
+    ignored: &std::collections::HashSet<ruma::OwnedUserId>,
+) -> bool {
+    !ev.pdu.is_state() && ignored.contains(ev.pdu.sender())
 }
