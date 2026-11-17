@@ -89,19 +89,41 @@ where
 /// Pull the access token out of `Authorization: Bearer` or the legacy `access_token` query
 /// parameter.
 fn extract_token(req: &Request) -> Option<String> {
-    if let Some(v) = req.headers().get(header::AUTHORIZATION)
+    token_from(req.headers(), req.uri().query())
+}
+
+fn token_from(headers: &http::HeaderMap, query: Option<&str>) -> Option<String> {
+    if let Some(v) = headers.get(header::AUTHORIZATION)
         && let Ok(s) = v.to_str()
         && let Some(tok) = s.strip_prefix("Bearer ")
     {
         return Some(tok.trim().to_owned());
     }
-    let query = req.uri().query()?;
+    let query = query?;
     for pair in query.split('&') {
         if let Some(v) = pair.strip_prefix("access_token=") {
             return percent_decode(v);
         }
     }
     None
+}
+
+/// The signed-in user of a request to an endpoint that ruma declares without authentication,
+/// for the few where a token still matters when there is one (client `GET /publicRooms` that
+/// names another server). `None` without a token; an unknown token is an error, as elsewhere.
+pub(crate) async fn optional_sender(
+    services: &AppState,
+    headers: &http::HeaderMap,
+    query: Option<&str>,
+) -> Result<Option<Sender>, Error> {
+    let Some(token) = token_from(headers, query) else {
+        return Ok(None);
+    };
+    match services.auth.authenticate(&token).await {
+        Ok(sender) => Ok(Some(sender)),
+        Err(AuthError::UnknownToken { soft_logout }) => Err(Error::unknown_token(soft_logout)),
+        Err(e) => Err(e.into()),
+    }
 }
 
 fn percent_decode(s: &str) -> Option<String> {

@@ -38,6 +38,7 @@ They need `cargo build`, the development database role from `.env.example`, and 
 | `scripts/dehydratedtest.py` | Dehydrated devices (MSC3814): others see the device and send it keys, its owner reads them out page by page, replacing and deleting |
 | `scripts/closedservertest.py` | A server with federation disabled still calls push gateways and feeds application services |
 | `scripts/pushlagtest.py` | A push gateway that never answers holds up nobody else's pushes; they arrive at once and in order |
+| `scripts/publicroomstest.py` | The room directory: `server=` fetches another server's over federation (signed-in users only), a search looks at every room before paging, federation GET lists and POST searches |
 | `scripts/nultest.py` | A remote member's state event with NUL (a display name) stalls no room; one with NUL in its state key is refused alone; local NUL is a 400 |
 | `scripts/ignoretest.py` | Events of an ignored user stay out of /messages, /context, /event, /relations, /threads, /search and pushes; state events stay |
 | `scripts/ssreceiptstest.py` | Sliding sync hands out read receipts for the rooms of a list, whichever of `lists` and `rooms` the extension names, and again after a lost answer |

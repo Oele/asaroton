@@ -1,6 +1,7 @@
 //! Room creation, membership, state and timeline endpoints.
 
 use asaroton_service::{
+    federation_hooks::RemotePublicRooms,
     glob_match,
     rooms::{create::CreateRoomRequest, timeline::StreamToken},
 };
@@ -1092,75 +1093,111 @@ pub async fn set_visibility(
 pub async fn public_rooms(
     services: AppState,
     req: Ruma<ruma::api::client::directory::get_public_rooms::v3::Request>,
-) -> Result<ruma::api::client::directory::get_public_rooms::v3::Response> {
-    use ruma::api::client::directory::get_public_rooms;
-    let limit = req
-        .body
-        .limit
-        .map_or(100, |l| i64::try_from(u64::from(l)).unwrap_or(100))
-        .clamp(1, 500);
-    let offset: i64 = req
-        .body
-        .since
-        .as_deref()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
-    let chunk = public_rooms_chunk(&services, limit, offset).await?;
-    let mut resp = get_public_rooms::v3::Response::new(chunk);
-    let total = services.store.list_public_rooms(i64::MAX, 0).await?.len();
-    resp.total_room_count_estimate = Some(UInt::try_from(total).unwrap_or(UInt::MAX));
-    if offset + limit < i64::try_from(total).unwrap_or(i64::MAX) {
-        resp.next_batch = Some((offset + limit).to_string());
-    }
-    if offset > 0 {
-        resp.prev_batch = Some((offset - limit).max(0).to_string());
-    }
-    Ok(resp)
+) -> Result<RemotePublicRooms> {
+    let Ruma { body, sender, .. } = req;
+    directory_page(
+        &services,
+        sender.is_some(),
+        body.server.as_deref(),
+        body.limit,
+        body.since,
+        ruma::directory::Filter::new(),
+    )
+    .await
 }
 
 pub async fn public_rooms_filtered(
     services: AppState,
     req: Ruma<ruma::api::client::directory::get_public_rooms_filtered::v3::Request>,
-) -> Result<ruma::api::client::directory::get_public_rooms_filtered::v3::Response> {
-    use ruma::api::client::directory::get_public_rooms_filtered;
-    let limit = req
-        .body
-        .limit
+) -> Result<RemotePublicRooms> {
+    let Ruma { body, sender, .. } = req;
+    directory_page(
+        &services,
+        sender.is_some(),
+        body.server.as_deref(),
+        body.limit,
+        body.since,
+        body.filter,
+    )
+    .await
+}
+
+/// A page of the public room directory: ours, or that of the server a client named in
+/// `server` (asked over federation).
+async fn directory_page(
+    services: &AppState,
+    signed_in: bool,
+    server: Option<&ruma::ServerName>,
+    limit: Option<UInt>,
+    since: Option<String>,
+    filter: ruma::directory::Filter,
+) -> Result<RemotePublicRooms> {
+    if let Some(server) = server.filter(|s| *s != services.server_name()) {
+        // Our own directory is open to anyone; asking another server on somebody's behalf
+        // takes a signed-in user, as in Synapse, so that we are no open relay.
+        if !signed_in {
+            return Err(Error::missing_token());
+        }
+        return Ok(services
+            .federation()
+            .remote_public_rooms(server, limit, since, filter)
+            .await?);
+    }
+    local_directory_page(
+        services,
+        limit,
+        since.as_deref(),
+        filter.generic_search_term.as_deref(),
+    )
+    .await
+}
+
+/// A page of this server's public room directory, for clients and for other servers.
+/// `term` matches name, topic and canonical alias, case-insensitively, before the page is cut.
+pub async fn local_directory_page(
+    services: &AppState,
+    limit: Option<UInt>,
+    since: Option<&str>,
+    term: Option<&str>,
+) -> Result<RemotePublicRooms> {
+    let limit = limit
         .map_or(100, |l| i64::try_from(u64::from(l)).unwrap_or(100))
         .clamp(1, 500);
-    let offset: i64 = req
-        .body
-        .since
-        .as_deref()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
-    let mut chunk = public_rooms_chunk(&services, limit, offset).await?;
-    if let Some(term) = req
-        .body
-        .filter
-        .generic_search_term
-        .as_deref()
-        .map(str::to_lowercase)
-    {
-        chunk.retain(|c| {
-            c.name
-                .as_deref()
-                .is_some_and(|n| n.to_lowercase().contains(&term))
-                || c.topic
-                    .as_deref()
-                    .is_some_and(|n| n.to_lowercase().contains(&term))
-                || c.canonical_alias
-                    .as_ref()
-                    .is_some_and(|a| a.as_str().to_lowercase().contains(&term))
-        });
-    }
-    let mut resp = get_public_rooms_filtered::v3::Response::new();
-    resp.chunk = chunk;
-    resp.total_room_count_estimate = Some(
-        UInt::try_from(services.store.list_public_rooms(i64::MAX, 0).await?.len() as u64)
-            .unwrap_or(UInt::MAX),
-    );
-    Ok(resp)
+    let offset = since
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(0)
+        .max(0);
+    let term = term.map(str::to_lowercase).filter(|t| !t.is_empty());
+    let (chunk, total) = if let Some(term) = term {
+        // A search has to look at every public room before it cuts a page.
+        let mut all = public_rooms_chunk(services, i64::MAX, 0).await?;
+        all.retain(|c| directory_entry_matches(c, &term));
+        let total = all.len();
+        let page = all
+            .into_iter()
+            .skip(usize::try_from(offset).unwrap_or(usize::MAX))
+            .take(usize::try_from(limit).unwrap_or(0))
+            .collect();
+        (page, total)
+    } else {
+        let total = services.store.list_public_rooms(i64::MAX, 0).await?.len();
+        (public_rooms_chunk(services, limit, offset).await?, total)
+    };
+    let total_i64 = i64::try_from(total).unwrap_or(i64::MAX);
+    Ok(RemotePublicRooms {
+        chunk,
+        next_batch: (offset + limit < total_i64).then(|| (offset + limit).to_string()),
+        prev_batch: (offset > 0).then(|| (offset - limit).max(0).to_string()),
+        total_room_count_estimate: Some(UInt::try_from(total).unwrap_or(UInt::MAX)),
+    })
+}
+
+/// Whether a directory entry's name, topic or canonical alias contains `term` (lower case).
+fn directory_entry_matches(c: &ruma::directory::PublicRoomsChunk, term: &str) -> bool {
+    let has = |s: Option<&str>| s.is_some_and(|s| s.to_lowercase().contains(term));
+    has(c.name.as_deref())
+        || has(c.topic.as_deref())
+        || has(c.canonical_alias.as_ref().map(|a| a.as_str()))
 }
 
 pub async fn public_rooms_chunk(

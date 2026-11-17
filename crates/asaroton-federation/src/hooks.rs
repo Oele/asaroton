@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use asaroton_core::Pdu;
-use asaroton_service::federation_hooks::FederationHooks;
+use asaroton_service::federation_hooks::{FederationHooks, RemotePublicRooms};
 use async_trait::async_trait;
 use ruma::{
     OwnedRoomId, OwnedServerName, OwnedUserId, RoomAliasId, RoomId, UserId,
@@ -157,6 +157,41 @@ impl FederationHooks for Hooks {
             }
         }
         Err(last)
+    }
+
+    async fn remote_public_rooms(
+        &self,
+        server: &ruma::ServerName,
+        limit: Option<ruma::UInt>,
+        since: Option<String>,
+        filter: ruma::directory::Filter,
+    ) -> asaroton_service::Result<RemotePublicRooms> {
+        use ruma::api::federation::directory::{get_public_rooms, get_public_rooms_filtered};
+        // A plain listing goes as a GET, which every server answers; a search needs the POST.
+        if filter.is_empty() {
+            let mut req = get_public_rooms::v1::Request::new();
+            req.limit = limit;
+            req.since = since;
+            let resp = self.0.client.send(server, req).await?;
+            Ok(RemotePublicRooms {
+                chunk: resp.chunk,
+                next_batch: resp.next_batch,
+                prev_batch: resp.prev_batch,
+                total_room_count_estimate: resp.total_room_count_estimate,
+            })
+        } else {
+            let mut req = get_public_rooms_filtered::v1::Request::new();
+            req.limit = limit;
+            req.since = since;
+            req.filter = filter;
+            let resp = self.0.client.send(server, req).await?;
+            Ok(RemotePublicRooms {
+                chunk: resp.chunk,
+                next_batch: resp.next_batch,
+                prev_batch: resp.prev_batch,
+                total_room_count_estimate: resp.total_room_count_estimate,
+            })
+        }
     }
 
     async fn remote_timestamp_to_event(

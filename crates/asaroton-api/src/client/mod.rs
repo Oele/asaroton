@@ -726,9 +726,24 @@ async fn room_summary_handler(
 
 async fn public_rooms_handler(
     axum::extract::State(state): axum::extract::State<AppState>,
-    req: crate::Ruma<ruma::api::client::directory::get_public_rooms::v3::Request>,
+    headers: axum::http::HeaderMap,
+    mut req: crate::Ruma<ruma::api::client::directory::get_public_rooms::v3::Request>,
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
+    // ruma declares this GET without authentication, so the extractor leaves the token
+    // alone; asking another server's directory needs to know who is asking.
+    if req.sender.is_none()
+        && req
+            .body
+            .server
+            .as_deref()
+            .is_some_and(|s| s != state.server_name())
+    {
+        match crate::extract::optional_sender(&state, &headers, req.query.as_deref()).await {
+            Ok(sender) => req.sender = sender,
+            Err(e) => return e.into_response(),
+        }
+    }
     match rooms::public_rooms(state, req).await {
         Ok(resp) => {
             let body = rooms::public_rooms_json(

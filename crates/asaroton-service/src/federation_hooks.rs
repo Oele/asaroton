@@ -13,6 +13,19 @@ use serde_json::Value;
 
 use crate::{Error, Result, Services};
 
+/// One page of another server's public room directory (federation `/publicRooms`).
+#[derive(Debug, Default)]
+pub struct RemotePublicRooms {
+    /// The rooms on this page.
+    pub chunk: Vec<ruma::directory::PublicRoomsChunk>,
+    /// Token for the next page.
+    pub next_batch: Option<String>,
+    /// Token for the previous page.
+    pub prev_batch: Option<String>,
+    /// The server's estimate of how many public rooms it has.
+    pub total_room_count_estimate: Option<ruma::UInt>,
+}
+
 /// Outbound federation operations the service layer needs.
 #[async_trait]
 pub trait FederationHooks: Send + Sync {
@@ -73,6 +86,15 @@ pub trait FederationHooks: Send + Sync {
         room_id: &RoomId,
         suggested_only: bool,
     ) -> Result<Value>;
+    /// Another server's public room directory (federation `/publicRooms`): a GET, or a POST
+    /// when `filter` is not empty.
+    async fn remote_public_rooms(
+        &self,
+        server: &ServerName,
+        limit: Option<ruma::UInt>,
+        since: Option<String>,
+        filter: ruma::directory::Filter,
+    ) -> Result<RemotePublicRooms>;
     /// Fetch older history for a room from other servers; returns how many events were stored.
     async fn backfill(&self, room_id: &RoomId, limit: usize) -> Result<usize>;
     /// Ask the other servers in a room for the event closest to `ts` in `dir`
@@ -171,6 +193,15 @@ impl FederationHooks for NoFederation {
         Err(disabled())
     }
     async fn remote_hierarchy(&self, _: &[OwnedServerName], _: &RoomId, _: bool) -> Result<Value> {
+        Err(disabled())
+    }
+    async fn remote_public_rooms(
+        &self,
+        _: &ServerName,
+        _: Option<ruma::UInt>,
+        _: Option<String>,
+        _: ruma::directory::Filter,
+    ) -> Result<RemotePublicRooms> {
         Err(disabled())
     }
     async fn backfill(&self, _: &RoomId, _: usize) -> Result<usize> {

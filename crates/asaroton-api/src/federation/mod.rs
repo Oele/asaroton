@@ -10,7 +10,7 @@ use ruma::{
         authorization::get_event_authorization,
         backfill::get_backfill,
         device::get_devices,
-        directory::get_public_rooms,
+        directory::{get_public_rooms, get_public_rooms_filtered},
         discovery::{get_remote_server_keys, get_remote_server_keys_batch, get_server_version},
         event::{get_event, get_missing_events, get_room_state, get_room_state_ids},
         keys::{claim_keys, get_keys},
@@ -71,7 +71,7 @@ pub fn routes(router: Router<AppState>) -> Router<AppState> {
     let r = route::<claim_keys::v1::Request, _, _>(r, user_keys_claim);
     let r = r.route(
         "/_matrix/federation/v1/publicRooms",
-        axum::routing::get(public_rooms_handler).post(public_rooms_handler),
+        axum::routing::get(public_rooms_handler).post(public_rooms_filtered_handler),
     );
     let r = route::<ruma::api::federation::event::get_event_by_timestamp::v1::Request, _, _>(
         r,
@@ -877,41 +877,44 @@ pub async fn user_keys_claim(
 pub async fn public_rooms(
     app: AppState,
     req: Ruma<get_public_rooms::v1::Request>,
-) -> Result<get_public_rooms::v1::Response> {
+) -> Result<asaroton_service::federation_hooks::RemotePublicRooms> {
     let _ = req.origin()?;
-    let limit = req
-        .body
-        .limit
-        .map_or(100, |l| i64::try_from(u64::from(l)).unwrap_or(100))
-        .clamp(1, 500);
-    let offset: i64 = req
-        .body
-        .since
-        .as_deref()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
-    let chunk = crate::client::rooms::public_rooms_chunk(&app, limit, offset).await?;
-    let mut resp = get_public_rooms::v1::Response::new();
-    resp.chunk = chunk;
-    resp.total_room_count_estimate = Some(
-        UInt::try_from(app.store.list_public_rooms(i64::MAX, 0).await?.len()).unwrap_or(UInt::MAX),
-    );
-    Ok(resp)
+    crate::client::rooms::local_directory_page(
+        &app,
+        req.body.limit,
+        req.body.since.as_deref(),
+        None,
+    )
+    .await
 }
 
-/// Federation `/publicRooms` as explicit JSON (join rules included even when public).
-async fn public_rooms_handler(
-    axum::extract::State(state): axum::extract::State<AppState>,
-    req: Ruma<get_public_rooms::v1::Request>,
+/// `POST /publicRooms`: the same directory, searched with the filter in the body.
+pub async fn public_rooms_filtered(
+    app: AppState,
+    req: Ruma<get_public_rooms_filtered::v1::Request>,
+) -> Result<asaroton_service::federation_hooks::RemotePublicRooms> {
+    let _ = req.origin()?;
+    crate::client::rooms::local_directory_page(
+        &app,
+        req.body.limit,
+        req.body.since.as_deref(),
+        req.body.filter.generic_search_term.as_deref(),
+    )
+    .await
+}
+
+/// A directory page as explicit JSON (join rules included even when public).
+fn public_rooms_response(
+    page: Result<asaroton_service::federation_hooks::RemotePublicRooms>,
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
-    match public_rooms(state, req).await {
-        Ok(resp) => {
+    match page {
+        Ok(page) => {
             let body = crate::client::rooms::public_rooms_json(
-                &resp.chunk,
-                resp.total_room_count_estimate,
-                resp.next_batch.as_deref(),
-                resp.prev_batch.as_deref(),
+                &page.chunk,
+                page.total_room_count_estimate,
+                page.next_batch.as_deref(),
+                page.prev_batch.as_deref(),
             );
             let mut r = axum::Json(body).into_response();
             crate::extract::add_cors(r.headers_mut());
@@ -919,6 +922,22 @@ async fn public_rooms_handler(
         }
         Err(e) => e.into_response(),
     }
+}
+
+/// Federation `GET /publicRooms`.
+async fn public_rooms_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    req: Ruma<get_public_rooms::v1::Request>,
+) -> axum::response::Response {
+    public_rooms_response(public_rooms(state, req).await)
+}
+
+/// Federation `POST /publicRooms`.
+async fn public_rooms_filtered_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    req: Ruma<get_public_rooms_filtered::v1::Request>,
+) -> axum::response::Response {
+    public_rooms_response(public_rooms_filtered(state, req).await)
 }
 
 /// Keep `RoomVersionId` referenced for readers of this module.
