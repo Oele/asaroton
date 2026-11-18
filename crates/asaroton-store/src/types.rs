@@ -96,6 +96,16 @@ pub struct RoomInfo {
     pub created_ts: Ts,
 }
 
+/// What a room directory search looks at in one public room: the `name`, `topic` and
+/// canonical `alias` from its current state (each `None` when the room has none).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PublicRoomText {
+    pub room_id: OwnedRoomId,
+    pub name: Option<String>,
+    pub topic: Option<String>,
+    pub alias: Option<String>,
+}
+
 /// A room alias mapping.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RoomAlias {

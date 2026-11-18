@@ -8,7 +8,8 @@ use sqlx::Row;
 use super::PostgresStore;
 use crate::SyncStream as Stream;
 use crate::{
-    Error, Membership, Result, RoomAlias, RoomInfo, RoomStore, StreamOrdering, now_ts, parse_ids,
+    Error, Membership, PublicRoomText, Result, RoomAlias, RoomInfo, RoomStore, StreamOrdering,
+    now_ts, parse_ids,
 };
 
 #[derive(sqlx::FromRow)]
@@ -120,13 +121,65 @@ impl RoomStore for PostgresStore {
 
     async fn list_public_rooms(&self, limit: i64, offset: i64) -> Result<Vec<RoomInfo>> {
         let rows: Vec<RoomRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-            "SELECT {ROOM_COLUMNS} FROM rooms WHERE is_public ORDER BY created_ts LIMIT $1 OFFSET $2"
+            "SELECT {ROOM_COLUMNS} FROM rooms WHERE is_public ORDER BY created_ts, room_id LIMIT $1 OFFSET $2"
         )))
         .bind(limit)
         .bind(offset)
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter().map(RoomInfo::try_from).collect()
+    }
+
+    async fn public_rooms_text(&self) -> Result<Vec<PublicRoomText>> {
+        // The event JSON is parsed here rather than with a jsonb cast, which a NUL character
+        // in any of these events would turn into an error for the whole search.
+        let rows = sqlx::query(
+            "SELECT r.room_id, c.event_type, e.json
+               FROM rooms r
+               LEFT JOIN current_state_events c
+                 ON c.room_id = r.room_id AND c.state_key = ''
+                AND c.event_type IN ('m.room.name', 'm.room.topic', 'm.room.canonical_alias')
+               LEFT JOIN events e ON e.event_id = c.event_id
+              WHERE r.is_public
+              ORDER BY r.created_ts, r.room_id",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out: Vec<PublicRoomText> = Vec::new();
+        for row in rows {
+            let room_id: String = row.get(0);
+            if out.last().is_none_or(|t| t.room_id.as_str() != room_id) {
+                out.push(PublicRoomText {
+                    room_id: OwnedRoomId::try_from(room_id)
+                        .map_err(|e| Error::Corrupt(format!("room id: {e}")))?,
+                    name: None,
+                    topic: None,
+                    alias: None,
+                });
+            }
+            let (Some(event_type), Some(json)) = (
+                row.get::<Option<String>, _>(1),
+                row.get::<Option<String>, _>(2),
+            ) else {
+                continue;
+            };
+            let (field, key) = match event_type.as_str() {
+                "m.room.name" => (0, "name"),
+                "m.room.topic" => (1, "topic"),
+                _ => (2, "alias"),
+            };
+            let value = serde_json::from_str::<serde_json::Value>(&json)
+                .ok()
+                .and_then(|v| v.get("content")?.get(key)?.as_str().map(str::to_owned));
+            if let Some(last) = out.last_mut() {
+                match field {
+                    0 => last.name = value,
+                    1 => last.topic = value,
+                    _ => last.alias = value,
+                }
+            }
+        }
+        Ok(out)
     }
 
     async fn list_rooms(

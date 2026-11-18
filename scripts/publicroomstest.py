@@ -15,9 +15,9 @@ Needs what scripts/fedlab.py needs. Takes about ten seconds.
 
 Usage: scripts/publicroomstest.py [--keep]
 """
-import json, re, urllib.error, urllib.parse, urllib.request
+import json, re, time, urllib.error, urllib.parse, urllib.request
 
-from fedlab import SERVER_NAME, check, run_lab
+from fedlab import SERVER_NAME, check, query, run_lab
 
 
 def run(hs, peers):
@@ -107,6 +107,28 @@ def run(hs, peers):
     st, r = hs.req("GET", f"/_matrix/client/v3/publicRooms?server={q(mock.name)}")
     check(st == 401 and r.get("errcode") == "M_MISSING_TOKEN" and len(asked) == before,
           f"without a token another server's directory is refused, and that server is not asked ({st}, {r.get('errcode')})")
+
+
+    # Thousands of public rooms (bare rows: no state, so they match nothing). A search reads
+    # their text only; building their directory entries would cost per room, or fail on rooms
+    # without state.
+    query("INSERT INTO rooms (room_id, room_version, creator, is_public, has_auth_chain_index, created_ts)"
+          " SELECT '!bulk' || g || ':' || 'sender.test', '11', NULL, true, false,"
+          " (extract(epoch FROM now()) * 1000)::bigint + g FROM generate_series(1, 3000) g")
+    st, r = hs.req("GET", "/_matrix/client/v3/publicRooms?limit=5", None, token)
+    check(st == 200 and r.get("total_room_count_estimate") == 3003, f"with 3000 more public rooms the directory counts 3003 ({st}, {r.get('total_room_count_estimate')})")
+    took = []
+    for _ in range(3):
+        t0 = time.monotonic()
+        st, r = hs.req("POST", "/_matrix/client/v3/publicRooms", {"limit": 20, "filter": {"generic_search_term": "garden"}}, token)
+        took.append(time.monotonic() - t0)
+        check(st == 200 and ids(r) == {garden, kitchen} and r.get("total_room_count_estimate") == 2,
+              f"a search among 3003 public rooms still finds the two gardens ({st}, {len(ids(r))})")
+    check(max(took) < 1.0, f"each within a second ({', '.join(f'{x:.2f}s' for x in took)})")
+    t0 = time.monotonic()
+    st, r = mock.fed(hs.fed, "POST", "/_matrix/federation/v1/publicRooms", {"limit": 20, "filter": {"generic_search_term": "workshop"}})
+    took = time.monotonic() - t0
+    check(st == 200 and ids(r) == {workshop} and took < 1.0, f"and so does a search from another server ({st}, {len(ids(r))}, {took:.2f}s)")
 
 
 if __name__ == "__main__":

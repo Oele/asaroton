@@ -1169,15 +1169,24 @@ pub async fn local_directory_page(
         .max(0);
     let term = term.map(str::to_lowercase).filter(|t| !t.is_empty());
     let (chunk, total) = if let Some(term) = term {
-        // A search has to look at every public room before it cuts a page.
-        let mut all = public_rooms_chunk(services, i64::MAX, 0).await?;
-        all.retain(|c| directory_entry_matches(c, &term));
-        let total = all.len();
-        let page = all
+        // A search has to look at every public room before it cuts a page; it looks only at
+        // the text it matches on, and builds full entries for the rooms on the page.
+        let matching: Vec<_> = services
+            .store
+            .public_rooms_text()
+            .await?
+            .into_iter()
+            .filter(|t| directory_text_matches(t, &term))
+            .collect();
+        let total = matching.len();
+        let mut page = Vec::new();
+        for text in matching
             .into_iter()
             .skip(usize::try_from(offset).unwrap_or(usize::MAX))
             .take(usize::try_from(limit).unwrap_or(0))
-            .collect();
+        {
+            page.push(directory_entry(services, &text.room_id).await?);
+        }
         (page, total)
     } else {
         let total = services.store.list_public_rooms(i64::MAX, 0).await?.len();
@@ -1192,12 +1201,10 @@ pub async fn local_directory_page(
     })
 }
 
-/// Whether a directory entry's name, topic or canonical alias contains `term` (lower case).
-fn directory_entry_matches(c: &ruma::directory::PublicRoomsChunk, term: &str) -> bool {
+/// Whether a public room's name, topic or canonical alias contains `term` (lower case).
+fn directory_text_matches(t: &asaroton_store::PublicRoomText, term: &str) -> bool {
     let has = |s: Option<&str>| s.is_some_and(|s| s.to_lowercase().contains(term));
-    has(c.name.as_deref())
-        || has(c.topic.as_deref())
-        || has(c.canonical_alias.as_ref().map(|a| a.as_str()))
+    has(t.name.as_deref()) || has(t.topic.as_deref()) || has(t.alias.as_deref())
 }
 
 pub async fn public_rooms_chunk(
@@ -1207,43 +1214,50 @@ pub async fn public_rooms_chunk(
 ) -> Result<Vec<ruma::directory::PublicRoomsChunk>> {
     let mut out = Vec::new();
     for room in services.store.list_public_rooms(limit, offset).await? {
-        let ctx = services.room_context(&room.room_id).await?;
-        let get = |ty: ruma::events::StateEventType, field: &str| -> Option<String> {
-            ctx.get(ty, "")
-                .and_then(|p| serde_json::from_str::<Value>(p.content().get()).ok())
-                .and_then(|v| v.get(field).and_then(|f| f.as_str()).map(str::to_owned))
-        };
-        let joined = services.store.joined_member_count(&room.room_id).await?;
-        let join_rule = get(ruma::events::StateEventType::RoomJoinRules, "join_rule")
-            .unwrap_or_else(|| "invite".into());
-        let init = ruma::directory::PublicRoomsChunkInit {
-            num_joined_members: UInt::try_from(u64::try_from(joined).unwrap_or(0))
-                .unwrap_or(UInt::MAX),
-            room_id: room.room_id.clone(),
-            world_readable: get(
-                ruma::events::StateEventType::RoomHistoryVisibility,
-                "history_visibility",
-            )
-            .as_deref()
-                == Some("world_readable"),
-            guest_can_join: get(
-                ruma::events::StateEventType::RoomGuestAccess,
-                "guest_access",
-            )
-            .as_deref()
-                == Some("can_join"),
-        };
-        let mut chunk = ruma::directory::PublicRoomsChunk::from(init);
-        chunk.name = get(ruma::events::StateEventType::RoomName, "name");
-        chunk.topic = get(ruma::events::StateEventType::RoomTopic, "topic");
-        chunk.canonical_alias = get(ruma::events::StateEventType::RoomCanonicalAlias, "alias")
-            .and_then(|a| a.try_into().ok());
-        chunk.avatar_url =
-            get(ruma::events::StateEventType::RoomAvatar, "url").map(ruma::OwnedMxcUri::from);
-        chunk.join_rule = join_rule.into();
-        out.push(chunk);
+        out.push(directory_entry(services, &room.room_id).await?);
     }
     Ok(out)
+}
+
+/// One room's entry in the public room directory, from its current state.
+async fn directory_entry(
+    services: &AppState,
+    room_id: &ruma::RoomId,
+) -> Result<ruma::directory::PublicRoomsChunk> {
+    let ctx = services.room_context(room_id).await?;
+    let get = |ty: ruma::events::StateEventType, field: &str| -> Option<String> {
+        ctx.get(ty, "")
+            .and_then(|p| serde_json::from_str::<Value>(p.content().get()).ok())
+            .and_then(|v| v.get(field).and_then(|f| f.as_str()).map(str::to_owned))
+    };
+    let joined = services.store.joined_member_count(room_id).await?;
+    let join_rule = get(ruma::events::StateEventType::RoomJoinRules, "join_rule")
+        .unwrap_or_else(|| "invite".into());
+    let init = ruma::directory::PublicRoomsChunkInit {
+        num_joined_members: UInt::try_from(u64::try_from(joined).unwrap_or(0)).unwrap_or(UInt::MAX),
+        room_id: room_id.to_owned(),
+        world_readable: get(
+            ruma::events::StateEventType::RoomHistoryVisibility,
+            "history_visibility",
+        )
+        .as_deref()
+            == Some("world_readable"),
+        guest_can_join: get(
+            ruma::events::StateEventType::RoomGuestAccess,
+            "guest_access",
+        )
+        .as_deref()
+            == Some("can_join"),
+    };
+    let mut chunk = ruma::directory::PublicRoomsChunk::from(init);
+    chunk.name = get(ruma::events::StateEventType::RoomName, "name");
+    chunk.topic = get(ruma::events::StateEventType::RoomTopic, "topic");
+    chunk.canonical_alias = get(ruma::events::StateEventType::RoomCanonicalAlias, "alias")
+        .and_then(|a| a.try_into().ok());
+    chunk.avatar_url =
+        get(ruma::events::StateEventType::RoomAvatar, "url").map(ruma::OwnedMxcUri::from);
+    chunk.join_rule = join_rule.into();
+    Ok(chunk)
 }
 
 /// Silence unused-import lints for module aliases used only in paths.
