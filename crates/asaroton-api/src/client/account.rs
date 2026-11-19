@@ -591,6 +591,7 @@ async fn set_profile_field_inner(
             services.set_avatar_url(&user, Some(url)).await?;
         }
         _ => {
+            check_status_field(key, &value)?;
             // The whole profile stays under the size limit.
             let current = services.store.get_user(&user).await?.map_or(0, |u| {
                 serde_json::Value::Object(u.profile_fields)
@@ -605,6 +606,37 @@ async fn set_profile_field_inner(
                 ));
             }
             services.set_profile_field(&user, key, Some(&value)).await?;
+        }
+    }
+    Ok(())
+}
+
+/// The status of one's own (MSC4426, `m.status` or its unstable name): `text` of at most 256
+/// bytes and an `emoji` of at most 32, both strings. An emoji of several graphemes (a flag, a
+/// family) is fine as long as it fits.
+fn check_status_field(key: &str, value: &serde_json::Value) -> Result<()> {
+    const MAX_TEXT_BYTES: usize = 256;
+    const MAX_EMOJI_BYTES: usize = 32;
+    if key != "m.status" && key != "org.matrix.msc4426.status" {
+        return Ok(());
+    }
+    let field = |name: &str| {
+        value
+            .get(name)
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| Error::bad_json(format!("{key} needs a string `{name}`.")))
+    };
+    let (text, emoji) = (field("text")?, field("emoji")?);
+    for (name, s, max) in [
+        ("text", text, MAX_TEXT_BYTES),
+        ("emoji", emoji, MAX_EMOJI_BYTES),
+    ] {
+        if s.len() > max {
+            return Err(Error::matrix(
+                ruma::api::error::ErrorKind::TooLarge,
+                http::StatusCode::BAD_REQUEST,
+                format!("The status {name} may be at most {max} bytes."),
+            ));
         }
     }
     Ok(())
