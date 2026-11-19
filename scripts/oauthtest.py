@@ -40,16 +40,26 @@ class Browser:
     def __init__(self):
         self.jar = http.cookiejar.CookieJar(policy=self._LoopbackIsSecure())
         self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(self.jar), self._Stop)
+        self.referrer_policy = ""
 
     def open(self, url, data=None):
-        """(status, final url, body) or, at the redirect to the client, (code, location, '')."""
+        """(status, final url, body) or, at the redirect to the client, (code, location, '').
+
+        A form post carries the `Origin` a real browser sends: `null` when the page that held
+        the form said `Referrer-Policy: no-referrer`, the form's own origin otherwise."""
         req = urllib.request.Request(url, data=None if data is None else urllib.parse.urlencode(data).encode())
+        if data is not None:
+            parts = urllib.parse.urlsplit(url)
+            origin = "null" if self.referrer_policy == "no-referrer" else f"{parts.scheme}://{parts.netloc}"
+            req.add_header("Origin", origin)
         try:
             with self.opener.open(req, timeout=30) as r:
+                self.referrer_policy = (r.headers.get("Referrer-Policy") or "").strip().lower()
                 return r.status, r.geturl(), r.read().decode()
         except urllib.error.HTTPError as e:
             if e.filename.startswith(REDIRECT):
                 return e.code, e.filename, ""
+            self.referrer_policy = (e.headers.get("Referrer-Policy") or "").strip().lower()
             return e.code, url, e.read().decode(errors="replace")
 
     @staticmethod
@@ -120,6 +130,8 @@ def run(hs, peers):
         "state": "s1", "code_challenge": challenge, "code_challenge_method": "S256"})
     st, url, page = browser.open(authorize)
     check(st == 200 and 'name="password"' in page, f"the authorization request shows the login page ({st})")
+    check(browser.referrer_policy not in ("", "no-referrer"),
+          f"with a referrer policy under which browsers send the form's origin ({browser.referrer_policy!r})")
     action, fields = Browser.form(page, url)
     st, url, page = browser.open(action, {**fields, "username": "alice", "password": "wrong"})
     check('name="password"' in page and "expired" not in page, f"a wrong password shows the login page again ({st})")
