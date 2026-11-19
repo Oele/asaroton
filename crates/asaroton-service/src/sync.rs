@@ -288,8 +288,10 @@ impl Services {
                 None,
             )
             .await;
+            // Only a sync that affects presence counts as activity: a user who keeps their
+            // presence to themselves (offline) must not show as "last active just now".
+            self.presence.touch(&req.user_id);
         }
-        self.presence.touch(&req.user_id);
 
         let mut rx = self.notifier.subscribe();
         let mut result = self.compute_sync(&req).await?;
