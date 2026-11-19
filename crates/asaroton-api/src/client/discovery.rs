@@ -41,8 +41,16 @@ pub async fn versions(
         // Thread subscriptions and their sliding sync extension.
         ("io.element.msc4306".to_owned(), true),
         ("io.element.msc4308".to_owned(), true),
-        // OAuth 2.0 API (MSC2965 discovery), when authentication is delegated.
-        ("org.matrix.msc2965".to_owned(), services.mas.is_some()),
+        // OAuth 2.0 API (MSC2965 discovery), when authentication is delegated or served here.
+        (
+            "org.matrix.msc2965".to_owned(),
+            services.mas.is_some() || services.oauth_metadata.get().is_some(),
+        ),
+        // Sign-in with a QR code: the 2024 MSC4108 rendezvous, served with `[oauth]`.
+        (
+            "org.matrix.msc4108".to_owned(),
+            services.oauth_metadata.get().is_some(),
+        ),
     ]);
     Ok(resp)
 }

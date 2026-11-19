@@ -98,6 +98,10 @@ pub fn build_router(state: AppState) -> Router {
         None => crate::client::signal_relay_routes(router),
     };
     let router = crate::federation::routes(router);
+    let router = match &state.oauth_client_router {
+        Some(rendezvous) => router.merge(rendezvous.clone().with_state(())),
+        None => router,
+    };
     router
         .route("/_matrix/client/{*rest}", axum::routing::any(unrecognized))
         .route("/_matrix/{*rest}", axum::routing::any(unrecognized))

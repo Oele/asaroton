@@ -350,16 +350,18 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
             None => tracing::warn!(user = %admin, "configured admin does not exist yet"),
         }
     }
+    // Sign-in through OAuth 2.0 (`[oauth]`): the authorization server in this process, on the
+    // client listener under `oauth.path`. Its pages are nested after the API's layers, so that
+    // they keep their own CORS headers and rate limits (the pages get no CORS at all); its QR
+    // rendezvous sits among the client API's routes, under their layers.
+    let oauth = crate::oauth::start(&services, &config).await?;
     let app = asaroton_api::build_router(Arc::new(App {
         limiter: asaroton_api::ratelimit::Limiter::default(),
         services: Arc::clone(&services),
         federation,
         sfu_router,
+        oauth_client_router: oauth.as_ref().map(lithostroton::Embedded::client_router),
     }));
-    // Sign-in through OAuth 2.0 (`[oauth]`): the authorization server in this process, on the
-    // client listener under `oauth.path`. Nested after the API's layers, so that it keeps its
-    // own CORS headers and rate limits (its login pages get no CORS at all).
-    let oauth = crate::oauth::start(&services, &config).await?;
     let app = match &oauth {
         Some(embedded) => {
             let path = crate::oauth::oauth_path(&config)?;

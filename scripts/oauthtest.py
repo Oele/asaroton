@@ -193,6 +193,42 @@ def run(hs, peers):
         st, who = hs.req("GET", "/_matrix/client/v3/account/whoami", None, dtokens["access_token"])
         check(st == 200 and who.get("device_id") == "OAUTHDEV2", f"as Alice on its own device ({st}, {who.get('device_id')})")
 
+    # The rendezvous of sign-in with a QR code: the 2024 MSC4108 protocol (what released
+    # matrix-rust-sdk versions speak), advertised in /versions, with asaroton's CORS on it and
+    # the ETag exposed to browsers; MSC4388 answers its discovery.
+    st, versions = hs.req("GET", "/_matrix/client/versions")
+    check(versions.get("unstable_features", {}).get("org.matrix.msc4108") is True, "/versions advertises the MSC4108 rendezvous")
+
+    def raw(method, url, body=None, headers=None):
+        req = urllib.request.Request(url, data=body, method=method, headers=headers or {})
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                return r.status, {k.lower(): v for k, v in r.headers.items()}, r.read()
+        except urllib.error.HTTPError as e:
+            return e.code, {k.lower(): v for k, v in e.headers.items()}, e.read()
+
+    st, h, created = raw("POST", hs.url + "/_matrix/client/unstable/org.matrix.msc4108/rendezvous", b"hello from the new device",
+                         {"Content-Type": "text/plain", "Origin": "https://app.example.org"})
+    session = json.loads(created or b"{}").get("url")
+    check(st == 201 and session and session.startswith(meta["issuer"]) and h.get("etag"),
+          f"a new device opens a rendezvous ({st}, {session})")
+    check(h.get("access-control-allow-origin") == "*" and "etag" in h.get("access-control-expose-headers", "").lower(),
+          f"with CORS and the ETag exposed for web clients ({h.get('access-control-allow-origin')}, {h.get('access-control-expose-headers')})")
+    etag = h["etag"]
+    st, h2, body = raw("GET", session)
+    check(st == 200 and body == b"hello from the new device" and h2.get("etag") == etag, f"the other device reads it ({st})")
+    st, h3, _ = raw("PUT", session, b"hello back", {"Content-Type": "text/plain", "If-Match": etag})
+    check(st in (200, 202) and h3.get("etag") and h3["etag"] != etag, f"and answers on top of what it read ({st})")
+    st, _, _ = raw("PUT", session, b"too late", {"Content-Type": "text/plain", "If-Match": etag})
+    check(st == 412, f"an answer on top of an old version is refused ({st})")
+    st, _, _ = raw("GET", session, None, {"If-None-Match": h3["etag"]})
+    check(st == 304, f"asking for news without any gets 304 ({st})")
+    st, _, _ = raw("DELETE", session)
+    st2, _, _ = raw("GET", session)
+    check(st in (200, 204) and st2 == 404, f"a rendezvous ends on DELETE ({st}, then {st2})")
+    st, _, _ = raw("GET", hs.url + "/_matrix/client/v1/rendezvous")
+    check(st == 200, f"the MSC4388 rendezvous answers its discovery ({st})")
+
     # Password login is still there beside it.
     st, r = hs.req("POST", "/_matrix/client/v3/login", {"type": "m.login.password", "identifier": {"type": "m.id.user", "user": "alice"}, "password": "pwpwpwpw"})
     check(st == 200 and r.get("access_token"), f"password login still works ({st})")

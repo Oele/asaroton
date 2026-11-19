@@ -32,6 +32,10 @@ pub struct App {
     /// The signalling and room API of an SFU that runs in this process. When set it is served
     /// under the signalling path itself, in place of the relay to an external SFU.
     pub sfu_router: Option<axum::Router>,
+    /// The rendezvous of sign-in with a QR code, from the authorization server in this process
+    /// (`[oauth]`): full `/_matrix/client/...` paths, merged beside the client API so that its
+    /// layers (CORS among them) cover them.
+    pub oauth_client_router: Option<axum::Router>,
 }
 
 impl std::fmt::Debug for App {
