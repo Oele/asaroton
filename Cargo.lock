@@ -2249,7 +2249,7 @@ checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
 [[package]]
 name = "lithostroton"
 version = "0.1.0"
-source = "git+https://github.com/Oele/lithostroton?rev=086f4b5429a0e6fb8eac9337dffcc4244e29a72d#086f4b5429a0e6fb8eac9337dffcc4244e29a72d"
+source = "git+https://github.com/Oele/lithostroton?rev=7d4c43ceb043661ca2e17976eb3406508b999e92#7d4c43ceb043661ca2e17976eb3406508b999e92"
 dependencies = [
  "async-trait",
  "axum",

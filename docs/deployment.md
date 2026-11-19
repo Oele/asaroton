@@ -129,6 +129,7 @@ asaroton's own; password login keeps working beside it. Its state (registered cl
 sign-ins in progress) is in the `lithostroton_store` table. Behind a reverse proxy, route
 `oauth.path` to the client listener as well, and set `rate_limiting.trust_x_forwarded_for` so
 that its rate limits see the client's address. It cannot be combined with `[mas]`.
+With `rate_limiting.enabled = false` (labs only) its own rate limits are off as well.
 
 ## Behind a reverse proxy on port 443
 

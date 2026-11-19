@@ -40,6 +40,12 @@ pub async fn start(services: &Arc<Services>, config: &Config) -> anyhow::Result<
     let mut oauth = lithostroton::Config::new(issuer, config.server_name.clone());
     oauth.secret_key = Some(secret_key(&services.store).await?);
     oauth.device_authorization = config.oauth.device_authorization;
+    // A lab without asaroton's rate limits goes without lithostroton's as well (its password
+    // limits included): never in production.
+    if !config.rate_limiting.enabled {
+        oauth.rate_limits = lithostroton::RateLimits::unlimited();
+        tracing::warn!("rate limiting is off: the OAuth 2.0 sign-in has no rate limits either");
+    }
     let embedded = Embedded::start(
         oauth,
         Arc::new(AsarotonHost {

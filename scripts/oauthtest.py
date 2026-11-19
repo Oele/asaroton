@@ -309,6 +309,9 @@ def run(hs, peers):
                    {**master(b"third"), "auth": {"type": "m.oauth", "session": uia3.get("session")}}, dtokens["access_token"])
     check(st in (401, 403), f"an approval is good for one reset ({st})")
 
+    # The lab runs without rate limits; lithostroton's are off with them, and the log says so.
+    check(bool(hs.log_lines("the OAuth 2.0 sign-in has no rate limits")), "without rate limiting, the log warns that sign-in has none either")
+
     # Password login is still there beside it.
     st, r = hs.req("POST", "/_matrix/client/v3/login", {"type": "m.login.password", "identifier": {"type": "m.id.user", "user": "alice"}, "password": "pwpwpwpw"})
     check(st == 200 and r.get("access_token"), f"password login still works ({st})")
