@@ -749,7 +749,9 @@ impl Services {
         let mut candidates: Vec<&Membership> = memberships
             .iter()
             .filter(|m| match m.membership {
-                MembershipState::Join => true,
+                // A pending knock is in the lists too (as Synapse has it), as stripped state:
+                // the knocker sees the room they asked to join, and later its answer.
+                MembershipState::Join | MembershipState::Knock => true,
                 MembershipState::Invite => !ignored.contains(&m.sender),
                 _ => false,
             })
@@ -1315,7 +1317,20 @@ impl Services {
             m.membership,
             MembershipState::Invite | MembershipState::Knock
         ) {
-            out.invite_state = Some(self.stripped_state(room_id, Some(user)).await?);
+            let stripped = self.stripped_state(room_id, Some(user)).await?;
+            // The room's name and avatar from what the user may see of it (clients name an
+            // invited or knocked room from these, as from a joined room's).
+            let content_of = |ty: &str, field: &str| {
+                stripped
+                    .iter()
+                    .find(|e| e.get("type").and_then(Value::as_str) == Some(ty))
+                    .and_then(|e| e.get("content")?.get(field)?.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+            };
+            out.name = content_of("m.room.name", "name");
+            out.avatar = content_of("m.room.avatar", "url");
+            out.invite_state = Some(stripped);
             return Ok(out);
         }
         // Anything but `join` from here on is a room the user is no longer in (left, kicked or
