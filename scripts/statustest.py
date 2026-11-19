@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""A status of one's own (MSC4426): `m.status` and its unstable name as profile fields.
+"""A status of one's own (MSC4426) as a profile field, under its unstable name.
 
-`{"text", "emoji"}`, both strings: set with PUT, read with GET, cleared with DELETE. A text over
-256 bytes or an emoji over 32 bytes is refused with M_TOO_LARGE; an emoji of several graphemes
-that fits is taken. Sizes are bytes of UTF-8, not characters.
+`org.matrix.msc4426.status` is `{"text", "emoji"}`, both strings: set with PUT, read with GET,
+cleared with DELETE. A text over 256 bytes or an emoji over 32 bytes is refused with
+M_TOO_LARGE; an emoji of several graphemes that fits is taken. Sizes are bytes of UTF-8, not
+characters. While the MSC is open the stable name `m.status` stays an ordinary field.
 
 Needs what scripts/fedlab.py needs. Takes a few seconds.
 
@@ -19,7 +20,7 @@ def run(hs, peers):
     alice, token = hs.register("alice")
     bob, b_token = hs.register("bob")
 
-    for field in ("m.status", "org.matrix.msc4426.status"):
+    for field in ("org.matrix.msc4426.status",):
         path = f"/_matrix/client/v3/profile/{q(alice)}/{q(field)}"
 
         def put(value):
@@ -48,6 +49,10 @@ def run(hs, peers):
         check(st == 200, f"{field}: DELETE clears it ({st})")
         st, r = hs.req("GET", path, None, b_token)
         check(st == 404, f"{field}: and then it is gone ({st})")
+
+    # The stable name is not the MSC's yet: any shape goes (Complement's MSC4429 tests use it).
+    st, r = hs.req("PUT", f"/_matrix/client/v3/profile/{q(alice)}/m.status", {"m.status": {"text": "busy"}}, token)
+    check(st == 200, f"m.status without an emoji is taken while MSC4426 is open ({st}, {r.get('errcode')})")
 
     # Other fields keep their own rules: no status check on them.
     st, r = hs.req("PUT", f"/_matrix/client/v3/profile/{q(alice)}/org.matrix.msc4426.call",

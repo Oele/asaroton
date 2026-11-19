@@ -611,13 +611,14 @@ async fn set_profile_field_inner(
     Ok(())
 }
 
-/// The status of one's own (MSC4426, `m.status` or its unstable name): `text` of at most 256
-/// bytes and an `emoji` of at most 32, both strings. An emoji of several graphemes (a flag, a
-/// family) is fine as long as it fits.
+/// The status of one's own (MSC4426): `text` of at most 256 bytes and an `emoji` of at most 32,
+/// both strings. An emoji of several graphemes (a flag, a family) is fine as long as it fits.
+/// Only under the unstable name while the MSC is open: `m.status` is still an ordinary field,
+/// which other proposals and tests (Complement's MSC4429 tests) fill with other shapes.
 fn check_status_field(key: &str, value: &serde_json::Value) -> Result<()> {
     const MAX_TEXT_BYTES: usize = 256;
     const MAX_EMOJI_BYTES: usize = 32;
-    if key != "m.status" && key != "org.matrix.msc4426.status" {
+    if key != "org.matrix.msc4426.status" {
         return Ok(());
     }
     let field = |name: &str| {

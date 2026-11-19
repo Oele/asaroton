@@ -40,7 +40,7 @@ They need `cargo build`, the development database role from `.env.example`, and 
 | `scripts/pushlagtest.py` | A push gateway that never answers holds up nobody else's pushes; they arrive at once and in order |
 | `scripts/publicroomstest.py` | The room directory: `server=` fetches another server's over federation (signed-in users only), a search looks at every room before paging and stays fast with thousands of public rooms, federation GET lists and POST searches |
 | `scripts/presencetest.py` | A sync with `set_presence=offline` is no activity: a user who keeps their presence to themselves does not show as "last active just now"; an ordinary sync brings them back online |
-| `scripts/statustest.py` | A status of one's own (MSC4426, `m.status` and its unstable name): set, read, cleared; text over 256 or emoji over 32 bytes is M_TOO_LARGE, emoji of several graphemes fit |
+| `scripts/statustest.py` | A status of one's own (MSC4426, unstable `org.matrix.msc4426.status`): set, read, cleared; text over 256 or emoji over 32 bytes is M_TOO_LARGE, emoji of several graphemes fit; `m.status` stays free-form while the MSC is open |
 | `scripts/profilestest.py` | Profile updates in sliding sync (MSC4262): all set fields first, then only changes, cleared fields as removed, `null` after the last shared room, `fields`/`lists` filters, a waiting request wakes for a status change |
 | `scripts/nultest.py` | A remote member's state event with NUL (a display name) stalls no room; one with NUL in its state key is refused alone; local NUL is a 400 |
 | `scripts/ignoretest.py` | Events of an ignored user stay out of /messages, /context, /event, /relations, /threads, /search and pushes; state events stay |
