@@ -366,6 +366,24 @@ impl Host for AsarotonHost {
         Ok(())
     }
 
+    /// A password change from the account pages (the current password was checked). The
+    /// user's other sessions stay signed in, as a change through the API without
+    /// `logout_devices` does; a password the server refuses comes back with the reason.
+    async fn set_password(&self, user_id: &str, new_password: &str) -> Result<(), HostError> {
+        let user_id = parse_user(user_id).ok_or_else(|| failed("not a user ID"))?;
+        match self
+            .services
+            .change_password(&user_id, new_password, false, None, None)
+            .await
+        {
+            Ok(()) => Ok(()),
+            Err(asaroton_service::Error::Matrix {
+                status, message, ..
+            }) if status.is_client_error() => Err(HostError::Refused(message)),
+            Err(e) => Err(failed(e)),
+        }
+    }
+
     async fn authenticate(&self, access_token: &str) -> Result<Option<String>, HostError> {
         match self.services.auth.authenticate(access_token).await {
             Ok(sender) => Ok(Some(sender.user_id.to_string())),

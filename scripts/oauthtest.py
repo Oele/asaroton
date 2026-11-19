@@ -53,6 +53,19 @@ class Browser:
             return e.code, url, e.read().decode(errors="replace")
 
     @staticmethod
+    def form_with(page, base, needle):
+        """The first form whose HTML contains `needle`: (action URL, hidden fields)."""
+        for m in re.finditer(r'<form[^>]*action="([^"]*)"[^>]*>(.*?)</form>', page, re.S):
+            if needle in m.group(2):
+                fields = {}
+                for inp in re.finditer(r"<input([^>]*)>", m.group(2)):
+                    attrs = dict(re.findall(r'([\w-]+)="([^"]*)"', inp.group(1)))
+                    if attrs.get("type") == "hidden" and "name" in attrs:
+                        fields[attrs["name"]] = html.unescape(attrs.get("value", ""))
+                return urllib.parse.urljoin(base, html.unescape(m.group(1))), fields
+        raise AssertionError(f"no form with {needle!r}: {page[:300]}")
+
+    @staticmethod
     def form(page, base, want=None):
         """The first form of the page whose hidden fields include `want` (a dict), or the first
         form: (action URL, hidden fields)."""
@@ -228,6 +241,40 @@ def run(hs, peers):
     check(st in (200, 204) and st2 == 404, f"a rendezvous ends on DELETE ({st}, then {st2})")
     st, _, _ = raw("GET", hs.url + "/_matrix/client/v1/rendezvous")
     check(st == 200, f"the MSC4388 rendezvous answers its discovery ({st})")
+
+    # The account pages (MSC4191), and a cross-signing reset approved there (the `m.oauth`
+    # stage of /keys/device_signing/upload) for clients that signed in through OAuth.
+    account = meta.get("account_management_uri")
+    check(bool(account) and account.startswith(meta["issuer"]), f"the metadata names the account page ({account})")
+    st, url, page = browser.open(account + "?action=org.matrix.devices_list")
+    check(st == 200 and "OAUTHDEV2" in page, f"the signed-in browser lists Alice's sessions on the account page ({st})")
+
+    def master(seed):
+        key = b64(hashlib.sha256(seed).digest())
+        return {"master_key": {"user_id": alice, "usage": ["master"], "keys": {f"ed25519:{key}": key}}}
+
+    st, r = hs.req("POST", "/_matrix/client/v3/keys/device_signing/upload", master(b"first"), dtokens["access_token"])
+    check(st == 200, f"a first cross-signing key needs no approval ({st})")
+    st, uia = hs.req("POST", "/_matrix/client/v3/keys/device_signing/upload", master(b"second"), dtokens["access_token"])
+    flows = [f["stages"] for f in uia.get("flows", [])]
+    reset_url = uia.get("params", {}).get("m.oauth", {}).get("url", "")
+    check(st == 401 and ["m.oauth"] in flows and ["m.login.password"] in flows and reset_url.startswith(account),
+          f"replacing it asks for approval: password, or m.oauth through the account page ({st}, {flows})")
+    st, _ = hs.req("POST", "/_matrix/client/v3/keys/device_signing/upload",
+                   {**master(b"second"), "auth": {"type": "m.oauth", "session": uia.get("session")}}, dtokens["access_token"])
+    check(st in (401, 403), f"without the approval, m.oauth does not pass ({st})")
+    st, url, page = browser.open(reset_url)
+    action, fields = Browser.form_with(page, url, 'type="password"')
+    st, url, page = browser.open(action, {**fields, "password": "pwpwpwpw"})
+    check(st == 200, f"Alice approves the reset with her password on the account page ({st})")
+    st, uia2 = hs.req("POST", "/_matrix/client/v3/keys/device_signing/upload", master(b"second"), dtokens["access_token"])
+    st, r = hs.req("POST", "/_matrix/client/v3/keys/device_signing/upload",
+                   {**master(b"second"), "auth": {"type": "m.oauth", "session": uia2.get("session")}}, dtokens["access_token"])
+    check(st == 200, f"and the client's retry with m.oauth replaces the key ({st}, {r.get('errcode')})")
+    st, uia3 = hs.req("POST", "/_matrix/client/v3/keys/device_signing/upload", master(b"third"), dtokens["access_token"])
+    st, r = hs.req("POST", "/_matrix/client/v3/keys/device_signing/upload",
+                   {**master(b"third"), "auth": {"type": "m.oauth", "session": uia3.get("session")}}, dtokens["access_token"])
+    check(st in (401, 403), f"an approval is good for one reset ({st})")
 
     # Password login is still there beside it.
     st, r = hs.req("POST", "/_matrix/client/v3/login", {"type": "m.login.password", "identifier": {"type": "m.id.user", "user": "alice"}, "password": "pwpwpwpw"})

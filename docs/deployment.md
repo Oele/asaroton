@@ -123,7 +123,8 @@ on the client listener under `oauth.path` (default `/_lithostroton`). Clients fi
 `/_matrix/client/v1/auth_metadata`; its issuer is `public_base_url` + `oauth.path`. It has
 login and consent pages, client registration, the authorization code flow with PKCE, refresh
 and revocation, and (with `oauth.device_authorization`, on by default) the device
-authorization grant and the rendezvous (under `/_matrix/client`) that signing in with a QR code uses. The tokens it hands out are
+authorization grant and the rendezvous (under `/_matrix/client`) that signing in with a QR code uses,
+and account pages (sessions, password, cross-signing reset) at `oauth.path` + `/account/`. The tokens it hands out are
 asaroton's own; password login keeps working beside it. Its state (registered clients,
 sign-ins in progress) is in the `lithostroton_store` table. Behind a reverse proxy, route
 `oauth.path` to the client listener as well, and set `rate_limiting.trust_x_forwarded_for` so

@@ -299,15 +299,48 @@ pub async fn upload_signing(
             ));
         }
     } else if has_existing {
-        let flows = vec![AuthFlow::new(vec![AuthType::Password])];
+        // With sign-in through OAuth 2.0 served here (`[oauth]`), the account page approves a
+        // reset (`m.oauth`, for clients that signed in there and know no password); password
+        // re-authentication stays for the others.
+        let reset_url = services
+            .oauth_metadata
+            .get()
+            .and_then(|m| m.get("account_management_uri"))
+            .and_then(Value::as_str)
+            .map(|uri| format!("{uri}?action=org.matrix.cross_signing_reset"));
+        let mut flows = vec![AuthFlow::new(vec![AuthType::Password])];
+        let params = reset_url.map(|url| {
+            flows.push(AuthFlow::new(vec![AuthType::OAuth]));
+            serde_json::json!({
+                "m.oauth": { "url": url },
+                "org.matrix.cross_signing_reset": { "url": url },
+            })
+        });
         let outcome = services
             .uia
             .step(
                 flows,
                 req.body.auth.as_ref(),
                 Some(sender.user_id.clone()),
-                None,
+                params,
                 async |stage, data, user| {
+                    if stage == AuthType::OAuth {
+                        // Approved on the account page within the last ten minutes.
+                        let approved =
+                            user.is_some_and(|u| {
+                                services.cross_signing_reset_allowed.remove(u).is_some_and(
+                                    |(_, at)| at.elapsed() < std::time::Duration::from_secs(600),
+                                )
+                            });
+                        return if approved {
+                            asaroton_auth::StageResult::Passed { user_id: None }
+                        } else {
+                            asaroton_auth::StageResult::Failed {
+                                kind: ruma::api::error::ErrorKind::Forbidden,
+                                message: "Approve the reset on the account page first.".into(),
+                            }
+                        };
+                    }
                     super::account::check_stage(&services, stage, data, user).await
                 },
             )
