@@ -281,6 +281,14 @@ def run(hs, peers):
     check(st == 412, f"an answer on top of an old version is refused ({st})")
     st, _, _ = raw("GET", session, None, {"If-None-Match": h3["etag"]})
     check(st == 304, f"asking for news without any gets 304 ({st})")
+    # A proxy that compresses the answer (nginx with gzip) hands the client a weak tag, W/"…",
+    # which comes back in If-None-Match and If-Match: the same version, so it works.
+    st, _, _ = raw("GET", session, None, {"If-None-Match": "W/" + h3["etag"]})
+    check(st == 304, f"a weak tag from a compressing proxy works in If-None-Match ({st})")
+    st, h5, _ = raw("PUT", session, b"through a proxy", {"Content-Type": "text/plain", "If-Match": "W/" + h3["etag"]})
+    check(st in (200, 202), f"and in If-Match ({st})")
+    st, _, _ = raw("PUT", session, b"twice", {"Content-Type": "text/plain", "If-Match": "W/" + h3["etag"]})
+    check(st == 412, f"one writer per version still: the same weak tag again is refused ({st})")
     st, _, _ = raw("DELETE", session)
     st2, _, _ = raw("GET", session)
     check(st in (200, 204) and st2 == 404, f"a rendezvous ends on DELETE ({st}, then {st2})")
