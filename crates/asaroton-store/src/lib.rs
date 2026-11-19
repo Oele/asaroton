@@ -277,6 +277,8 @@ pub trait EventStore: Send + Sync {
     /// How many live, accepted events of the room have `from <= stream_ordering <= to`.
     async fn room_event_count_in_range(&self, room_id: &RoomId, from: i64, to: i64) -> Result<i64>;
     async fn get_event(&self, event_id: &EventId) -> Result<Option<StoredEvent>>;
+    /// The event at a stream position, outliers included (an invitation from another server).
+    async fn event_at_stream_ordering(&self, stream_ordering: i64) -> Result<Option<StoredEvent>>;
     async fn get_events(&self, event_ids: &[OwnedEventId]) -> Result<Vec<StoredEvent>>;
     /// Take back the rejection of events that turn out to pass their checks after all: they
     /// had been rejected because something they depend on could not be obtained or verified

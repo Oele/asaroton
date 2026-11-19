@@ -164,25 +164,49 @@ async fn handle_event(
     with_pushers: &HashSet<OwnedUserId>,
     enqueue: impl Fn(Pusher, Arc<Value>),
 ) -> ServiceResult<()> {
-    let Some(ev) = services
+    let found = services
         .store
         .events_after(stream_ordering - 1, 1)
         .await?
         .into_iter()
-        .find(|e| e.stream_ordering == stream_ordering)
-    else {
-        return Ok(());
+        .find(|e| e.stream_ordering == stream_ordering);
+    let ev = match found {
+        Some(ev) => ev,
+        // An invitation from another server is stored as an outlier, which `events_after`
+        // leaves out: it is the one outlier the push worker is told about.
+        None => match services
+            .store
+            .event_at_stream_ordering(stream_ordering)
+            .await?
+        {
+            Some(ev) if ev.outlier && invitee_of(&ev.pdu).is_some() => ev,
+            _ => return Ok(()),
+        },
     };
-    for m in services.store.members(room_id, Some("join")).await? {
-        if !services.is_local(&m.user_id)
-            || m.user_id == ev.pdu.sender()
-            || !with_pushers.contains(&m.user_id)
+    let mut recipients: Vec<OwnedUserId> = services
+        .store
+        .members(room_id, Some("join"))
+        .await?
+        .into_iter()
+        .map(|m| m.user_id)
+        .collect();
+    // The user an invitation is for is not in the room yet, but is the one to wake for it
+    // (`.m.rule.invite_for_me`), as Synapse does.
+    if let Some(invitee) = invitee_of(&ev.pdu)
+        && !recipients.contains(&invitee)
+    {
+        recipients.push(invitee);
+    }
+    for user_id in recipients {
+        if !services.is_local(&user_id)
+            || user_id == ev.pdu.sender()
+            || !with_pushers.contains(&user_id)
         {
             continue;
         }
         let pushers: Vec<Pusher> = services
             .store
-            .pushers(&m.user_id)
+            .pushers(&user_id)
             .await?
             .into_iter()
             .filter(|p| p.kind == "http")
@@ -194,25 +218,37 @@ async fn handle_event(
         // issue 68). State events are not exempt here: they do not push anyway unless a rule
         // says so, and a member event of an ignored user is no reason to.
         if services
-            .ignored_users(&m.user_id)
+            .ignored_users(&user_id)
             .await?
             .contains(ev.pdu.sender())
         {
             continue;
         }
-        let (ruleset, ctx) = services.push_rule_context(room_id, &m.user_id).await?;
+        let (ruleset, ctx) = services.push_rule_context(room_id, &user_id).await?;
         let Some(highlight) = services.push_actions_for(&ruleset, &ctx, &ev).await else {
             continue;
         };
-        let unread = unread_total(services, &m.user_id).await;
+        let unread = unread_total(services, &user_id).await;
         let notification = Arc::new(
-            build_notification(services, room_id, &ev, &m.user_id, highlight, unread).await?,
+            build_notification(services, room_id, &ev, &user_id, highlight, unread).await?,
         );
         for pusher in pushers {
             enqueue(pusher, Arc::clone(&notification));
         }
     }
     Ok(())
+}
+
+/// The user a membership event invites, if it is an invitation.
+fn invitee_of(pdu: &asaroton_core::Pdu) -> Option<OwnedUserId> {
+    if pdu.event_type() != &ruma::events::TimelineEventType::RoomMember {
+        return None;
+    }
+    let content: Value = serde_json::from_str(pdu.content().get()).ok()?;
+    if content.get("membership").and_then(Value::as_str) != Some("invite") {
+        return None;
+    }
+    OwnedUserId::try_from(pdu.state_key()?).ok()
 }
 
 /// Unread notifications across every joined room (the badge count).

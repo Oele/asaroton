@@ -562,6 +562,16 @@ impl EventStore for PostgresStore {
         row.map(StoredEvent::try_from).transpose()
     }
 
+    async fn event_at_stream_ordering(&self, stream_ordering: i64) -> Result<Option<StoredEvent>> {
+        let row: Option<EventRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT {EVENT_COLUMNS} FROM events e JOIN rooms r ON r.room_id = e.room_id WHERE e.stream_ordering = $1"
+        )))
+        .bind(stream_ordering)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(StoredEvent::try_from).transpose()
+    }
+
     async fn get_events(&self, event_ids: &[OwnedEventId]) -> Result<Vec<StoredEvent>> {
         let rows: Vec<EventRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "SELECT {EVENT_COLUMNS} FROM events e JOIN rooms r ON r.room_id = e.room_id WHERE e.event_id = ANY($1)"

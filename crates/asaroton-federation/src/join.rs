@@ -1286,12 +1286,20 @@ impl Federation {
             .await?;
         // The invitation's number is what the invited user's sync goes by: the wake-up waits
         // until a sync can be told about it.
+        // The push worker hears of it as of any event of the room, and wakes the invitee's
+        // pushers (`.m.rule.invite_for_me`).
         services.wake_when_reportable(
             asaroton_store::SyncStream::Events,
             at,
-            vec![asaroton_service::Notification::User {
-                user_id: invitee.clone(),
-            }],
+            vec![
+                asaroton_service::Notification::User {
+                    user_id: invitee.clone(),
+                },
+                asaroton_service::Notification::RoomEvent {
+                    room_id: room_id.to_owned(),
+                    stream_ordering: at,
+                },
+            ],
         );
         Ok(signed)
     }
