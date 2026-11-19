@@ -206,6 +206,39 @@ def run(hs, peers):
         st, who = hs.req("GET", "/_matrix/client/v3/account/whoami", None, dtokens["access_token"])
         check(st == 200 and who.get("device_id") == "OAUTHDEV2", f"as Alice on its own device ({st}, {who.get('device_id')})")
 
+    # A device ID the way matrix-rust-sdk and Element X make it for QR login: the device's key
+    # in standard base64, with '+', '/' and '='. Everything that names a device has to cope.
+    odd = "l9ib+4uuYRsOD0pQS/q8xMz3uvJJ5ihdxS4NdaLL4h="
+    verifier4 = b64(os.urandom(32))
+    st, url, page = browser.open(meta["authorization_endpoint"] + "?" + urllib.parse.urlencode({
+        "response_type": "code", "client_id": client_id, "redirect_uri": REDIRECT,
+        "scope": f"urn:matrix:client:api:* urn:matrix:client:device:{odd}", "state": "s4",
+        "code_challenge": b64(hashlib.sha256(verifier4.encode()).digest()), "code_challenge_method": "S256"}))
+    action, fields = Browser.form(page, url, {"action": "allow"})
+    st, location, _ = browser.open(action, fields)
+    code4 = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(location).query)).get("code")
+    st, t4 = post_form(meta["token_endpoint"], {"grant_type": "authorization_code", "code": code4, "redirect_uri": REDIRECT,
+                                               "client_id": client_id, "code_verifier": verifier4})
+    check(st == 200, f"a device ID with '+', '/' and '=' signs in ({st}, {t4.get('error')})")
+    st, who = hs.req("GET", "/_matrix/client/v3/account/whoami", None, t4.get("access_token"))
+    check(st == 200 and who.get("device_id") == odd, f"and its token names that device exactly ({who.get('device_id')})")
+    st, dev = hs.req("GET", "/_matrix/client/v3/devices/" + urllib.parse.quote(odd, safe=""), None, a_token)
+    check(st == 200 and dev.get("device_id") == odd, f"/devices/{{id}} finds it with %2B and %2F ({st})")
+    st, r = hs.req("PUT", "/_matrix/client/v3/devices/" + urllib.parse.quote(odd, safe=""), {"display_name": "QR phone"}, a_token)
+    st2, dev = hs.req("GET", "/_matrix/client/v3/devices/" + urllib.parse.quote(odd, safe=""), None, a_token)
+    check(st == 200 and dev.get("display_name") == "QR phone", f"and renames it ({st})")
+    keys = {"device_keys": {"user_id": alice, "device_id": odd, "algorithms": ["m.olm.v1.curve25519-aes-sha2"],
+                            "keys": {f"curve25519:{odd}": "c" * 43, f"ed25519:{odd}": "e" * 43}, "signatures": {}}}
+    st, r = hs.req("POST", "/_matrix/client/v3/keys/upload", keys, t4["access_token"])
+    st2, q = hs.req("POST", "/_matrix/client/v3/keys/query", {"device_keys": {alice: []}}, a_token)
+    check(st == 200 and odd in q.get("device_keys", {}).get(alice, {}), f"its keys upload and come back in a key query ({st}, {st2})")
+    st, f4 = post_form(meta["token_endpoint"], {"grant_type": "refresh_token", "refresh_token": t4["refresh_token"], "client_id": client_id})
+    st2, who = hs.req("GET", "/_matrix/client/v3/account/whoami", None, f4.get("access_token"))
+    check(st == 200 and who.get("device_id") == odd, f"a refresh keeps the device ({st}, {who.get('device_id')})")
+    st, _ = post_form(meta["revocation_endpoint"], {"token": f4["access_token"], "client_id": client_id})
+    st2, dev = hs.req("GET", "/_matrix/client/v3/devices/" + urllib.parse.quote(odd, safe=""), None, a_token)
+    check(st == 200 and st2 == 404, f"and revoking its token removes the device ({st}, then {st2})")
+
     # The rendezvous of sign-in with a QR code: the 2024 MSC4108 protocol (what released
     # matrix-rust-sdk versions speak), advertised in /versions, with asaroton's CORS on it and
     # the ETag exposed to browsers; MSC4388 answers its discovery.
