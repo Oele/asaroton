@@ -18,7 +18,7 @@ musivum = { git = "https://github.com/Oele/musivum", rev = "53576a345eaf44939115
 musivum-server = { git = "https://github.com/Oele/musivum", rev = "53576a345eaf44939115a44e254aad73dbbfaf8e" }
 # The OAuth 2.0 authorization server that runs in asaroton's process (`[oauth]`): lithostroton,
 # Apache-2.0, written from the Matrix spec and the RFCs. Pinned to a commit.
-lithostroton = { git = "https://github.com/Oele/lithostroton", rev = "6e200ff8f1675e239eff2157deb9788fe95a8c58" }
+lithostroton = { git = "https://github.com/Oele/lithostroton", rev = "b56d24e4a2dc75ef914e02975ee27fc8b710bc51" }
 html-escape = "0.3.0"
 percent-encoding = "2"
 # internal crates
