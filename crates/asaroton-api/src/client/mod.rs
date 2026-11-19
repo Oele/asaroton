@@ -60,6 +60,13 @@ pub fn routes(router: Router<AppState>) -> Router<AppState> {
         route::<c::account::get_username_availability::v3::Request, _, _>(r, account::available);
     let r = route::<c::account::whoami::v3::Request, _, _>(r, account::whoami);
     let r = route::<c::account::get_3pids::v3::Request, _, _>(r, account::get_3pids);
+    let r = route::<c::account::request_3pid_management_token_via_email::v3::Request, _, _>(
+        r,
+        account::request_3pid_email_token,
+    );
+    let r = route::<c::account::add_3pid::v3::Request, _, _>(r, account::add_3pid);
+    let r = route::<c::account::delete_3pid::v3::Request, _, _>(r, account::delete_3pid);
+    let r = route::<c::account::unbind_3pid::v3::Request, _, _>(r, account::unbind_3pid);
     let r = route::<c::account::change_password::v3::Request, _, _>(r, account::change_password);
     let r = route::<c::account::deactivate::v3::Request, _, _>(r, account::deactivate);
     // devices
@@ -455,6 +462,12 @@ pub fn routes(router: Router<AppState>) -> Router<AppState> {
         .route(
             sliding_sync::PATH,
             axum::routing::post(sliding_sync_handler),
+        )
+        // The code from a verification mail: given back by the client, or by the link.
+        .route(
+            asaroton_service::threepid::SUBMIT_PATH,
+            axum::routing::get(account::submit_3pid_email_token)
+                .post(account::submit_3pid_email_token),
         )
         // Matrix Authentication Service: discovery for clients, management API for MAS.
         .route(

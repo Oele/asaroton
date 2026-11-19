@@ -355,6 +355,8 @@ impl Services {
     /// Deactivate an account: no more logins, all sessions gone.
     pub async fn deactivate(&self, user_id: &UserId) -> Result<()> {
         self.store.set_password_hash(user_id, None).await?;
+        // A deactivated account keeps no email addresses: they can go to another account.
+        self.store.delete_user_threepids(user_id).await?;
         self.store.set_deactivated(user_id, true).await?;
         self.auth.forget_user(user_id);
         self.logout_all(user_id).await

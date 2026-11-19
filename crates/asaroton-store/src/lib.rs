@@ -982,6 +982,38 @@ pub trait OauthStore: Send + Sync {
     async fn oauth_kv_purge_expired(&self) -> Result<()>;
 }
 
+/// Email addresses on accounts, and their verification.
+#[async_trait]
+pub trait ThreepidStore: Send + Sync {
+    /// Who has this address, if anyone.
+    async fn threepid_owner(&self, medium: &str, address: &str) -> Result<Option<OwnedUserId>>;
+    async fn user_threepids(&self, user_id: &UserId) -> Result<Vec<UserThreepid>>;
+    /// Add an address to an account; `false` if another account (or this one) has it.
+    async fn add_user_threepid(&self, threepid: UserThreepid) -> Result<bool>;
+    /// Remove an address from an account; whether it was there.
+    async fn delete_user_threepid(
+        &self,
+        user_id: &UserId,
+        medium: &str,
+        address: &str,
+    ) -> Result<bool>;
+    async fn delete_user_threepids(&self, user_id: &UserId) -> Result<()>;
+    /// The verification session with this client secret for this address, if any.
+    async fn threepid_session_for(
+        &self,
+        client_secret: &str,
+        medium: &str,
+        address: &str,
+    ) -> Result<Option<ThreepidSession>>;
+    async fn threepid_session(&self, sid: &str) -> Result<Option<ThreepidSession>>;
+    /// Insert a session, or replace the one with the same client secret and address.
+    async fn put_threepid_session(&self, session: ThreepidSession) -> Result<()>;
+    /// Mark a session validated (`Some`) or count a wrong code (`None`).
+    async fn update_threepid_session(&self, sid: &str, validated_at: Option<Ts>) -> Result<()>;
+    async fn delete_threepid_session(&self, sid: &str) -> Result<()>;
+    async fn purge_expired_threepid_sessions(&self, now: Ts) -> Result<()>;
+}
+
 /// The full store.
 pub trait Store:
     UserStore
@@ -998,6 +1030,7 @@ pub trait Store:
     + FederationStore
     + MediaStore
     + OauthStore
+    + ThreepidStore
 {
     /// Run pending migrations.
     fn migrate(&self) -> futures::future::BoxFuture<'_, Result<()>>;

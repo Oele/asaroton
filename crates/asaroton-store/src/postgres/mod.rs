@@ -14,6 +14,7 @@ mod rtc;
 mod state;
 mod streams;
 mod thread_subscriptions;
+mod threepids;
 mod users;
 
 use std::time::Duration;
@@ -368,6 +369,10 @@ mod tests {
             (
                 17,
                 "bd85bccf4f34c8105234d9f7751d63f87d9ab6df8b3c868058ffcf4aca291ef3699bbbe0bfd72091f38cd2ea07f428ac",
+            ),
+            (
+                18,
+                "20c0d820cf20c26bc4f5fdaca48e560dadbc5ee95256771d406638de4d34ad734a16e3a08f7af10a35bb97747d7c393f",
             ),
         ];
         let actual: Vec<(i64, String)> = MIGRATOR

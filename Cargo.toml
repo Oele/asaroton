@@ -20,6 +20,8 @@ musivum-server = { git = "https://github.com/Oele/musivum", rev = "53576a345eaf4
 # Apache-2.0, written from the Matrix spec and the RFCs. Pinned to a commit.
 lithostroton = { git = "https://github.com/Oele/lithostroton", rev = "afb489d17f617cc6ab84cc04dafe8cc05b2c8728" }
 html-escape = "0.3.0"
+# Mail for email addresses on accounts (`[email]`): SMTP, with rustls for STARTTLS/TLS.
+lettre = { version = "=0.11.23", default-features = false, features = ["builder", "smtp-transport", "hostname", "tokio1", "tokio1-rustls-tls", "webpki-roots"] }
 percent-encoding = "2"
 # internal crates
 asaroton-core = { path = "crates/asaroton-core" }

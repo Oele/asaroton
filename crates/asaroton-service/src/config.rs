@@ -34,6 +34,63 @@ pub struct Config {
     pub search: SearchSettings,
     /// The `LiveKit` SFU this server offers for `MatrixRTC` calls (MSC4195), when configured.
     pub rtc: Option<LivekitSettings>,
+    /// Mail for email addresses on accounts, when configured.
+    pub email: Option<EmailSettings>,
+}
+
+/// How this server sends mail (the verification of email addresses on accounts).
+#[derive(Clone, Debug)]
+pub struct EmailSettings {
+    /// The sender: `Name <address>` or a bare address.
+    pub from: String,
+    pub transport: EmailTransport,
+}
+
+/// Where mail goes.
+#[derive(Clone)]
+pub enum EmailTransport {
+    /// An SMTP server (the host's own mail server on localhost, usually).
+    Smtp {
+        host: String,
+        port: u16,
+        tls: SmtpTls,
+        username: Option<String>,
+        password: Option<String>,
+    },
+    /// Each message as an `.eml` file in this directory, for labs and tests.
+    Directory(std::path::PathBuf),
+}
+
+impl std::fmt::Debug for EmailTransport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EmailTransport::Smtp {
+                host,
+                port,
+                tls,
+                username,
+                ..
+            } => f
+                .debug_struct("Smtp")
+                .field("host", host)
+                .field("port", port)
+                .field("tls", tls)
+                .field("username", username)
+                .finish_non_exhaustive(),
+            EmailTransport::Directory(d) => f.debug_tuple("Directory").field(d).finish(),
+        }
+    }
+}
+
+/// Encryption of the SMTP connection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SmtpTls {
+    /// None: for a mail server on the same machine.
+    None,
+    /// STARTTLS, required.
+    StartTls,
+    /// TLS from the start (port 465).
+    Tls,
 }
 
 /// A `LiveKit` SFU operated for this server.

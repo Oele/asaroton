@@ -164,7 +164,19 @@ pub async fn get_user(
                 .await?
                 .ok_or_else(|| Error::not_found("User not found"))?;
             let mut v = user_json(&u);
-            v["threepids"] = json!([]);
+            v["threepids"] = services
+                .threepids(&id)
+                .await?
+                .into_iter()
+                .map(|t| {
+                    json!({
+                        "medium": t.medium,
+                        "address": t.address,
+                        "validated_at": t.validated_at,
+                        "added_at": t.added_at,
+                    })
+                })
+                .collect();
             v["external_ids"] = json!([]);
             v["consent_version"] = Value::Null;
             Ok((StatusCode::OK, v))

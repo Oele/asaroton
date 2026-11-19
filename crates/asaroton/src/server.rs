@@ -223,7 +223,63 @@ fn service_config(config: &Config) -> anyhow::Result<asaroton_service::Config> {
             }
         }),
         mas: mas_settings(config)?,
+        email: email_settings(config)?,
     })
+}
+
+fn email_settings(
+    config: &Config,
+) -> anyhow::Result<Option<asaroton_service::config::EmailSettings>> {
+    use asaroton_service::config::{EmailSettings, EmailTransport, SmtpTls};
+    let e = &config.email;
+    if !e.enabled {
+        return Ok(None);
+    }
+    anyhow::ensure!(
+        !e.from.trim().is_empty(),
+        "email.enabled requires email.from"
+    );
+    let transport = match e.transport.as_str() {
+        "smtp" => {
+            let tls = match e.smtp_tls.as_str() {
+                "none" => SmtpTls::None,
+                "starttls" => SmtpTls::StartTls,
+                "tls" => SmtpTls::Tls,
+                other => {
+                    anyhow::bail!("email.smtp_tls must be none, starttls or tls, not {other:?}")
+                }
+            };
+            let password = e
+                .smtp_password_file
+                .as_ref()
+                .map(|path| {
+                    std::fs::read_to_string(path)
+                        .map(|s| s.trim().to_owned())
+                        .map_err(|err| {
+                            anyhow::anyhow!(
+                                "reading email.smtp_password_file {}: {err}",
+                                path.display()
+                            )
+                        })
+                })
+                .transpose()?;
+            EmailTransport::Smtp {
+                host: e.smtp_host.clone(),
+                port: e.smtp_port,
+                tls,
+                username: e.smtp_username.clone(),
+                password,
+            }
+        }
+        "directory" => EmailTransport::Directory(e.directory.clone().ok_or_else(|| {
+            anyhow::anyhow!("email.transport = \"directory\" requires email.directory")
+        })?),
+        other => anyhow::bail!("email.transport must be smtp or directory, not {other:?}"),
+    };
+    Ok(Some(EmailSettings {
+        from: e.from.clone(),
+        transport,
+    }))
 }
 
 fn mas_settings(config: &Config) -> anyhow::Result<Option<asaroton_service::config::MasSettings>> {

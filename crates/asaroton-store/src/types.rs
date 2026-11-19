@@ -106,6 +106,34 @@ pub struct PublicRoomText {
     pub alias: Option<String>,
 }
 
+/// A third-party identifier (an email address) on an account.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UserThreepid {
+    pub user_id: OwnedUserId,
+    pub medium: String,
+    pub address: String,
+    pub validated_at: Ts,
+    pub added_at: Ts,
+}
+
+/// A verification of a third-party identifier in progress.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ThreepidSession {
+    pub sid: String,
+    pub client_secret: String,
+    pub medium: String,
+    pub address: String,
+    /// SHA-256 of the code that was sent, hex.
+    pub token_hash: String,
+    pub send_attempt: i64,
+    pub next_link: Option<String>,
+    pub created_ts: Ts,
+    pub last_sent_ts: Ts,
+    pub expires_ts: Ts,
+    pub validated_at: Option<Ts>,
+    pub failures: i32,
+}
+
 /// A room alias mapping.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RoomAlias {

@@ -84,7 +84,7 @@ pub fn capabilities(
             "m.change_password": { "enabled": services.mas.is_none() },
             "m.set_displayname": { "enabled": true },
             "m.set_avatar_url": { "enabled": true },
-            "m.3pid_changes": { "enabled": false },
+            "m.3pid_changes": { "enabled": services.config.email.is_some() && services.mas.is_none() },
             "m.get_login_token": { "enabled": false },
             "m.forget_forced_upon_leave": { "enabled": false },
             "m.profile_fields": { "enabled": true },

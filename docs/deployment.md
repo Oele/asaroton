@@ -131,6 +131,19 @@ sign-ins in progress) is in the `lithostroton_store` table. Behind a reverse pro
 that its rate limits see the client's address. It cannot be combined with `[mas]`.
 With `rate_limiting.enabled = false` (labs only) its own rate limits are off as well.
 
+## Email addresses on accounts
+
+With `[email] enabled = true` users can add email addresses to their accounts, verified by
+asaroton itself (no identity server): `requestToken` mails a six-digit code and a link,
+`/account/3pid/add` puts the confirmed address on the account with the user's password, and
+`m.3pid_changes` is on. An address belongs to one account; a deactivated account frees its
+addresses. Mail goes over SMTP (`smtp_host`, `smtp_port`, `smtp_tls` = `none`, `starttls` or
+`tls`, optionally `smtp_username` and `smtp_password_file`; a mail server on the same machine
+needs `none`), or for labs into a directory as `.eml` files (`transport = "directory"`,
+`directory = "/path"`). `from` is the sender. The service's unit has `NoNewPrivileges`, which
+rules out a setgid `sendmail`; use SMTP to the local mail server instead. Password reset by
+email and phone numbers are not offered.
+
 ## Behind a reverse proxy on port 443
 
 Set `public_base_url = "https://matrix.example.org"` so `.well-known/matrix/client` and login

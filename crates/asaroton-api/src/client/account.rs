@@ -9,9 +9,10 @@ use ruma::{
     MilliSecondsSinceUnixEpoch, OwnedDeviceId, OwnedUserId, UInt,
     api::client::{
         account::{
-            change_password, deactivate, get_3pids, get_username_availability,
+            add_3pid, change_password, deactivate, delete_3pid, get_3pids,
+            get_username_availability,
             register::{self, RegistrationKind},
-            whoami,
+            request_3pid_management_token_via_email, unbind_3pid, whoami,
         },
         device::{
             self, Device, delete_device, delete_devices, get_device, get_devices, update_device,
@@ -281,15 +282,160 @@ pub async fn whoami(
     Ok(resp)
 }
 
-/// The e-mail addresses and phone numbers of the account: none. This server keeps no
-/// third-party identifiers (`m.3pid_changes` is off in the capabilities), but clients ask for
-/// the list when they show the account's settings, and the answer to that is an empty list.
+/// The email addresses of the account (no phone numbers: this server sends no SMS).
 pub async fn get_3pids(
-    _services: AppState,
+    services: AppState,
     req: Ruma<get_3pids::v3::Request>,
 ) -> Result<get_3pids::v3::Response> {
+    let sender = req.sender()?;
+    let threepids = services
+        .threepids(&sender.user_id)
+        .await?
+        .into_iter()
+        .map(|t| {
+            let ts = |ms: i64| {
+                MilliSecondsSinceUnixEpoch(
+                    UInt::try_from(u64::try_from(ms).unwrap_or(0)).unwrap_or_default(),
+                )
+            };
+            ruma::thirdparty::ThirdPartyIdentifierInit {
+                address: t.address,
+                medium: t.medium.as_str().into(),
+                validated_at: ts(t.validated_at),
+                added_at: ts(t.added_at),
+            }
+            .into()
+        })
+        .collect();
+    Ok(get_3pids::v3::Response::new(threepids))
+}
+
+/// `POST /account/3pid/email/requestToken`: mail a code for adding an address. This server
+/// verifies addresses itself; `id_server` and `id_access_token` are ignored.
+pub async fn request_3pid_email_token(
+    services: AppState,
+    req: Ruma<request_3pid_management_token_via_email::v3::Request>,
+) -> Result<request_3pid_management_token_via_email::v3::Response> {
+    let b = &req.body;
+    let done = services
+        .request_email_token(
+            b.client_secret.as_str(),
+            &b.email,
+            u64::from(b.send_attempt),
+            b.next_link.as_deref(),
+        )
+        .await?;
+    let sid =
+        ruma::OwnedSessionId::try_from(done.sid).map_err(|e| Error::internal(e.to_string()))?;
+    let mut resp = request_3pid_management_token_via_email::v3::Response::new(sid);
+    resp.submit_url = Some(done.submit_url);
+    Ok(resp)
+}
+
+/// `POST /account/3pid/add`: put a confirmed address on the account (the user's password).
+pub async fn add_3pid(
+    services: AppState,
+    req: Ruma<add_3pid::v3::Request>,
+) -> Result<add_3pid::v3::Response> {
+    let sender = req.sender()?;
+    uia_for_sender(&services, sender, req.body.auth.as_ref()).await?;
+    services
+        .add_threepid(
+            &sender.user_id,
+            req.body.sid.as_str(),
+            req.body.client_secret.as_str(),
+        )
+        .await?;
+    Ok(add_3pid::v3::Response::new())
+}
+
+/// `POST /account/3pid/delete`: take an address off the account. There is no identity server
+/// to unbind it from.
+pub async fn delete_3pid(
+    services: AppState,
+    req: Ruma<delete_3pid::v3::Request>,
+) -> Result<delete_3pid::v3::Response> {
+    let sender = req.sender()?;
+    services
+        .delete_threepid(&sender.user_id, req.body.medium.as_str(), &req.body.address)
+        .await?;
+    Ok(delete_3pid::v3::Response::new(
+        ruma::api::client::account::ThirdPartyIdRemovalStatus::NoSupport,
+    ))
+}
+
+/// `POST /account/3pid/unbind`: there is no identity server, so nothing to unbind.
+pub async fn unbind_3pid(
+    _services: AppState,
+    req: Ruma<unbind_3pid::v3::Request>,
+) -> Result<unbind_3pid::v3::Response> {
     req.sender()?;
-    Ok(get_3pids::v3::Response::new(Vec::new()))
+    Ok(unbind_3pid::v3::Response::new(
+        ruma::api::client::account::ThirdPartyIdRemovalStatus::NoSupport,
+    ))
+}
+
+/// The code from the mail, given back by the client (`submit_url`, POST with `sid`,
+/// `client_secret` and `token`) or by opening the link in the mail (GET with the same as query
+/// parameters, answered with a page, or a redirect to the client's `next_link`).
+pub async fn submit_3pid_email_token(
+    axum::extract::State(services): axum::extract::State<AppState>,
+    method: http::Method,
+    axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let params: std::collections::HashMap<String, String> = if method == http::Method::POST {
+        match serde_json::from_slice::<serde_json::Value>(&body) {
+            Ok(v) => ["sid", "client_secret", "token"]
+                .iter()
+                .filter_map(|k| {
+                    v.get(*k)
+                        .and_then(|x| {
+                            x.as_str()
+                                .map(str::to_owned)
+                                .or_else(|| x.as_u64().map(|n| n.to_string()))
+                        })
+                        .map(|s| ((*k).to_owned(), s))
+                })
+                .collect(),
+            Err(e) => return Error::bad_json(e.to_string()).into_response(),
+        }
+    } else {
+        query
+    };
+    let get = |k: &str| params.get(k).map(String::as_str).unwrap_or_default();
+    let outcome = services
+        .submit_email_token(get("sid"), get("client_secret"), get("token"))
+        .await;
+    if method == http::Method::POST {
+        return match outcome {
+            Ok(_) => axum::Json(serde_json::json!({ "success": true })).into_response(),
+            Err(e) => Error::from(e).into_response(),
+        };
+    }
+    let (status, text) = match &outcome {
+        Ok(Some(next)) if next.starts_with("https://") => {
+            return axum::response::Redirect::to(next).into_response();
+        }
+        Ok(_) => (
+            http::StatusCode::OK,
+            "Your email address is confirmed. You can go back to the app.".to_owned(),
+        ),
+        Err(e) => (http::StatusCode::BAD_REQUEST, e.to_string()),
+    };
+    let page = format!(
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
+         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
+         <title>Email address</title></head><body><p>{}</p></body></html>",
+        html_escape::encode_text(&text)
+    );
+    let mut resp = (status, axum::response::Html(page)).into_response();
+    resp.headers_mut().insert(
+        http::header::REFERRER_POLICY,
+        http::HeaderValue::from_static("no-referrer"),
+    );
+    resp
 }
 
 pub async fn change_password(

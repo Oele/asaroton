@@ -15,6 +15,7 @@ pub mod dehydrated;
 pub mod delayed_events;
 pub mod directory;
 pub mod e2ee;
+pub mod email;
 mod error;
 pub mod federation_hooks;
 pub mod invite_filter;
@@ -34,6 +35,7 @@ pub mod spaces;
 pub mod sync;
 pub mod thirdparty;
 pub mod thread_subscriptions;
+pub mod threepid;
 pub mod txn;
 pub mod typing;
 

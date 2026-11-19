@@ -12,6 +12,7 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
+html-escape.workspace = true
 rand.workspace = true
 asaroton-core.workspace = true
 asaroton-store.workspace = true

@@ -48,6 +48,9 @@ pub struct Config {
     /// Not together with `[mas]`.
     #[serde(default)]
     pub oauth: OauthConfig,
+    /// Mail, for email addresses on accounts (verification codes). Off unless set up.
+    #[serde(default)]
+    pub email: EmailConfig,
     /// Message retention (purging old history).
     #[serde(default)]
     pub retention: RetentionConfig,
@@ -606,6 +609,42 @@ impl Default for OauthConfig {
             enabled: false,
             path: "/_lithostroton".into(),
             device_authorization: true,
+        }
+    }
+}
+
+/// How this server sends mail. With `enabled`, users can add email addresses to their
+/// accounts: a code goes to the address, and the address is added once the code comes back.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct EmailConfig {
+    pub enabled: bool,
+    /// The sender: `"Name <address>"` or a bare address. Required when enabled.
+    pub from: String,
+    /// `smtp`, or `directory` (each mail as an `.eml` file in `directory`, for labs).
+    pub transport: String,
+    pub smtp_host: String,
+    pub smtp_port: u16,
+    /// `none` (a mail server on this machine), `starttls` or `tls`.
+    pub smtp_tls: String,
+    pub smtp_username: Option<String>,
+    /// File holding the SMTP password.
+    pub smtp_password_file: Option<PathBuf>,
+    pub directory: Option<PathBuf>,
+}
+
+impl Default for EmailConfig {
+    fn default() -> Self {
+        EmailConfig {
+            enabled: false,
+            from: String::new(),
+            transport: "smtp".into(),
+            smtp_host: "localhost".into(),
+            smtp_port: 25,
+            smtp_tls: "none".into(),
+            smtp_username: None,
+            smtp_password_file: None,
+            directory: None,
         }
     }
 }

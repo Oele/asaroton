@@ -74,6 +74,8 @@ fn classify(method: &Method, path: &str) -> Option<Class> {
     match *method {
         Method::POST if rest == "login" => Some(Class::Login),
         Method::POST if rest == "register" => Some(Class::Register),
+        // A verification mail goes out per request: as scarce as registrations.
+        Method::POST if rest.ends_with("/requestToken") => Some(Class::Register),
         Method::PUT
             if rest.starts_with("rooms/")
                 && (rest.contains("/send/") || rest.contains("/state/")) =>
