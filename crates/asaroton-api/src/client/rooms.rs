@@ -1171,21 +1171,15 @@ pub async fn local_directory_page(
     let (chunk, total) = if let Some(term) = term {
         // A search has to look at every public room before it cuts a page; it looks only at
         // the text it matches on, and builds full entries for the rooms on the page.
-        let matching: Vec<_> = services
-            .store
-            .public_rooms_text()
-            .await?
-            .into_iter()
-            .filter(|t| directory_text_matches(t, &term))
-            .collect();
+        let matching = services.public_rooms_matching(&term).await?;
         let total = matching.len();
         let mut page = Vec::new();
-        for text in matching
+        for room_id in matching
             .into_iter()
             .skip(usize::try_from(offset).unwrap_or(usize::MAX))
             .take(usize::try_from(limit).unwrap_or(0))
         {
-            page.push(directory_entry(services, &text.room_id).await?);
+            page.push(directory_entry(services, &room_id).await?);
         }
         (page, total)
     } else {
@@ -1199,12 +1193,6 @@ pub async fn local_directory_page(
         prev_batch: (offset > 0).then(|| (offset - limit).max(0).to_string()),
         total_room_count_estimate: Some(UInt::try_from(total).unwrap_or(UInt::MAX)),
     })
-}
-
-/// Whether a public room's name, topic or canonical alias contains `term` (lower case).
-fn directory_text_matches(t: &asaroton_store::PublicRoomText, term: &str) -> bool {
-    let has = |s: Option<&str>| s.is_some_and(|s| s.to_lowercase().contains(term));
-    has(t.name.as_deref()) || has(t.topic.as_deref()) || has(t.alias.as_deref())
 }
 
 pub async fn public_rooms_chunk(

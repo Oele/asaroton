@@ -57,6 +57,17 @@ def run(hs, peers):
           f"a search for 'GARDEN' pages through both matches (name and topic, any case), one per page ({st}, {st2}, {len(found)})")
     check(p1.get("total_room_count_estimate") == 2, f"and counts the matches ({p1.get('total_room_count_estimate')})")
 
+    # Terms the database cannot narrow down for us (non-ASCII, quotes) and ones it must take
+    # literally (% and _) find exactly the rooms whose text contains them.
+    cafe = create({"preset": "public_chat", "visibility": "public", "name": "Café Crème"})
+    quoted = create({"preset": "public_chat", "visibility": "public", "name": 'The "Kiln" corner'})
+    percent = create({"preset": "public_chat", "visibility": "public", "name": "Glaze 100% matte", "topic": "pot_luck"})
+    for term, want in (("CRÈME", {cafe}), ('"kiln"', {quoted}), ("100%", {percent}), ("t_l", {percent}),
+                       ("%", {percent}), ("m.room", set()), ("garden", {garden, kitchen})):
+        st, r = hs.req("POST", "/_matrix/client/v3/publicRooms", {"limit": 50, "filter": {"generic_search_term": term}}, token)
+        check(st == 200 and ids(r) == want, f"a search for {term!r} finds exactly its {len(want)} room(s) ({st}, {len(ids(r))})")
+    ours |= {cafe, quoted, percent}
+
     # Another server asks us over federation: GET lists, POST searches; unsigned is refused.
     st, r = mock.fed(hs.fed, "GET", "/_matrix/federation/v1/publicRooms?limit=10")
     check(st == 200 and ids(r) == ours, f"a signed federation GET lists our directory ({st}, {len(ids(r))})")
@@ -116,19 +127,41 @@ def run(hs, peers):
           " SELECT '!bulk' || g || ':' || 'sender.test', '11', NULL, true, false,"
           " (extract(epoch FROM now()) * 1000)::bigint + g FROM generate_series(1, 3000) g")
     st, r = hs.req("GET", "/_matrix/client/v3/publicRooms?limit=5", None, token)
-    check(st == 200 and r.get("total_room_count_estimate") == 3003, f"with 3000 more public rooms the directory counts 3003 ({st}, {r.get('total_room_count_estimate')})")
+    check(st == 200 and r.get("total_room_count_estimate") == 3006, f"with 3000 more public rooms the directory counts 3006 ({st}, {r.get('total_room_count_estimate')})")
     took = []
     for _ in range(3):
         t0 = time.monotonic()
         st, r = hs.req("POST", "/_matrix/client/v3/publicRooms", {"limit": 20, "filter": {"generic_search_term": "garden"}}, token)
         took.append(time.monotonic() - t0)
         check(st == 200 and ids(r) == {garden, kitchen} and r.get("total_room_count_estimate") == 2,
-              f"a search among 3003 public rooms still finds the two gardens ({st}, {len(ids(r))})")
+              f"a search among 3006 public rooms still finds the two gardens ({st}, {len(ids(r))})")
     check(max(took) < 1.0, f"each within a second ({', '.join(f'{x:.2f}s' for x in took)})")
     t0 = time.monotonic()
     st, r = mock.fed(hs.fed, "POST", "/_matrix/federation/v1/publicRooms", {"limit": 20, "filter": {"generic_search_term": "workshop"}})
     took = time.monotonic() - t0
     check(st == 200 and ids(r) == {workshop} and took < 1.0, f"and so does a search from another server ({st}, {len(ids(r))}, {took:.2f}s)")
+
+    # The search keeps up with changes between searches: a new name, a redacted topic, a room
+    # leaving the directory, a new public room.
+    def search(term):
+        st, r = hs.req("POST", "/_matrix/client/v3/publicRooms", {"limit": 50, "filter": {"generic_search_term": term}}, token)
+        assert st == 200, r
+        return ids(r)
+
+    check(search("garden") == {garden, kitchen}, "before the changes: the two gardens")
+    st, r = hs.req("PUT", f"/_matrix/client/v3/rooms/{q(workshop)}/state/m.room.name", {"name": "Garden tools"}, token)
+    assert st == 200, r
+    check(search("garden") == {garden, kitchen, workshop}, f"a renamed room is found under its new name ({len(search('garden'))})")
+    st, state = hs.req("GET", f"/_matrix/client/v3/rooms/{q(kitchen)}/state", None, token)
+    topic_id = next(e["event_id"] for e in state if e["type"] == "m.room.topic")
+    st, r = hs.req("PUT", f"/_matrix/client/v3/rooms/{q(kitchen)}/redact/{q(topic_id)}/redact-topic", {}, token)
+    assert st == 200, r
+    check(search("garden") == {garden, workshop}, "a room whose matching topic was redacted is no longer found")
+    st, r = hs.req("PUT", f"/_matrix/client/v3/directory/list/room/{q(garden)}", {"visibility": "private"}, token)
+    assert st == 200, r
+    check(search("garden") == {workshop}, "a room taken out of the directory is no longer found")
+    shed = create({"preset": "public_chat", "visibility": "public", "name": "Garden shed"})
+    check(search("garden") == {workshop, shed}, "a new public room is found at once")
 
 
 if __name__ == "__main__":

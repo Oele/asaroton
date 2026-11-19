@@ -130,7 +130,10 @@ impl RoomStore for PostgresStore {
         rows.into_iter().map(RoomInfo::try_from).collect()
     }
 
-    async fn public_rooms_text(&self) -> Result<Vec<PublicRoomText>> {
+    async fn public_rooms_text(
+        &self,
+        rooms: Option<&[OwnedRoomId]>,
+    ) -> Result<Vec<PublicRoomText>> {
         // The event JSON is parsed here rather than with a jsonb cast, which a NUL character
         // in any of these events would turn into an error for the whole search.
         let rows = sqlx::query(
@@ -140,9 +143,14 @@ impl RoomStore for PostgresStore {
                  ON c.room_id = r.room_id AND c.state_key = ''
                 AND c.event_type IN ('m.room.name', 'm.room.topic', 'm.room.canonical_alias')
                LEFT JOIN events e ON e.event_id = c.event_id
-              WHERE r.is_public
+              WHERE r.is_public AND ($1::text[] IS NULL OR r.room_id = ANY($1))
               ORDER BY r.created_ts, r.room_id",
         )
+        .bind(rooms.map(|r| {
+            r.iter()
+                .map(|id| id.as_str().to_owned())
+                .collect::<Vec<_>>()
+        }))
         .fetch_all(&self.pool)
         .await?;
         let mut out: Vec<PublicRoomText> = Vec::new();
@@ -180,6 +188,22 @@ impl RoomStore for PostgresStore {
             }
         }
         Ok(out)
+    }
+
+    async fn rooms_with_state_changes(&self, since: i64, upto: i64) -> Result<Vec<OwnedRoomId>> {
+        let rows = sqlx::query(
+            "SELECT DISTINCT room_id FROM events
+              WHERE stream_ordering > $1 AND stream_ordering <= $2
+                AND (state_key IS NOT NULL OR event_type = 'm.room.redaction')",
+        )
+        .bind(since)
+        .bind(upto)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|r| OwnedRoomId::try_from(r.get::<String, _>(0)).ok())
+            .collect())
     }
 
     async fn list_rooms(

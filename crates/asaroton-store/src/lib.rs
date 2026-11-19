@@ -126,10 +126,14 @@ pub trait RoomStore: Send + Sync {
     async fn room_exists(&self, room_id: &RoomId) -> Result<bool>;
     async fn set_room_public(&self, room_id: &RoomId, public: bool) -> Result<()>;
     async fn list_public_rooms(&self, limit: i64, offset: i64) -> Result<Vec<RoomInfo>>;
-    /// Name, topic and canonical alias of every public room, in the order of
-    /// [`list_public_rooms`](Self::list_public_rooms): one query for a directory search, so that
-    /// full entries are built only for the rooms on the page.
-    async fn public_rooms_text(&self) -> Result<Vec<PublicRoomText>>;
+    /// Name, topic and canonical alias of the public rooms (all of them, or those in `rooms`),
+    /// in the order of [`list_public_rooms`](Self::list_public_rooms): what a directory search
+    /// matches on.
+    async fn public_rooms_text(&self, rooms: Option<&[OwnedRoomId]>)
+    -> Result<Vec<PublicRoomText>>;
+    /// Rooms with a state event or a redaction at a stream position after `since` and up to
+    /// `upto`: those whose name, topic or canonical alias may have changed.
+    async fn rooms_with_state_changes(&self, since: i64, upto: i64) -> Result<Vec<OwnedRoomId>>;
     /// A page of all rooms (admin listing, optionally filtered by ID/alias/name substring
     /// via `search`), newest first, and the total count.
     async fn list_rooms(

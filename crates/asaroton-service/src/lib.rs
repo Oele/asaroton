@@ -13,6 +13,7 @@ pub mod closing;
 pub mod config;
 pub mod dehydrated;
 pub mod delayed_events;
+pub mod directory;
 pub mod e2ee;
 mod error;
 pub mod federation_hooks;
@@ -112,6 +113,8 @@ pub struct Services {
     pub(crate) rooms_in_the_making: rooms::making::RoomsInTheMaking,
     /// Transaction IDs that requests are answering right now (see [`txn`]).
     pub(crate) txn_turns: txn::Turns,
+    /// What a room directory search matches on, kept up to date (see [`directory`]).
+    pub(crate) directory_text: directory::DirectoryText,
 }
 
 impl std::fmt::Debug for Services {
@@ -178,6 +181,7 @@ impl Services {
             room_locks: dashmap::DashMap::new(),
             rooms_in_the_making: rooms::making::RoomsInTheMaking::default(),
             txn_turns: txn::Turns::default(),
+            directory_text: directory::DirectoryText::default(),
         }))
     }
 
