@@ -115,6 +115,20 @@ proxy; asaroton answers them with an error when delegation is on. Clients discov
 - `scripts/loadtest.py` is a synthetic client swarm for capacity checks and
   `scripts/fuzz.sh` runs the fuzz targets under `fuzz/` (needs the nightly toolchain).
 
+## Sign-in through OAuth 2.0
+
+With `[oauth] enabled = true` asaroton serves the spec's OAuth 2.0 API itself: the
+authorization server [lithostroton](https://github.com/Oele/lithostroton) runs in the process,
+on the client listener under `oauth.path` (default `/_lithostroton`). Clients find it through
+`/_matrix/client/v1/auth_metadata`; its issuer is `public_base_url` + `oauth.path`. It has
+login and consent pages, client registration, the authorization code flow with PKCE, refresh
+and revocation, and (with `oauth.device_authorization`, on by default) the device
+authorization grant that signing in with a QR code builds on. The tokens it hands out are
+asaroton's own; password login keeps working beside it. Its state (registered clients,
+sign-ins in progress) is in the `lithostroton_store` table. Behind a reverse proxy, route
+`oauth.path` to the client listener as well, and set `rate_limiting.trust_x_forwarded_for` so
+that its rate limits see the client's address. It cannot be combined with `[mas]`.
+
 ## Behind a reverse proxy on port 443
 
 Set `public_base_url = "https://matrix.example.org"` so `.well-known/matrix/client` and login

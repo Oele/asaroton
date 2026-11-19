@@ -6,6 +6,7 @@
 mod config;
 mod import_synapse;
 mod livekit_config;
+mod oauth;
 mod server;
 mod sfu;
 

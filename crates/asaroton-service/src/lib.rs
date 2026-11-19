@@ -79,6 +79,9 @@ pub struct Services {
     pub appservices: appservice::AppserviceRegistry,
     /// The authentication service, when authentication is delegated to it.
     pub mas: Option<Arc<asaroton_auth::mas::MasClient>>,
+    /// The OAuth 2.0 server metadata of the embedded authorization server (`[oauth]`), served
+    /// at `/_matrix/client/v1/auth_metadata`; set once at startup when it runs.
+    pub oauth_metadata: std::sync::OnceLock<serde_json::Value>,
     /// Users the authentication service allowed to replace their cross-signing keys without
     /// further interactive auth, and when.
     pub cross_signing_reset_allowed: dashmap::DashMap<ruma::OwnedUserId, std::time::Instant>,
@@ -155,6 +158,7 @@ impl Services {
         Ok(Arc::new(Self {
             auth,
             mas,
+            oauth_metadata: std::sync::OnceLock::new(),
             cross_signing_reset_allowed: dashmap::DashMap::new(),
             unread_cache: dashmap::DashMap::new(),
             appservices,

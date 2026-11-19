@@ -35,6 +35,10 @@ thiserror.workspace = true
 rustls.workspace = true
 musivum.workspace = true
 musivum-server.workspace = true
+lithostroton.workspace = true
+rand.workspace = true
+url.workspace = true
+http.workspace = true
 async-trait.workspace = true
 
 [[bin]]

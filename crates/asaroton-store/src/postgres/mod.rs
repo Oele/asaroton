@@ -8,6 +8,7 @@ mod events;
 mod federation;
 mod keys;
 mod media;
+mod oauth;
 mod rooms;
 mod rtc;
 mod state;
@@ -363,6 +364,10 @@ mod tests {
             (
                 16,
                 "2afb04f35fb106dca6bbb9dcc10bd5f4885551caf8194ee567eca5b57a763d1724595db5e021db057c538a3a7a5e28f0",
+            ),
+            (
+                17,
+                "bd85bccf4f34c8105234d9f7751d63f87d9ab6df8b3c868058ffcf4aca291ef3699bbbe0bfd72091f38cd2ea07f428ac",
             ),
         ];
         let actual: Vec<(i64, String)> = MIGRATOR

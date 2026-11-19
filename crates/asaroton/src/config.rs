@@ -43,6 +43,11 @@ pub struct Config {
     /// Delegate authentication to Matrix Authentication Service (MSC3861).
     #[serde(default)]
     pub mas: MasConfig,
+    /// Sign-in through OAuth 2.0 (the spec's OAuth 2.0 API), served from this process by the
+    /// embedded authorization server lithostroton. Password login keeps working beside it.
+    /// Not together with `[mas]`.
+    #[serde(default)]
+    pub oauth: OauthConfig,
     /// Message retention (purging old history).
     #[serde(default)]
     pub retention: RetentionConfig,
@@ -580,6 +585,29 @@ fn default_notices_localpart() -> String {
 
 fn default_notices_name() -> String {
     "Server Notices".to_owned()
+}
+
+/// Sign-in through OAuth 2.0, served by the embedded authorization server (lithostroton) on the
+/// client listener under `path`. The issuer clients see is `public_base_url` + `path`; behind a
+/// reverse proxy, that path has to reach this server.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct OauthConfig {
+    pub enabled: bool,
+    /// Where the authorization server's pages and endpoints live, below the public URL.
+    pub path: String,
+    /// The device authorization grant (RFC 8628), which signing in with a QR code uses.
+    pub device_authorization: bool,
+}
+
+impl Default for OauthConfig {
+    fn default() -> Self {
+        OauthConfig {
+            enabled: false,
+            path: "/_lithostroton".into(),
+            device_authorization: true,
+        }
+    }
 }
 
 /// Matrix Authentication Service integration. When enabled, logins, registration and

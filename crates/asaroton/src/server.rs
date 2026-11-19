@@ -356,6 +356,18 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         federation,
         sfu_router,
     }));
+    // Sign-in through OAuth 2.0 (`[oauth]`): the authorization server in this process, on the
+    // client listener under `oauth.path`. Nested after the API's layers, so that it keeps its
+    // own CORS headers and rate limits (its login pages get no CORS at all).
+    let oauth = crate::oauth::start(&services, &config).await?;
+    let app = match &oauth {
+        Some(embedded) => {
+            let path = crate::oauth::oauth_path(&config)?;
+            tracing::info!(path, "OAuth 2.0 sign-in served here");
+            app.nest(path, embedded.router())
+        }
+        None => app,
+    };
 
     let mut tasks = tokio::task::JoinSet::new();
     let handle = axum_server::Handle::new();
@@ -386,6 +398,9 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         }
     }
     stop(&services, &handle, tasks, STOP_WITHIN, sfu.as_deref()).await;
+    if let Some(embedded) = oauth {
+        embedded.shutdown().await;
+    }
     Ok(())
 }
 

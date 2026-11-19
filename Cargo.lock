@@ -168,8 +168,11 @@ dependencies = [
  "axum",
  "axum-server",
  "clap",
+ "http",
+ "lithostroton",
  "musivum",
  "musivum-server",
+ "rand 0.9.5",
  "ruma",
  "rustls",
  "serde",
@@ -181,6 +184,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "url",
 ]
 
 [[package]]
@@ -2241,6 +2245,29 @@ name = "litemap"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
+
+[[package]]
+name = "lithostroton"
+version = "0.1.0"
+source = "git+file:///home/agents/src/lithostroton?rev=7c76f2048643c18f73e1ac26d66a5b51ca6b9173#7c76f2048643c18f73e1ac26d66a5b51ca6b9173"
+dependencies = [
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "form_urlencoded",
+ "getrandom 0.3.4",
+ "hmac 0.12.1",
+ "http",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "subtle",
+ "thiserror 2.0.21",
+ "tokio",
+ "tower",
+ "tracing",
+ "url",
+]
 
 [[package]]
 name = "lock_api"

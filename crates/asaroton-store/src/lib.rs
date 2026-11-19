@@ -931,6 +931,57 @@ pub trait MediaStore: Send + Sync {
     ) -> Result<Vec<ThumbnailInfo>>;
 }
 
+/// Sign-in through OAuth 2.0: which client a device's tokens were granted to, and the
+/// embedded authorization server's key-value state (`lithostroton_store`). Expiry is in
+/// seconds since the epoch; an entry past it counts as absent everywhere.
+#[async_trait]
+pub trait OauthStore: Send + Sync {
+    /// Remember the OAuth client and scope a device's tokens were granted to (`None` for a
+    /// password login).
+    async fn set_device_oauth(
+        &self,
+        user_id: &UserId,
+        device_id: &DeviceId,
+        client_id: Option<&str>,
+        scope: Option<&str>,
+    ) -> Result<()>;
+    /// The OAuth client and scope of a device: `None` if there is no such device.
+    async fn device_oauth(
+        &self,
+        user_id: &UserId,
+        device_id: &DeviceId,
+    ) -> Result<Option<(Option<String>, Option<String>)>>;
+    /// Delete a device's refresh tokens (its access tokens go with
+    /// `delete_access_tokens_for_device`).
+    async fn delete_refresh_tokens_for_device(
+        &self,
+        user_id: &UserId,
+        device_id: &DeviceId,
+    ) -> Result<()>;
+    /// Add an entry unless a live one exists; whether it was added.
+    async fn oauth_kv_insert(
+        &self,
+        kind: &str,
+        key: &str,
+        value: &[u8],
+        expires_at: Option<f64>,
+    ) -> Result<bool>;
+    async fn oauth_kv_get(&self, kind: &str, key: &str) -> Result<Option<Vec<u8>>>;
+    /// Replace a live entry's value and expiry if its value is `expected`; whether it was.
+    async fn oauth_kv_replace(
+        &self,
+        kind: &str,
+        key: &str,
+        expected: &[u8],
+        value: &[u8],
+        expires_at: Option<f64>,
+    ) -> Result<bool>;
+    /// Remove an entry, returning its value if it was live.
+    async fn oauth_kv_take(&self, kind: &str, key: &str) -> Result<Option<Vec<u8>>>;
+    async fn oauth_kv_delete(&self, kind: &str, key: &str) -> Result<()>;
+    async fn oauth_kv_purge_expired(&self) -> Result<()>;
+}
+
 /// The full store.
 pub trait Store:
     UserStore
@@ -946,6 +997,7 @@ pub trait Store:
     + KeyBackupStore
     + FederationStore
     + MediaStore
+    + OauthStore
 {
     /// Run pending migrations.
     fn migrate(&self) -> futures::future::BoxFuture<'_, Result<()>>;

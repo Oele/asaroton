@@ -408,11 +408,17 @@ pub async fn sync_devices(
     )
 }
 
-/// `GET /_matrix/client/v1/auth_metadata`: the service's OAuth 2.0 server metadata.
+/// `GET /_matrix/client/v1/auth_metadata`: the OAuth 2.0 server metadata of the embedded
+/// authorization server (`[oauth]`) or of Matrix Authentication Service (`[mas]`).
 pub async fn auth_metadata(State(services): State<AppState>) -> axum::response::Response {
     let Some(mas) = services.mas.clone() else {
-        return Error::not_found("OIDC discovery has not been configured on this homeserver")
-            .into_response();
+        let Some(metadata) = services.oauth_metadata.get() else {
+            return Error::not_found("OIDC discovery has not been configured on this homeserver")
+                .into_response();
+        };
+        let mut resp = Json(metadata.clone()).into_response();
+        crate::extract::add_cors(resp.headers_mut());
+        return resp;
     };
     match mas.metadata().await {
         Ok(v) => {
@@ -433,8 +439,13 @@ pub async fn auth_metadata(State(services): State<AppState>) -> axum::response::
 /// `GET /_matrix/client/unstable/org.matrix.msc2965/auth_issuer` (legacy discovery).
 pub async fn auth_issuer(State(services): State<AppState>) -> axum::response::Response {
     let Some(mas) = services.mas.clone() else {
-        return Error::not_found("OIDC discovery has not been configured on this homeserver")
-            .into_response();
+        let Some(metadata) = services.oauth_metadata.get() else {
+            return Error::not_found("OIDC discovery has not been configured on this homeserver")
+                .into_response();
+        };
+        let mut resp = Json(json!({ "issuer": metadata.get("issuer").cloned() })).into_response();
+        crate::extract::add_cors(resp.headers_mut());
+        return resp;
     };
     match mas.metadata().await {
         Ok(v) => {
