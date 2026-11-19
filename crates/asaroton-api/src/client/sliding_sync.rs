@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use asaroton_service::sliding_sync::{
-    ExtensionScope, ExtensionsRequest, ListFilters, ListRequest, RoomResult,
+    ExtensionScope, ExtensionsRequest, ListFilters, ListRequest, ProfilesRequest, RoomResult,
     RoomSubscriptionRequest, ScopeRoom, SlidingSyncRequest, ToDeviceRequest,
 };
 use axum::{Json, response::IntoResponse};
@@ -30,6 +30,43 @@ fn required_state(v: &[(ruma::events::StateEventType, String)]) -> Vec<(String, 
 
 fn limit(v: ruma::UInt) -> usize {
     usize::try_from(u64::from(v)).unwrap_or(usize::MAX)
+}
+
+/// The profiles extension (MSC4262) under its unstable name, read from the raw body: the ruma
+/// request type predates it. `lists` and `rooms` scope it like the other extensions (`*` for
+/// the subscribed rooms); `fields` names the profile fields, all of them when absent.
+fn profiles_request(raw: Option<&Value>) -> Option<ProfilesRequest> {
+    let p = raw?.get("extensions")?.get("org.matrix.msc4262.profiles")?;
+    if p.get("enabled").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    let strings = |key: &str| {
+        p.get(key).and_then(Value::as_array).map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+    };
+    let rooms = strings("rooms").map(|rooms| {
+        rooms
+            .into_iter()
+            .filter_map(|r| {
+                if r == "*" {
+                    Some(ScopeRoom::AllSubscribed)
+                } else {
+                    ruma::OwnedRoomId::try_from(r).ok().map(ScopeRoom::Room)
+                }
+            })
+            .collect()
+    });
+    Some(ProfilesRequest {
+        scope: ExtensionScope {
+            lists: strings("lists"),
+            rooms,
+        },
+        fields: strings("fields"),
+    })
 }
 
 fn scope(
@@ -181,6 +218,7 @@ pub async fn sliding_sync(
             .then(|| scope(x.typing.lists.as_ref(), x.typing.rooms.as_ref())),
         thread_subscriptions: (x.thread_subscriptions.enabled == Some(true))
             .then(|| x.thread_subscriptions.limit.map_or(100, limit)),
+        profiles: profiles_request(req.json.as_ref()),
     };
     let result = services
         .sliding_sync(SlidingSyncRequest {
@@ -255,6 +293,23 @@ pub async fn sliding_sync(
         extensions.insert(
             "io.element.msc4308.thread_subscriptions".into(),
             super::thread_subscriptions::changes_json(t),
+        );
+    }
+    if !ext.profiles.is_empty() {
+        let users: Map<String, Value> = ext
+            .profiles
+            .iter()
+            .map(|(who, delta)| {
+                let entry = delta.as_ref().map_or(
+                    Value::Null,
+                    |d| json!({ "updated": d.updated, "removed": d.removed }),
+                );
+                (who.to_string(), entry)
+            })
+            .collect();
+        extensions.insert(
+            "org.matrix.msc4262.profiles".into(),
+            json!({ "users": users }),
         );
     }
     let mut body = json!({

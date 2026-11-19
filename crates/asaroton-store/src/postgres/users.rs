@@ -277,11 +277,12 @@ impl UserStore for PostgresStore {
         &self,
         since: i64,
         until: i64,
-        fields: &[String],
+        fields: Option<&[String]>,
     ) -> Result<Vec<(OwnedUserId, String)>> {
         let rows = sqlx::query(
             "SELECT user_id, field_id FROM profile_updates
-             WHERE stream_id > $1 AND stream_id <= $2 AND field_id = ANY($3)
+             WHERE stream_id > $1 AND stream_id <= $2
+               AND ($3::text[] IS NULL OR field_id = ANY($3))
              ORDER BY stream_id",
         )
         .bind(since)

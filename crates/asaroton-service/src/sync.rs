@@ -706,7 +706,7 @@ impl Services {
             Some(s) => {
                 let changed = self
                     .store
-                    .profile_updates_between(s.profile, now.profile, fields)
+                    .profile_updates_between(s.profile, now.profile, Some(fields))
                     .await?;
                 let mut profiles: HashMap<OwnedUserId, Option<asaroton_store::User>> =
                     HashMap::new();

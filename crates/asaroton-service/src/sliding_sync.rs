@@ -101,6 +101,23 @@ pub struct ExtensionsRequest {
     pub typing: Option<ExtensionScope>,
     /// Thread subscriptions (MSC4308), with the page limit.
     pub thread_subscriptions: Option<usize>,
+    /// Profile field updates of the people one shares a room with (MSC4262).
+    pub profiles: Option<ProfilesRequest>,
+}
+
+/// The profiles extension (MSC4262): the members of which rooms, and which profile fields
+/// (`None`: all of them).
+#[derive(Clone, Debug, Default)]
+pub struct ProfilesRequest {
+    pub scope: ExtensionScope,
+    pub fields: Option<Vec<String>>,
+}
+
+/// What changed in one user's profile: fields with their new values, and fields cleared.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ProfileDelta {
+    pub updated: BTreeMap<String, Value>,
+    pub removed: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -175,6 +192,8 @@ pub struct ExtensionsResult {
     pub receipts: BTreeMap<OwnedRoomId, Value>,
     pub typing: BTreeMap<OwnedRoomId, Vec<OwnedUserId>>,
     pub thread_subscriptions: Option<crate::thread_subscriptions::ThreadSubscriptionChanges>,
+    /// Per user: what changed, or `None` when they no longer share a room in scope (MSC4262).
+    pub profiles: BTreeMap<OwnedUserId, Option<ProfileDelta>>,
 }
 
 impl ExtensionsResult {
@@ -194,6 +213,7 @@ impl ExtensionsResult {
                 .thread_subscriptions
                 .as_ref()
                 .is_none_or(crate::thread_subscriptions::ThreadSubscriptionChanges::is_empty)
+            && self.profiles.is_empty()
     }
 }
 
@@ -333,6 +353,9 @@ struct ConnState {
     token: SyncToken,
     rooms: HashMap<OwnedRoomId, RoomTrack>,
     list_counts: BTreeMap<String, u64>,
+    /// The users whose profiles the profiles extension has handed out (MSC4262); `None` while
+    /// the extension is off on this connection.
+    profile_users: Option<BTreeSet<OwnedUserId>>,
 }
 
 /// The last state the client acknowledged, and the one produced by the latest response (which
@@ -621,8 +644,12 @@ impl Services {
                     | Notification::RoomEphemeral { room_id } => rooms.contains(room_id),
                     Notification::User { user_id: u } => *u == user_id,
                     Notification::DeviceLists { .. } | Notification::Presence { .. } => true,
-                    // Profile updates are a feature of classic sync (MSC4429).
-                    Notification::Profile { .. } => false,
+                    // A profile change matters to a connection that hands out that user's
+                    // profile (MSC4262).
+                    Notification::Profile { user_id: u } => base
+                        .as_ref()
+                        .and_then(|b| b.profile_users.as_ref())
+                        .is_some_and(|users| users.contains(u)),
                 });
                 // A server that stops answers with what it has: nothing.
                 let woke = tokio::select! {
@@ -1071,6 +1098,15 @@ impl Services {
             }
         }
 
+        let mut profile_users = None;
+        if let Some(p) = &req.extensions.profiles {
+            let (delta, users) = self
+                .profile_extension(user, p, &selections, base, now)
+                .await?;
+            ext.profiles = delta;
+            profile_users = Some(users);
+        }
+
         let quiet = base.is_some_and(|b| b.list_counts == list_counts)
             && rooms.is_empty()
             && ext.is_quiet();
@@ -1087,8 +1123,128 @@ impl Services {
             token: now,
             rooms: tracks,
             list_counts,
+            profile_users,
         };
         Ok((result, state))
+    }
+
+    /// The profiles extension (MSC4262). Who: the local members of the joined rooms in scope
+    /// (with no scope, everyone who shares a room with `user`, and `user`). A user the
+    /// connection has not had yet gets every requested field that is set; one it has gets the
+    /// fields that changed since its last position, with the new value or as removed; one that
+    /// left the scope gets `None`. Returns the answer and the users the connection now has.
+    /// Profiles of users on other servers are not known here, as in classic sync (MSC4429).
+    async fn profile_extension(
+        &self,
+        user: &UserId,
+        p: &ProfilesRequest,
+        selections: &BTreeMap<OwnedRoomId, RoomSelection>,
+        base: Option<&ConnState>,
+        now: SyncToken,
+    ) -> Result<(
+        BTreeMap<OwnedUserId, Option<ProfileDelta>>,
+        BTreeSet<OwnedUserId>,
+    )> {
+        let mut users: BTreeSet<OwnedUserId> = BTreeSet::new();
+        if p.scope.lists.is_none() && p.scope.rooms.is_none() {
+            users.extend(self.store.users_sharing_rooms_with(user).await?);
+            users.insert(user.to_owned());
+        } else {
+            for (room_id, sel) in selections {
+                if sel.membership.membership != MembershipState::Join || !p.scope.applies(sel) {
+                    continue;
+                }
+                users.extend(
+                    self.store
+                        .members(room_id, Some("join"))
+                        .await?
+                        .into_iter()
+                        .map(|m| m.user_id),
+                );
+            }
+        }
+        users.retain(|u| self.is_local(u));
+
+        let wanted = |field: &str| {
+            p.fields
+                .as_ref()
+                .is_none_or(|f| f.iter().any(|x| x == field))
+        };
+        let value_of = |profile: &asaroton_store::User, field: &str| -> Option<Value> {
+            match field {
+                "displayname" => profile.display_name.clone().map(Value::String),
+                "avatar_url" => profile.avatar_url.clone().map(Value::String),
+                other => profile.profile_fields.get(other).cloned(),
+            }
+        };
+        let previous = base.and_then(|b| b.profile_users.as_ref());
+        let mut out: BTreeMap<OwnedUserId, Option<ProfileDelta>> = BTreeMap::new();
+
+        for who in &users {
+            if previous.is_some_and(|prev| prev.contains(who)) {
+                continue;
+            }
+            let Some(profile) = self.store.get_user(who).await? else {
+                continue;
+            };
+            let mut updated = BTreeMap::new();
+            for field in ["displayname", "avatar_url"]
+                .into_iter()
+                .chain(profile.profile_fields.keys().map(String::as_str))
+            {
+                if wanted(field)
+                    && let Some(v) = value_of(&profile, field)
+                {
+                    updated.insert(field.to_owned(), v);
+                }
+            }
+            if !updated.is_empty() {
+                out.insert(
+                    who.clone(),
+                    Some(ProfileDelta {
+                        updated,
+                        removed: Vec::new(),
+                    }),
+                );
+            }
+        }
+
+        if let (Some(prev), Some(b)) = (previous, base) {
+            let changed = self
+                .store
+                .profile_updates_between(b.token.profile, now.profile, p.fields.as_deref())
+                .await?;
+            let mut profiles: HashMap<OwnedUserId, Option<asaroton_store::User>> = HashMap::new();
+            for (who, field) in changed {
+                if !users.contains(&who) || !prev.contains(&who) {
+                    continue;
+                }
+                if !profiles.contains_key(&who) {
+                    profiles.insert(who.clone(), self.store.get_user(&who).await?);
+                }
+                let value = profiles
+                    .get(&who)
+                    .and_then(Option::as_ref)
+                    .and_then(|profile| value_of(profile, &field));
+                if let Some(delta) = out
+                    .entry(who)
+                    .or_insert_with(|| Some(ProfileDelta::default()))
+                {
+                    delta.removed.retain(|f| *f != field);
+                    delta.updated.remove(&field);
+                    match value {
+                        Some(v) => {
+                            delta.updated.insert(field, v);
+                        }
+                        None => delta.removed.push(field),
+                    }
+                }
+            }
+            for gone in prev.difference(&users) {
+                out.insert(gone.clone(), None);
+            }
+        }
+        Ok((out, users))
     }
 
     /// One room's entry: timeline and state since what the connection already has (or the
@@ -1707,6 +1863,7 @@ mod tests {
             token: SyncToken::default(),
             rooms: HashMap::new(),
             list_counts: BTreeMap::new(),
+            profile_users: None,
         };
         let conns = SlidingSyncConnections::default();
         let key = ConnKey {
