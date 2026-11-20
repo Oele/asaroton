@@ -33,6 +33,12 @@ impl Federation {
             tracing::debug!(asked = %parsed, ended = %resp.url(), "URL preview ended at a gate");
             return Ok(json!({}));
         }
+        if !resp.status().is_success() {
+            // A refusal or an error page (a site firewall's "406 WAF Forbidden", a 404) is not
+            // the page the user linked: its title would pass for the article's. No preview.
+            tracing::debug!(url = %parsed, status = %resp.status(), "URL preview: the site did not give the page");
+            return Ok(json!({}));
+        }
         let content_type = resp
             .headers()
             .get(http::header::CONTENT_TYPE)
@@ -83,6 +89,7 @@ impl Federation {
             && let Ok(img_url) = parsed.join(&img)
             && let Ok(img_url) = self.outbound.parse(img_url.as_str())
             && let Ok(resp) = get(img_url).send().await
+            && resp.status().is_success()
         {
             let ct = resp
                 .headers()
@@ -97,6 +104,15 @@ impl Federation {
             if let Ok(bytes) = read_limited(resp, MAX_IMAGE_BYTES).await {
                 self.attach_image(&mut og, bytes, &ct).await;
             }
+        }
+        // An image that could not be fetched and stored keeps the page's own address, which a
+        // client cannot load from here: the preview goes without it.
+        if og
+            .get("og:image")
+            .and_then(Value::as_str)
+            .is_some_and(|img| !img.starts_with("mxc://"))
+        {
+            og.remove("og:image");
         }
         Ok(Value::Object(og))
     }

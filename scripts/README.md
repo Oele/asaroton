@@ -48,6 +48,7 @@ They need `cargo build`, the development database role from `.env.example`, and 
 | `scripts/invitepushtest.py` | An invitation pushes the invited user (`.m.rule.invite_for_me`), on this server and from another one over `/invite`; messages after the join push as before; nobody else is woken |
 | `scripts/pushcatchuptest.py` | A push worker that falls behind its notifications (a tiny channel, `ASAROTON_NOTIFIER_CAPACITY=8`, and a burst of 60 messages) catches up from the database: every message pushed, each once |
 | `scripts/backupversiontest.py` | Key backup versions created at the same moment for one user each get their own number; the newest is current |
+| `scripts/previewtest.py` | URL previews of pages a site does not give (a 406 from a site firewall, a redirect to it, a 404) are empty, not titled after the error; an image that answers with an error is left out |
 | `scripts/nultest.py` | A remote member's state event with NUL (a display name) stalls no room; one with NUL in its state key is refused alone; local NUL is a 400 |
 | `scripts/ignoretest.py` | Events of an ignored user stay out of /messages, /context, /event, /relations, /threads, /search and pushes; state events stay |
 | `scripts/ssreceiptstest.py` | Sliding sync hands out read receipts for the rooms of a list, whichever of `lists` and `rooms` the extension names, and again after a lost answer |
