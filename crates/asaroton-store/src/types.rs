@@ -575,6 +575,25 @@ pub struct SearchFilter {
     pub msgtypes: Option<Vec<String>>,
     /// `true` only events whose body has an http(s) link, `false` only those without.
     pub contains_link: Option<bool>,
+    /// The event types the request's `keys` cover (`content.body` → `m.room.message`,
+    /// `content.name` → `m.room.name`, `content.topic` → `m.room.topic`); `None` for all.
+    pub key_types: Option<Vec<String>>,
+}
+
+impl SearchFilter {
+    /// Whether the filter narrows the results beyond rooms and keys: a search without words
+    /// (`net.oele.search_without_words`) needs one, or it would be `/messages` by another name.
+    pub fn narrows(&self) -> bool {
+        self.senders.is_some()
+            || !self.not_senders.is_empty()
+            || self.types.is_some()
+            || !self.not_types.is_empty()
+            || self.contains_url.is_some()
+            || self.after.is_some()
+            || self.before.is_some()
+            || self.msgtypes.is_some()
+            || self.contains_link.is_some()
+    }
 }
 
 /// A full-text search hit.

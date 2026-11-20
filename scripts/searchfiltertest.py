@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""/search filters as conditions of the query (tracker #81) and the `net.oele.search_filters`
-extension (tracker #82).
+"""/search filters as conditions of the query (tracker #81), the `net.oele.search_filters`
+extension (tracker #82) and search without words (`net.oele.search_without_words`, #83).
 
 In one room alice, bob and carol write messages with the word "eet" in them: many from alice, a
 few from bob, some from carol (whom alice ignores), pictures, a video, a file, links and not quite
@@ -13,7 +13,11 @@ links, edits, a topic, and two batches some time apart. Alice searches:
   `m.new_content`) and `net.oele.contains_link` (true and false, an edit by its new body),
   advertised in /versions;
 - an ill-typed extension value or an unknown `net.oele.` field is a 400 M_BAD_JSON;
-- without `event_context` a result has an empty context; with it, the events around it.
+- without `event_context` a result has an empty context; with it, the events around it;
+- `keys` limits the search to message bodies, room names or topics;
+- an empty or blank search term with a filter finds everything the filter lets through (also
+  messages without the word), newest first, with the count and pages of that set; without a
+  filter it is a 400 M_INVALID_PARAM.
 
 Needs what scripts/fedlab.py needs. Takes a few seconds.
 
@@ -51,6 +55,9 @@ def run(hs, peers):
     image = text(b, "eet foto.jpg", "m.image", url="mxc://lab.test/foto")
     video = text(b, "eet film.mp4", "m.video", url="mxc://lab.test/film")
     file_ = text(a, "eet menu.pdf", "m.file", url="mxc://lab.test/menu")
+    # Without the word: only a search without words finds these.
+    quiet_photo = text(b, "zonnebloem.jpg", "m.image", url="mxc://lab.test/zon")
+    quiet_text = text(b, "hallo allemaal")
     st, r = hs.req("PUT", f"/_matrix/client/v3/rooms/{q(room)}/state/m.room.topic/", {"topic": "waar eet je"}, a)
     topic = r["event_id"]
     time.sleep(1.2)
@@ -80,20 +87,22 @@ def run(hs, peers):
     first = set(alices) | set(bobs) | {image, video, file_, topic}
     everything = first | second  # what alice may find (carol's are ignored)
 
-    def search(flt=None, next_batch=None, context=None, order="recent"):
-        body = {"search_categories": {"room_events": {"search_term": "eet", "order_by": order,
+    def search(flt=None, next_batch=None, context=None, order="recent", term="eet", keys=None):
+        body = {"search_categories": {"room_events": {"search_term": term, "order_by": order,
                                                       "filter": {"rooms": [room], **(flt or {})}}}}
         if context is not None:
             body["search_categories"]["room_events"]["event_context"] = context
+        if keys is not None:
+            body["search_categories"]["room_events"]["keys"] = keys
         path = "/_matrix/client/v3/search" + (f"?next_batch={q(next_batch)}" if next_batch else "")
         st, r = hs.req("POST", path, body, a)
         return st, r.get("search_categories", {}).get("room_events", r)
 
-    def all_pages(flt, limit):
+    def all_pages(flt, limit, term="eet", keys=None, order="recent"):
         """(ids, count, page sizes, status) over every page."""
         ids, sizes, nb, count, st = [], [], None, None, 200
         for _ in range(60):
-            st, page = search({**flt, "limit": limit}, nb)
+            st, page = search({**flt, "limit": limit}, nb, term=term, keys=keys, order=order)
             if st != 200:
                 return ids, count, sizes, st
             got = [x["result"]["event_id"] for x in page.get("results", [])]
@@ -181,6 +190,41 @@ def run(hs, peers):
           f"with event_context 1/1: one event before each ({[len(x.get('events_before', [])) for x in ctx]})")
     st, page = search({"limit": 3}, order="rank")
     check(st == 200 and len(page.get("results", [])) == 3, f"order_by rank works with the filters too ({st})")
+
+    # keys: which fields are searched.
+    ids, count, sizes, st = all_pages({}, 10, keys=["content.body"])
+    check(st == 200 and set(ids) == everything - {topic} and count == len(everything) - 1,
+          f"keys=[content.body]: the messages, not the topic (count {count})")
+    ids, count, sizes, st = all_pages({}, 10, keys=["content.topic"])
+    check(st == 200 and ids == [topic] and count == 1, f"keys=[content.topic]: the topic only (count {count})")
+
+    # #83: search without words.
+    st, r = hs.req("GET", "/_matrix/client/versions", None, a)
+    check(r.get("unstable_features", {}).get("net.oele.search_without_words") is True, "/versions advertises net.oele.search_without_words")
+    pictures = [quiet_photo, video, image]  # newest first
+    for term in ("", "   "):
+        ids, count, sizes, st = all_pages({"net.oele.msgtypes": ["m.image", "m.video"]}, 10, term=term, keys=["content.body"])
+        check(st == 200 and ids == pictures and count == 3 and sizes == [3],
+              f"no words ({term!r}) and msgtypes=[m.image, m.video]: every picture and video, also the one without the word, newest first (count {count})")
+    ids, count, sizes, st = all_pages({"net.oele.msgtypes": ["m.image", "m.video"]}, 10, term="", order="rank")
+    check(st == 200 and ids == pictures, "with order_by rank too: there is nothing to rank by, so newest first")
+    bobs_all = set(bobs) | {image, video, quiet_photo, quiet_text}
+    ids, count, sizes, st = all_pages({"senders": [bob]}, 3, term="")
+    check(st == 200 and set(ids) == bobs_all and count == 7 and sizes == [3, 3, 1],
+          f"no words and senders=[bob]: all 7 of his messages, count {count}, pages {sizes}")
+    ids, count, sizes, st = all_pages({"not_senders": [alice]}, 10, term="")
+    check(st == 200 and set(ids) == bobs_all and count == 7, f"no words and not_senders=[alice]: bob's, carol's still ignored (count {count})")
+    ids, count, sizes, st = all_pages({"net.oele.after": middle}, 10, term="", keys=["content.body"])
+    check(st == 200 and set(ids) == second and count == len(second),
+          f"no words and a period: the second batch, an edit beside its original (count {count})")
+    ids, count, sizes, st = all_pages({"contains_url": True, "net.oele.before": middle}, 2, term="")
+    check(st == 200 and set(ids) == {image, video, file_, quiet_photo} and count == 4 and sizes == [2, 2, 0],
+          f"no words, contains_url and a period: the four with a url (count {count}, pages {sizes})")
+    for flt in ({}, {"limit": 5}):
+        st, r = search(flt, term="")
+        check(st == 400 and r.get("errcode") == "M_INVALID_PARAM", f"no words and no filter ({flt}): 400 ({st}, {r.get('errcode')})")
+    st, r = search({}, term="  ", keys=["content.body"])
+    check(st == 400 and r.get("errcode") == "M_INVALID_PARAM", f"keys alone is no filter either ({st}, {r.get('errcode')})")
 
 
 if __name__ == "__main__":

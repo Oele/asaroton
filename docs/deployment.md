@@ -172,7 +172,9 @@ search table.
 
 Filters on what a message is (`contains_url`, and the `net.oele.search_filters` extension's
 message kinds and links; see docs/spec-coverage.md) read each matching event's JSON at query
-time, so they need no backfill; a period uses an index on the room and the time.
+time, so they need no backfill; a period uses an index on the room and the time. A search
+without words (`net.oele.search_without_words`) with such a filter reads every message of the
+rooms searched to count them: roughly 4 µs per event, a fifth of a second for 50,000.
 
 ## Voice and video calls
 

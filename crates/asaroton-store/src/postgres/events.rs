@@ -993,11 +993,16 @@ impl EventStore for PostgresStore {
                 .map(|t| format!("%{}%", like_escape(&t)))
                 .collect(),
         };
-        let word = match mode {
-            SearchMode::Substring => false,
-            SearchMode::Word | SearchMode::Both => true,
-        };
-        if !word && patterns.is_empty() {
+        // No words (`net.oele.search_without_words`): no condition on the text, only the filter,
+        // newest first. The API lets this through only with a filter that narrows the results.
+        let without_words = term.trim().is_empty();
+        let patterns = if without_words { Vec::new() } else { patterns };
+        let word = !without_words
+            && match mode {
+                SearchMode::Substring => false,
+                SearchMode::Word | SearchMode::Both => true,
+            };
+        if !without_words && !word && patterns.is_empty() {
             return Ok((Vec::new(), 0));
         }
         let mut args = SearchArgs::default();
@@ -1019,7 +1024,12 @@ impl EventStore for PostgresStore {
                 .collect();
             matching.push(format!("({})", subs.join(" AND ")));
         }
-        conds.push(format!("({})", matching.join(" OR ")));
+        if !matching.is_empty() {
+            conds.push(format!("({})", matching.join(" OR ")));
+        }
+        if let Some(types) = &filter.key_types {
+            conds.push(format!("e.event_type = ANY({})", args.texts(types.clone())));
+        }
         // The filters are conditions of the query, before ORDER BY, OFFSET and LIMIT, so the
         // count, the pages and the next batch all describe the filtered set.
         if let Some(senders) = &filter.senders {
@@ -1099,7 +1109,7 @@ impl EventStore for PostgresStore {
             .fetch_one(&self.pool)
             .await?
             .get(0);
-        let order = if order_recent {
+        let order = if order_recent || without_words {
             "s.origin_server_ts DESC, s.stream_ordering DESC"
         } else {
             "rank DESC, s.stream_ordering DESC"

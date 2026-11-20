@@ -1532,6 +1532,24 @@ pub fn search_request(
         .filter
         .url_filter
         .map(|u| matches!(u, ruma::api::client::filter::UrlFilter::EventsWithUrl));
+    filter.key_types = c.keys.as_ref().map(|keys| {
+        use search::search_events::v3::SearchKeys;
+        keys.iter()
+            .filter_map(|k| match k {
+                SearchKeys::ContentBody => Some("m.room.message".to_owned()),
+                SearchKeys::ContentName => Some("m.room.name".to_owned()),
+                SearchKeys::ContentTopic => Some("m.room.topic".to_owned()),
+                _ => None,
+            })
+            .collect()
+    });
+    // `net.oele.search_without_words`: an empty search term puts no condition on the words,
+    // but only together with a filter; otherwise it would page through whole rooms.
+    if c.search_term.trim().is_empty() && !filter.narrows() {
+        return Err(Error::invalid_param(
+            "A search without words needs a filter (senders, types, contains_url or net.oele.*).",
+        ));
+    }
     // ruma fills in its default (five before, five after) when `event_context` is missing;
     // the spec makes context something the client asks for, so look at the raw body.
     let context = raw
