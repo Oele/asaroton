@@ -58,8 +58,17 @@ def run(hs, peers):
     st, r = hs.req("POST", "/_matrix/client/v3/createRoom", {"preset": "private_chat", "name": "Kiln rota", "invite": [bob]}, a)
     assert st == 200, r
     room = r["room_id"]
-    st, members = hs.req("GET", f"/_matrix/client/v3/rooms/{q(room)}/members?membership=invite", None, a)
-    invite_id = next(e["event_id"] for e in members["chunk"] if e["state_key"] == bob)
+    found = {}
+
+    def invite_listed():
+        st, members = hs.req("GET", f"/_matrix/client/v3/rooms/{q(room)}/members?membership=invite", None, a)
+        for e in members.get("chunk", []):
+            if e.get("state_key") == bob:
+                found["id"] = e["event_id"]
+        return "id" in found
+
+    assert wait_for(invite_listed, 5, 0.1), "Bob's invitation is not listed"
+    invite_id = found["id"]
     check(wait_for(lambda: invite_id in pushed, 5, 0.1), "Bob's pusher is called for his invitation")
     n = pushed.get(invite_id, {})
     check(n.get("type") == "m.room.member" and n.get("user_is_target") is True and n.get("content", {}).get("membership") == "invite",
