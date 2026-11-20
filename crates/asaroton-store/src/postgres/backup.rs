@@ -62,6 +62,15 @@ impl KeyBackupStore for PostgresStore {
         user_id: &UserId,
         algorithm: &serde_json::Value,
     ) -> Result<String> {
+        // Two creations for one user at once would both take the same next number: one at a
+        // time per user (a lock held until the transaction ends), as if they came in turn.
+        let mut tx = self.begin().await?;
+        sqlx::query(
+            "SELECT pg_advisory_xact_lock(hashtextextended('key_backup_versions:' || $1, 0))",
+        )
+        .bind(user_id.as_str())
+        .execute(&mut *tx)
+        .await?;
         let row = sqlx::query(
             "INSERT INTO key_backup_versions (user_id, version, algorithm)
              VALUES ($1, (SELECT COALESCE(MAX(version), 0) + 1 FROM key_backup_versions WHERE user_id = $1), $2)
@@ -69,8 +78,9 @@ impl KeyBackupStore for PostgresStore {
         )
         .bind(user_id.as_str())
         .bind(algorithm.to_string())
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
         .await?;
+        tx.commit().await?;
         Ok(row.get::<i64, _>(0).to_string())
     }
 
