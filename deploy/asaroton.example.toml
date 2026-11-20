@@ -7,6 +7,8 @@ database_url = "postgres://asaroton:asaroton@postgres/asaroton"
 data_dir = "/data"
 # Behind a reverse proxy: the URL clients use (announced in .well-known/matrix/client).
 # public_base_url = "https://matrix.example.org"
+# User IDs made server admins at startup (they must exist).
+admins = []
 
 [listeners.client]
 bind = "0.0.0.0:8008"
@@ -82,11 +84,20 @@ enabled = false
 [server_notices]
 enabled = false
 
+# Email addresses on accounts, verified by a mailed code (see docs/deployment.md).
+[email]
+enabled = false
+# from = "matrix.example.org <noreply@example.org>"
+# transport = "smtp"
+# smtp_host = "localhost"        # the machine's own mail server (the default), which can
+#                                # pass mail on to a smarthost for every program on the machine
+# smtp_port = 25
+# smtp_tls = "none"              # none, starttls (port 587) or tls (port 465)
+# smtp_username = "..."
+# smtp_password_file = "/etc/asaroton/smtp-password"
+
 # Delegate authentication to Matrix Authentication Service (MSC3861).
 [mas]
 enabled = false
 # endpoint = "http://mas:8080"
 # secret = "shared secret, matrix.secret in the MAS config"
-
-# User IDs made server admins at startup.
-admins = []

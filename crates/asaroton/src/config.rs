@@ -734,3 +734,14 @@ pub struct AppservicesConfig {
     #[serde(default)]
     pub registration_dir: Option<PathBuf>,
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn example_config_loads() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../deploy/asaroton.example.toml");
+        let cfg = super::Config::load(&path).expect("deploy/asaroton.example.toml loads");
+        assert!(!cfg.email.enabled);
+    }
+}
