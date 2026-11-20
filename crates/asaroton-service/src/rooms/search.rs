@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use asaroton_store::{Direction, StoredEvent};
+use asaroton_store::{Direction, SearchFilter, StoredEvent};
 use ruma::{OwnedRoomId, OwnedUserId, UserId};
 
 use super::timeline::StreamToken;
@@ -14,16 +14,22 @@ pub struct SearchRequest {
     pub term: String,
     pub rooms: Option<Vec<OwnedRoomId>>,
     pub not_rooms: Vec<OwnedRoomId>,
-    pub senders: Option<Vec<OwnedUserId>>,
-    pub not_senders: Vec<OwnedUserId>,
-    pub types: Option<Vec<String>>,
-    pub not_types: Vec<String>,
+    /// Senders, types, `contains_url` and the `net.oele.search_filters` extension; the
+    /// searcher's ignored users are added here.
+    pub filter: SearchFilter,
     pub order_recent: bool,
+    /// The events around each result, when the request asked for them.
+    pub context: Option<SearchContext>,
+    pub offset: usize,
+    pub limit: usize,
+}
+
+/// `event_context` of a search request.
+#[derive(Debug)]
+pub struct SearchContext {
     pub before_limit: usize,
     pub after_limit: usize,
     pub include_profile: bool,
-    pub offset: usize,
-    pub limit: usize,
 }
 
 /// One hit with its context.
@@ -56,6 +62,13 @@ impl Services {
             .filter(|r| !req.not_rooms.contains(r))
             .collect();
         let limit = req.limit.clamp(1, 100);
+        let mut filter = req.filter;
+        filter.ignored = self
+            .ignored_users(user)
+            .await?
+            .iter()
+            .map(ToString::to_string)
+            .collect();
         let (hits, count) = self
             .store
             .search_events(
@@ -67,48 +80,39 @@ impl Services {
                     order_recent: req.order_recent,
                     offset: req.offset,
                     limit,
+                    filter: &filter,
                 },
             )
             .await?;
-        let page_full = hits.len() >= limit;
-        let ignored = self.ignored_users(user).await?;
         let mut results = Vec::with_capacity(hits.len());
+        let (before_limit, after_limit, include_profile) =
+            req.context.as_ref().map_or((0, 0, false), |c| {
+                (c.before_limit, c.after_limit, c.include_profile)
+            });
         for hit in hits {
             let ev = hit.event;
-            let ty = ev.pdu.event_type().to_string();
-            if super::timeline::sent_by_ignored(&ev, &ignored)
-                || req.types.as_ref().is_some_and(|t| !t.contains(&ty))
-                || req.not_types.contains(&ty)
-                || req
-                    .senders
-                    .as_ref()
-                    .is_some_and(|s| !s.iter().any(|u| u == ev.pdu.sender()))
-                || req.not_senders.iter().any(|u| u == ev.pdu.sender())
-            {
-                continue;
-            }
             let room_id = ev.pdu.room_id().to_owned();
-            let before = if req.before_limit > 0 {
+            let before = if before_limit > 0 {
                 self.store
                     .room_events_in_range(
                         &room_id,
                         ev.stream_ordering,
                         None,
                         Direction::Backwards,
-                        req.before_limit,
+                        before_limit,
                     )
                     .await?
             } else {
                 Vec::new()
             };
-            let after = if req.after_limit > 0 {
+            let after = if after_limit > 0 {
                 self.store
                     .room_events_in_range(
                         &room_id,
                         ev.stream_ordering,
                         None,
                         Direction::Forwards,
-                        req.after_limit,
+                        after_limit,
                     )
                     .await?
             } else {
@@ -125,7 +129,7 @@ impl Services {
                     .map_or(ev.stream_ordering, |e| e.stream_ordering),
             );
             let mut profiles = Vec::new();
-            if req.include_profile {
+            if include_profile {
                 let senders: BTreeSet<OwnedUserId> = std::iter::once(&ev)
                     .chain(before.iter())
                     .chain(after.iter())
@@ -146,7 +150,9 @@ impl Services {
                 profiles,
             });
         }
-        let next_offset = page_full.then_some(req.offset + limit);
+        // A full page has a next batch, as Synapse does and Complement expects (the next page may
+        // then be empty); with the filters in the query every page but the last is full.
+        let next_offset = (results.len() >= limit).then_some(req.offset + limit);
         Ok(SearchPage {
             results,
             count,

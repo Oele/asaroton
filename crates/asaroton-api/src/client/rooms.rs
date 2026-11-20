@@ -1508,7 +1508,7 @@ pub async fn report_user(
 pub fn search_request(
     req: &Ruma<search::search_events::v3::Request>,
 ) -> Result<Option<(asaroton_service::rooms::search::SearchRequest, bool)>> {
-    use asaroton_service::rooms::search::SearchRequest;
+    use asaroton_service::rooms::search::{SearchContext, SearchRequest};
     use search::search_events::v3::OrderBy;
     let Some(c) = &req.body.search_categories.room_events else {
         return Ok(None);
@@ -1519,19 +1519,36 @@ pub fn search_request(
             .map_err(|_| Error::invalid_param("Invalid next_batch token."))?,
         None => 0,
     };
+    let raw = req
+        .json
+        .as_ref()
+        .and_then(|j| j.pointer("/search_categories/room_events"));
+    let mut filter = search_extension_filter(raw.and_then(|r| r.get("filter")))?;
+    filter.senders = c.filter.senders.as_ref().map(|v| strings_of(v));
+    filter.not_senders = strings_of(&c.filter.not_senders);
+    filter.types.clone_from(&c.filter.types);
+    filter.not_types.clone_from(&c.filter.not_types);
+    filter.contains_url = c
+        .filter
+        .url_filter
+        .map(|u| matches!(u, ruma::api::client::filter::UrlFilter::EventsWithUrl));
+    // ruma fills in its default (five before, five after) when `event_context` is missing;
+    // the spec makes context something the client asks for, so look at the raw body.
+    let context = raw
+        .is_some_and(|r| r.get("event_context").is_some())
+        .then(|| SearchContext {
+            before_limit: usize::try_from(u64::from(c.event_context.before_limit)).unwrap_or(5),
+            after_limit: usize::try_from(u64::from(c.event_context.after_limit)).unwrap_or(5),
+            include_profile: c.event_context.include_profile,
+        });
     Ok(Some((
         SearchRequest {
             term: c.search_term.clone(),
             rooms: c.filter.rooms.clone(),
             not_rooms: c.filter.not_rooms.clone(),
-            senders: c.filter.senders.clone(),
-            not_senders: c.filter.not_senders.clone(),
-            types: c.filter.types.clone(),
-            not_types: c.filter.not_types.clone(),
+            filter,
             order_recent: matches!(c.order_by, Some(OrderBy::Recent)),
-            before_limit: usize::try_from(u64::from(c.event_context.before_limit)).unwrap_or(5),
-            after_limit: usize::try_from(u64::from(c.event_context.after_limit)).unwrap_or(5),
-            include_profile: c.event_context.include_profile,
+            context,
             offset,
             limit: c
                 .filter
@@ -1540,6 +1557,52 @@ pub fn search_request(
         },
         c.include_state.unwrap_or(false),
     )))
+}
+
+fn strings_of<T: std::fmt::Display>(v: &[T]) -> Vec<String> {
+    v.iter().map(ToString::to_string).collect()
+}
+
+/// The `net.oele.search_filters` fields of a `/search` filter (advertised in `/versions`):
+/// `net.oele.after` / `net.oele.before` (ms since the epoch), `net.oele.msgtypes` (strings) and
+/// `net.oele.contains_link` (boolean). A client sends them only to a server that advertises
+/// them, so an ill-typed value or an unknown `net.oele.` field is an error rather than
+/// ignored: ignoring it would bring back exactly what the user filtered out.
+fn search_extension_filter(raw: Option<&Value>) -> Result<asaroton_store::SearchFilter> {
+    let mut f = asaroton_store::SearchFilter::default();
+    let Some(obj) = raw.and_then(Value::as_object) else {
+        return Ok(f);
+    };
+    for (key, value) in obj {
+        let Some(name) = key.strip_prefix("net.oele.") else {
+            continue;
+        };
+        let bad = |what: &str| Error::bad_json(format!("filter.{key} must be {what}."));
+        match name {
+            "after" => f.after = Some(value.as_i64().ok_or_else(|| bad("an integer"))?),
+            "before" => f.before = Some(value.as_i64().ok_or_else(|| bad("an integer"))?),
+            "msgtypes" => {
+                let list = value
+                    .as_array()
+                    .and_then(|a| {
+                        a.iter()
+                            .map(|v| v.as_str().map(str::to_owned))
+                            .collect::<Option<Vec<_>>>()
+                    })
+                    .ok_or_else(|| bad("an array of strings"))?;
+                f.msgtypes = Some(list);
+            }
+            "contains_link" => {
+                f.contains_link = Some(value.as_bool().ok_or_else(|| bad("a boolean"))?);
+            }
+            _ => {
+                return Err(Error::bad_json(format!(
+                    "Unknown search filter field {key}."
+                )));
+            }
+        }
+    }
+    Ok(f)
 }
 
 /// `/search`, rendered as explicit JSON so `results` and `count` are always present.
@@ -1552,6 +1615,7 @@ pub async fn search(
     let Some((request, _include_state)) = search_request(&req)? else {
         return Ok(axum::Json(json!({ "search_categories": {} })).into_response());
     };
+    let has_context = request.context.is_some();
     let page = services.search(&sender.user_id, request).await?;
     let user = Some(&*sender.user_id);
     let mut results = Vec::with_capacity(page.results.len());
@@ -1567,16 +1631,22 @@ pub async fn search(
             }
             profile_info.insert(u.to_string(), Value::Object(p));
         }
-        results.push(json!({
-            "rank": r.rank,
-            "result": services.client_event(&r.event, user).await?,
-            "context": {
+        // Without `event_context` in the request there is no context, only an empty object.
+        let context = if has_context {
+            json!({
                 "events_before": services.client_events(&r.before, user).await?,
                 "events_after": services.client_events(&r.after, user).await?,
                 "start": r.start.to_string(),
                 "end": r.end.to_string(),
                 "profile_info": profile_info,
-            },
+            })
+        } else {
+            json!({})
+        };
+        results.push(json!({
+            "rank": r.rank,
+            "result": services.client_event(&r.event, user).await?,
+            "context": context,
         }));
     }
     let mut room_events = json!({

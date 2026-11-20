@@ -36,6 +36,8 @@ pub async fn versions(
         ("org.matrix.msc3814".to_owned(), true),
         // Profile updates in /sync.
         ("org.matrix.msc4429".to_owned(), true),
+        // /search filters by period, message kind and link (asaroton's own extension).
+        ("net.oele.search_filters".to_owned(), true),
         // MatrixRTC transports, when a LiveKit SFU is configured.
         ("org.matrix.msc4143".to_owned(), services.has_rtc()),
         // Thread subscriptions and their sliding sync extension.

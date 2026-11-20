@@ -279,6 +279,49 @@ fn search_text_for(event_type: &str, content: &serde_json::Value) -> Option<Stri
     Some(text.replace('\0', ""))
 }
 
+/// An http(s) link in a message body: the scheme and the first character of a host, as smalt
+/// detects links (`previews::first_link`), so a link filter agrees with what the client shows.
+const LINK_PATTERN: &str = r#"https?://[^][:space:]/?#.,;:!"'()<>[]"#;
+
+/// The bind parameters of a dynamically built search query, numbered in the order pushed.
+#[derive(Default)]
+struct SearchArgs(Vec<SearchArg>);
+
+enum SearchArg {
+    Texts(Vec<String>),
+    Text(String),
+    Int(i64),
+}
+
+impl SearchArgs {
+    fn push(&mut self, arg: SearchArg) -> String {
+        self.0.push(arg);
+        format!("${}", self.0.len())
+    }
+    fn texts(&mut self, v: Vec<String>) -> String {
+        self.push(SearchArg::Texts(v))
+    }
+    fn text(&mut self, v: &str) -> String {
+        self.push(SearchArg::Text(v.to_owned()))
+    }
+    fn int(&mut self, v: i64) -> String {
+        self.push(SearchArg::Int(v))
+    }
+    fn bind<'q>(
+        &'q self,
+        mut q: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
+    ) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
+        for a in &self.0 {
+            q = match a {
+                SearchArg::Texts(v) => q.bind(v),
+                SearchArg::Text(v) => q.bind(v),
+                SearchArg::Int(v) => q.bind(*v),
+            };
+        }
+        q
+    }
+}
+
 /// Whitespace-separated terms, with double-quoted phrases kept whole and terms shorter than
 /// `min_length` characters dropped (a trigram index needs three characters to be useful).
 fn substring_terms(query: &str, min_length: usize) -> Vec<String> {
@@ -932,15 +975,15 @@ impl EventStore for PostgresStore {
         if room_ids.is_empty() {
             return Ok((Vec::new(), 0));
         }
-        let (term, mode, min_length, order_recent, offset, limit) = (
-            query.term,
-            query.mode,
-            query.min_length,
-            query.order_recent,
-            query.offset,
-            query.limit,
-        );
-        let rooms = strings(room_ids);
+        let SearchQuery {
+            term,
+            mode,
+            min_length,
+            order_recent,
+            offset,
+            limit,
+            filter,
+        } = *query;
         // Substring terms: whitespace-separated, quoted phrases kept whole, short ones dropped.
         let patterns: Vec<String> = match mode {
             SearchMode::Word => Vec::new(),
@@ -957,56 +1000,123 @@ impl EventStore for PostgresStore {
         if !word && patterns.is_empty() {
             return Ok((Vec::new(), 0));
         }
-        // $1 rooms, $2 term, $3 offset, $4 limit, $5.. substring patterns.
-        let mut conds: Vec<String> = Vec::new();
+        let mut args = SearchArgs::default();
+        let mut conds = vec![
+            format!("s.room_id = ANY({})", args.texts(strings(room_ids))),
+            "NOT e.rejected AND NOT e.soft_failed".to_owned(),
+        ];
+        let mut matching: Vec<String> = Vec::new();
+        let mut rank = "0::real".to_owned();
         if word {
-            conds.push("s.vector @@ websearch_to_tsquery('english', $2)".to_owned());
+            let t = args.text(term);
+            matching.push(format!("s.vector @@ websearch_to_tsquery('english', {t})"));
+            rank = format!("ts_rank(s.vector, websearch_to_tsquery('english', {t}))");
         }
         if !patterns.is_empty() {
-            let subs: Vec<String> = (0..patterns.len())
-                .map(|i| format!("s.value ILIKE ${} ESCAPE '\\'", i + 5))
+            let subs: Vec<String> = patterns
+                .iter()
+                .map(|p| format!("s.value ILIKE {} ESCAPE '\\'", args.text(p)))
                 .collect();
-            conds.push(format!("({})", subs.join(" AND ")));
+            matching.push(format!("({})", subs.join(" AND ")));
         }
-        let matching = conds.join(" OR ");
+        conds.push(format!("({})", matching.join(" OR ")));
+        // The filters are conditions of the query, before ORDER BY, OFFSET and LIMIT, so the
+        // count, the pages and the next batch all describe the filtered set.
+        if let Some(senders) = &filter.senders {
+            conds.push(format!("e.sender = ANY({})", args.texts(senders.clone())));
+        }
+        if !filter.not_senders.is_empty() {
+            conds.push(format!(
+                "NOT (e.sender = ANY({}))",
+                args.texts(filter.not_senders.clone())
+            ));
+        }
+        if !filter.ignored.is_empty() {
+            conds.push(format!(
+                "NOT (e.state_key IS NULL AND e.sender = ANY({}))",
+                args.texts(filter.ignored.clone())
+            ));
+        }
+        if let Some(types) = &filter.types {
+            conds.push(format!("e.event_type = ANY({})", args.texts(types.clone())));
+        }
+        if !filter.not_types.is_empty() {
+            conds.push(format!(
+                "NOT (e.event_type = ANY({}))",
+                args.texts(filter.not_types.clone())
+            ));
+        }
+        if let Some(after) = filter.after {
+            conds.push(format!("s.origin_server_ts >= {}", args.int(after)));
+        }
+        if let Some(before) = filter.before {
+            conds.push(format!("s.origin_server_ts < {}", args.int(before)));
+        }
+        // Content filters read the event's content once per candidate row. An edit counts with
+        // its `m.new_content` (its msgtype and body), as the message it shows. jsonb refuses the
+        // escape `\u0000`, which a remote event may carry (tracker issue 67); `\ufffd` takes its
+        // place: as long, also starting with the backslash, so the JSON stays valid even after
+        // an escaped backslash.
+        let content_filters = filter.contains_url.is_some()
+            || filter.msgtypes.is_some()
+            || filter.contains_link.is_some();
+        let lateral = if content_filters {
+            "CROSS JOIN LATERAL (SELECT c, CASE WHEN c -> 'm.relates_to' ->> 'rel_type' = 'm.replace'
+                                     AND jsonb_typeof(c -> 'm.new_content') = 'object'
+                                    THEN c -> 'm.new_content' ELSE c END AS shown
+                                  FROM (SELECT replace(e.json, '\\u0000', '\\ufffd')::jsonb -> 'content' AS c) x) j"
+        } else {
+            ""
+        };
+        if let Some(want) = filter.contains_url {
+            let has = "jsonb_typeof(j.c) = 'object' AND j.c ? 'url'";
+            conds.push(if want {
+                format!("({has})")
+            } else {
+                format!("NOT COALESCE({has}, false)")
+            });
+        }
+        if let Some(msgtypes) = &filter.msgtypes {
+            conds.push(format!(
+                "e.event_type = 'm.room.message' AND j.shown ->> 'msgtype' = ANY({})",
+                args.texts(msgtypes.clone())
+            ));
+        }
+        if let Some(want) = filter.contains_link {
+            let has = format!(
+                "COALESCE(j.shown ->> 'body' ~ {}, false)",
+                args.text(LINK_PATTERN)
+            );
+            conds.push(if want { has } else { format!("NOT {has}") });
+        }
+        let where_clause = conds.join(" AND ");
         let count_sql = format!(
-            "SELECT COUNT(*) FROM event_search s WHERE s.room_id = ANY($1) AND ({matching})"
+            "SELECT COUNT(*) FROM event_search s JOIN events e ON e.event_id = s.event_id {lateral}
+              WHERE {where_clause}"
         );
-        let mut q = sqlx::query(sqlx::AssertSqlSafe(count_sql))
-            .bind(&rooms)
-            .bind(term)
-            .bind(0i64)
-            .bind(0i64);
-        for p in &patterns {
-            q = q.bind(p);
-        }
-        let count: i64 = q.fetch_one(&self.pool).await?.get(0);
+        let count: i64 = args
+            .bind(sqlx::query(sqlx::AssertSqlSafe(count_sql)))
+            .fetch_one(&self.pool)
+            .await?
+            .get(0);
         let order = if order_recent {
             "s.origin_server_ts DESC, s.stream_ordering DESC"
         } else {
             "rank DESC, s.stream_ordering DESC"
         };
-        let rank = if word {
-            "ts_rank(s.vector, websearch_to_tsquery('english', $2))"
-        } else {
-            "0::real"
-        };
+        let off = args.int(i64::try_from(offset).unwrap_or(i64::MAX));
+        let lim = args.int(i64::try_from(limit).unwrap_or(i64::MAX));
         let sql = format!(
             "SELECT {EVENT_COLUMNS}, {rank} AS rank
                FROM event_search s JOIN events e ON e.event_id = s.event_id
-               JOIN rooms r ON r.room_id = e.room_id
-              WHERE s.room_id = ANY($1) AND ({matching}) AND NOT e.rejected AND NOT e.soft_failed
-              ORDER BY {order} OFFSET $3 LIMIT $4"
+               JOIN rooms r ON r.room_id = e.room_id {lateral}
+              WHERE {where_clause}
+              ORDER BY {order} OFFSET {off} LIMIT {lim}"
         );
-        let mut q = sqlx::query(sqlx::AssertSqlSafe(sql))
-            .bind(&rooms)
-            .bind(term)
-            .bind(i64::try_from(offset).unwrap_or(i64::MAX))
-            .bind(i64::try_from(limit).unwrap_or(i64::MAX));
-        for p in &patterns {
-            q = q.bind(p);
-        }
-        let rows = q.fetch_all(&self.pool).await?;
+        let rows = args
+            .bind(sqlx::query(sqlx::AssertSqlSafe(sql)))
+            .fetch_all(&self.pool)
+            .await?;
         let mut hits = Vec::with_capacity(rows.len());
         for row in rows {
             let rank: f32 = row.get("rank");

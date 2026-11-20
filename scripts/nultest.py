@@ -77,6 +77,18 @@ def run(hs, peers):
     wait_for(lambda: msg_id in timeline(), 10, 0.2)
     check(msg_id in timeline() and bad_id not in timeline(), "it is in the room, the refused event is not")
 
+    # 3b. A message with NUL in its body is found by /search, also with the filters that read
+    #     the event's content (net.oele.search_filters, contains_url).
+    nul_id, nul_ev = event("m.room.message", {"msgtype": "m.text", "body": "zoek\u0000woord https://example.org"}, [create, power, name_id], msg_id, 23)
+    st, result = deliver(nul_id, nul_ev)
+    check(st == 200 and result == {}, f"a message with NUL in its body is taken ({st} {result})")
+    wait_for(lambda: nul_id in timeline(), 10, 0.2)
+    for flt in ({}, {"net.oele.contains_link": True}, {"net.oele.msgtypes": ["m.text"]}, {"contains_url": False}):
+        st, r = hs.req("POST", "/_matrix/client/v3/search", {"search_categories": {"room_events": {
+            "search_term": "zoekwoord", "filter": {"rooms": [room_id], **flt}}}}, token)
+        hits = [x["result"]["event_id"] for x in r.get("search_categories", {}).get("room_events", {}).get("results", [])]
+        check(st == 200 and hits == [nul_id], f"/search finds it with filter {flt} ({st} {r.get('errcode', '')} {len(hits)} hits)")
+
     # 4. Locally: NUL in the path or in the body is a 400, not a 500.
     st, r = hs.req("PUT", f"/_matrix/client/v3/rooms/{q(room_id)}/state/org.example.nul/a%00b", {"x": 1}, token)
     check(st == 400 and r.get("errcode") == "M_INVALID_PARAM", f"a state key with NUL in the path: {st} {r.get('errcode')}")

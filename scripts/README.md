@@ -50,7 +50,8 @@ They need `cargo build`, the development database role from `.env.example`, and 
 | `scripts/pushcatchuptest.py` | A push worker that falls behind its notifications (a tiny channel, `ASAROTON_NOTIFIER_CAPACITY=8`, and a burst of 60 messages) catches up from the database: every message pushed, each once |
 | `scripts/backupversiontest.py` | Key backup versions created at the same moment for one user each get their own number; the newest is current |
 | `scripts/previewtest.py` | URL previews of pages a site does not give (a 406 from a site firewall, a redirect to it, a 404) are empty, not titled after the error; an image that answers with an error is left out |
-| `scripts/nultest.py` | A remote member's state event with NUL (a display name) stalls no room; one with NUL in its state key is refused alone; local NUL is a 400 |
+| `scripts/nultest.py` | A remote member's state event with NUL (a display name) stalls no room; one with NUL in its state key is refused alone; local NUL is a 400; a remote message with NUL in its body is found by `/search`, also with the content filters |
+| `scripts/searchfiltertest.py` | `/search` filters in the query (#81): senders, types, `contains_url` and ignored users with the right count, full pages and `next_batch`; the `net.oele.search_filters` extension (#82): period, message kind (an edit by its new content), links (true and false), refused bad values; context only when asked |
 | `scripts/ignoretest.py` | Events of an ignored user stay out of /messages, /context, /event, /relations, /threads, /search and pushes; state events stay |
 | `scripts/ssreceiptstest.py` | Sliding sync hands out read receipts for the rooms of a list, whichever of `lists` and `rooms` the extension names, and again after a lost answer |
 | `scripts/ssaccountdatatest.py [ROUNDS]` | A change to global account data reaches the user's sliding sync, also when the connection is being answered for another reason at that moment |

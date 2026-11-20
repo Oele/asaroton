@@ -550,6 +550,31 @@ pub struct SearchQuery<'a> {
     pub order_recent: bool,
     pub offset: usize,
     pub limit: usize,
+    /// Conditions of the query itself, so the count and the pages describe the filtered set.
+    pub filter: &'a SearchFilter,
+}
+
+/// What `/search` results must also satisfy: the spec's `RoomEventFilter` fields and the
+/// `net.oele.search_filters` extension. `None` and empty `not_` lists leave a field out.
+#[derive(Clone, Debug, Default)]
+pub struct SearchFilter {
+    pub senders: Option<Vec<String>>,
+    pub not_senders: Vec<String>,
+    pub types: Option<Vec<String>>,
+    pub not_types: Vec<String>,
+    /// Non-state events from these senders are left out (the searcher's ignored users).
+    pub ignored: Vec<String>,
+    /// `contains_url`: `true` only events whose content has a `url`, `false` only those without.
+    pub contains_url: Option<bool>,
+    /// Only events with `origin_server_ts >= after` (milliseconds).
+    pub after: Option<i64>,
+    /// Only events with `origin_server_ts < before` (milliseconds).
+    pub before: Option<i64>,
+    /// Only `m.room.message` events with one of these msgtypes (an edit's `m.new_content`
+    /// msgtype counts for the edit).
+    pub msgtypes: Option<Vec<String>>,
+    /// `true` only events whose body has an http(s) link, `false` only those without.
+    pub contains_link: Option<bool>,
 }
 
 /// A full-text search hit.
