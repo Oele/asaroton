@@ -10,8 +10,8 @@ links, edits, a topic, and two batches some time apart. Alice searches:
   count is of the filtered set, every page is full until the last, and `next_batch` stops there;
 - ignored users stay out of the results and of the count;
 - `net.oele.after`/`before` (a period), `net.oele.msgtypes` (message kind, an edit by its
-  `m.new_content`) and `net.oele.contains_link` (true and false, an edit by its new body),
-  advertised in /versions;
+  `m.new_content`) and `net.oele.contains_link` (true and false, an edit by its new body; an
+  address written from `www.` on counts, #84), advertised in /versions;
 - an ill-typed extension value or an unknown `net.oele.` field is a 400 M_BAD_JSON;
 - without `event_context` a result has an empty context; with it, the events around it;
 - `keys` limits the search to message bodies, room names or topics;
@@ -197,6 +197,27 @@ def run(hs, peers):
           f"keys=[content.body]: the messages, not the topic (count {count})")
     ids, count, sizes, st = all_pages({}, 10, keys=["content.topic"])
     check(st == 200 and ids == [topic] and count == 1, f"keys=[content.topic]: the topic only (count {count})")
+
+    # #84: an address written from www. on is a link too, unless it is part of another word or
+    # address; a bare name is not. In a room of its own, so the counts above stay as they are.
+    st, r = hs.req("POST", "/_matrix/client/v3/createRoom", {"preset": "public_chat"}, a)
+    room2 = r["room_id"]
+
+    def text2(body):
+        st, r = hs.req("PUT", f"/_matrix/client/v3/rooms/{q(room2)}/send/m.room.message/{uuid.uuid4().hex}",
+                       {"msgtype": "m.text", "body": body}, a)
+        assert st == 200, r
+        return r["event_id"]
+
+    www_links = {text2(b) for b in ("eet op www.mandkind.nl", "eet (www.example.org/a)", '"www.example.org" eet',
+                                    "www.example.org eet", "eet https://www.example.org")}
+    www_not = {text2(b) for b in ("eet awww.example.org", "eet www.nodot", "eet example.org",
+                                  "eet mail@www.example.org", "eet www..org", "eet x.www.example.org")}
+    for want, expected in ((True, www_links), (False, www_not)):
+        st, r = hs.req("POST", "/_matrix/client/v3/search", {"search_categories": {"room_events": {
+            "search_term": "eet", "filter": {"rooms": [room2], "net.oele.contains_link": want, "limit": 20}}}}, a)
+        got = {x["result"]["event_id"] for x in r.get("search_categories", {}).get("room_events", {}).get("results", [])}
+        check(st == 200 and got == expected, f"www. addresses, contains_link={want}: {len(got & expected)} of {len(expected)}, {len(got - expected)} wrong")
 
     # #83: search without words.
     st, r = hs.req("GET", "/_matrix/client/versions", None, a)

@@ -279,9 +279,15 @@ fn search_text_for(event_type: &str, content: &serde_json::Value) -> Option<Stri
     Some(text.replace('\0', ""))
 }
 
-/// An http(s) link in a message body: the scheme and the first character of a host, as smalt
-/// detects links (`previews::first_link`), so a link filter agrees with what the client shows.
-const LINK_PATTERN: &str = r#"https?://[^][:space:]/?#.,;:!"'()<>[]"#;
+/// A link in a message body, as smalt's clients show links (so a link filter agrees with
+/// what the client shows): an http(s) URL (the scheme and the first character of a host), or
+/// an address written from `www.` on with a dot after it (`www.example.org`, `www.example.org/a`)
+/// that is not part of another word or address (`awww.example.org`, `mail@www.example.org`).
+/// Bare names (`example.org`) are not links: that would need a list of top-level domains.
+const LINK_PATTERN: &str = concat!(
+    r#"https?://[^][:space:]/?#.,;:!"'()<>[]"#,
+    r#"|(?<![A-Za-z0-9_.@/:-])www\.[^[:space:]<>"'.]+\.[^[:space:]<>"']+"#
+);
 
 /// The bind parameters of a dynamically built search query, numbered in the order pushed.
 #[derive(Default)]
