@@ -83,24 +83,100 @@ type PusherKey = (OwnedUserId, String, String);
 /// notification.
 type PushJob = (Arc<Pusher>, Arc<Value>);
 
+/// The users who have a pusher. Most users have none; the set is kept here rather than queried
+/// per member per event, read again when a pusher is set or removed, and every few seconds for
+/// changes that do not announce themselves (a logout drops its pushers).
+struct WithPushers {
+    users: HashSet<OwnedUserId>,
+    generation: u64,
+    refreshed: Option<Instant>,
+}
+
+impl WithPushers {
+    async fn refresh(&mut self, services: &Services) {
+        let current = services
+            .pushers_generation
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if current != self.generation
+            || self
+                .refreshed
+                .is_none_or(|t| t.elapsed() > Duration::from_secs(10))
+        {
+            self.generation = current;
+            match services.store.users_with_pushers().await {
+                Ok(users) => self.users = users.into_iter().collect(),
+                Err(e) => tracing::warn!(error = %e, "could not list users with pushers"),
+            }
+            self.refreshed = Some(Instant::now());
+        }
+    }
+}
+
+/// How many events a catch-up reads from the database at a time.
+const CATCH_UP_BATCH: i64 = 500;
+
 async fn worker(services: Arc<Services>, outbound: Outbound) {
     let queues: Arc<PerKeyQueues<PusherKey, PushJob>> =
         Arc::new(PerKeyQueues::new(MOST_QUEUED_PER_PUSHER));
     let mut rx = services.notifier.subscribe();
-    // Most users have no pusher; the set of those who do is kept here rather than queried
-    // per member per event. It is read again when a pusher is set or removed, and every few
-    // seconds for changes that do not announce themselves (a logout drops its pushers).
-    let mut with_pushers: HashSet<OwnedUserId> = HashSet::new();
-    let mut refreshed: Option<Instant> = None;
-    let mut generation = 0;
+    let mut with_pushers = WithPushers {
+        users: HashSet::new(),
+        generation: 0,
+        refreshed: None,
+    };
+    let enqueue = |pusher: Pusher, notification: Arc<Value>| {
+        let key: PusherKey = (
+            pusher.user_id.clone(),
+            pusher.app_id.clone(),
+            pusher.pushkey.clone(),
+        );
+        let (start, dropped) = queues.push(&key, (Arc::new(pusher), notification));
+        if dropped {
+            tracing::warn!(user = %key.0, app = %key.1, "push gateway too far behind: its oldest notification was dropped");
+        }
+        if start {
+            let (services, outbound, queues) =
+                (Arc::clone(&services), outbound.clone(), Arc::clone(&queues));
+            tokio::spawn(async move {
+                while let Some((pusher, notification)) = queues.next(&key) {
+                    deliver(&services, &outbound, &pusher, &notification).await;
+                }
+            });
+        }
+    };
+    // The stream position up to which every event has been looked at: where a catch-up starts
+    // when the notifications run ahead of the worker. Events at or below `caught_up_to` came in
+    // a catch-up, and their notifications, still in the channel, are passed over.
+    let mut handled_upto = services
+        .store
+        .stream_positions()
+        .await
+        .map_or(0, |p| p.events);
+    let mut caught_up_to = 0;
     loop {
         let n = match rx.recv().await {
             Ok(n) => n,
             Err(tokio::sync::broadcast::error::RecvError::Lagged(lost)) => {
-                tracing::warn!(
+                // The channel dropped notifications this worker had no time for: read the
+                // events from the database instead, up to the position below which all are
+                // written, so that none goes unpushed.
+                let upto = match services.store.stream_positions().await {
+                    Ok(p) => p.events,
+                    Err(e) => {
+                        tracing::warn!(error = %e, lost, "the push worker fell behind and cannot catch up: notifications of these events are not pushed");
+                        continue;
+                    }
+                };
+                tracing::info!(
                     lost,
-                    "the push worker fell behind: notifications of these events are not pushed"
+                    from = handled_upto,
+                    upto,
+                    "the push worker fell behind: catching up from the database"
                 );
+                with_pushers.refresh(&services).await;
+                catch_up(&services, handled_upto, upto, &with_pushers.users, &enqueue).await;
+                handled_upto = handled_upto.max(upto);
+                caught_up_to = caught_up_to.max(upto);
                 continue;
             }
             Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
@@ -112,46 +188,64 @@ async fn worker(services: Arc<Services>, outbound: Outbound) {
         else {
             continue;
         };
-        let current = services
-            .pushers_generation
-            .load(std::sync::atomic::Ordering::Relaxed);
-        if current != generation || refreshed.is_none_or(|t| t.elapsed() > Duration::from_secs(10))
-        {
-            generation = current;
-            match services.store.users_with_pushers().await {
-                Ok(users) => with_pushers = users.into_iter().collect(),
-                Err(e) => tracing::warn!(error = %e, "could not list users with pushers"),
-            }
-            refreshed = Some(Instant::now());
-        }
-        if with_pushers.is_empty() {
+        if *stream_ordering <= caught_up_to {
             continue;
         }
-        let enqueue = |pusher: Pusher, notification: Arc<Value>| {
-            let key: PusherKey = (
-                pusher.user_id.clone(),
-                pusher.app_id.clone(),
-                pusher.pushkey.clone(),
-            );
-            let (start, dropped) = queues.push(&key, (Arc::new(pusher), notification));
-            if dropped {
-                tracing::warn!(user = %key.0, app = %key.1, "push gateway too far behind: its oldest notification was dropped");
-            }
-            if start {
-                let (services, outbound, queues) =
-                    (Arc::clone(&services), outbound.clone(), Arc::clone(&queues));
-                tokio::spawn(async move {
-                    while let Some((pusher, notification)) = queues.next(&key) {
-                        deliver(&services, &outbound, &pusher, &notification).await;
-                    }
-                });
-            }
-        };
-        if let Err(e) =
-            handle_event(&services, room_id, *stream_ordering, &with_pushers, enqueue).await
+        with_pushers.refresh(&services).await;
+        if !with_pushers.users.is_empty()
+            && let Err(e) = handle_event(
+                &services,
+                room_id,
+                *stream_ordering,
+                &with_pushers.users,
+                &enqueue,
+            )
+            .await
         {
             tracing::warn!(%room_id, error = %e, "push delivery failed");
         }
+        handled_upto = handled_upto.max(*stream_ordering);
+    }
+}
+
+/// Pushes for the events in `(since, upto]`, read from the database (after the notifications of
+/// some of them were lost).
+async fn catch_up(
+    services: &Services,
+    since: i64,
+    upto: i64,
+    with_pushers: &HashSet<OwnedUserId>,
+    enqueue: &impl Fn(Pusher, Arc<Value>),
+) {
+    if with_pushers.is_empty() {
+        return;
+    }
+    let mut from = since;
+    while from < upto {
+        let batch = match services
+            .store
+            .events_for_push(from, upto, CATCH_UP_BATCH)
+            .await
+        {
+            Ok(batch) => batch,
+            Err(e) => {
+                tracing::warn!(error = %e, from, upto, "the push worker could not read events to catch up with");
+                return;
+            }
+        };
+        let Some(last) = batch.last().map(|e| e.stream_ordering) else {
+            return;
+        };
+        for ev in batch {
+            if ev.outlier && invitee_of(&ev.pdu).is_none() {
+                continue;
+            }
+            let room_id = ev.pdu.room_id().to_owned();
+            if let Err(e) = push_for_event(services, &room_id, ev, with_pushers, enqueue).await {
+                tracing::warn!(%room_id, error = %e, "push delivery failed");
+            }
+        }
+        from = last;
     }
 }
 
@@ -162,7 +256,7 @@ async fn handle_event(
     room_id: &RoomId,
     stream_ordering: i64,
     with_pushers: &HashSet<OwnedUserId>,
-    enqueue: impl Fn(Pusher, Arc<Value>),
+    enqueue: &impl Fn(Pusher, Arc<Value>),
 ) -> ServiceResult<()> {
     let found = services
         .store
@@ -183,6 +277,18 @@ async fn handle_event(
             _ => return Ok(()),
         },
     };
+    push_for_event(services, room_id, ev, with_pushers, enqueue).await
+}
+
+/// Who of the room's members (and the user an invitation is for) is to be notified of `ev`;
+/// each of their HTTP pushers gets the notification.
+async fn push_for_event(
+    services: &Services,
+    room_id: &RoomId,
+    ev: asaroton_store::StoredEvent,
+    with_pushers: &HashSet<OwnedUserId>,
+    enqueue: &impl Fn(Pusher, Arc<Value>),
+) -> ServiceResult<()> {
     let mut recipients: Vec<OwnedUserId> = services
         .store
         .members(room_id, Some("join"))

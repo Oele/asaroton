@@ -572,6 +572,22 @@ impl EventStore for PostgresStore {
         row.map(StoredEvent::try_from).transpose()
     }
 
+    async fn events_for_push(&self, since: i64, upto: i64, limit: i64) -> Result<Vec<StoredEvent>> {
+        let rows: Vec<EventRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT {EVENT_COLUMNS} FROM events e JOIN rooms r ON r.room_id = e.room_id
+              WHERE e.stream_ordering > $1 AND e.stream_ordering <= $2
+                AND NOT e.rejected AND NOT e.soft_failed
+                AND (NOT e.outlier OR e.event_type = 'm.room.member')
+              ORDER BY e.stream_ordering ASC LIMIT $3"
+        )))
+        .bind(since)
+        .bind(upto)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(StoredEvent::try_from).collect()
+    }
+
     async fn get_events(&self, event_ids: &[OwnedEventId]) -> Result<Vec<StoredEvent>> {
         let rows: Vec<EventRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "SELECT {EVENT_COLUMNS} FROM events e JOIN rooms r ON r.room_id = e.room_id WHERE e.event_id = ANY($1)"

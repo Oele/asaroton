@@ -433,6 +433,15 @@ pub trait EventStore: Send + Sync {
     ) -> Result<Vec<StoredEvent>>;
     /// Latest stream ordering of any event, i.e. the current sync position.
     async fn max_stream_ordering(&self) -> Result<StreamOrdering>;
+    /// Events in `(since, upto]` in stream order, at most `limit`, for the push worker to
+    /// catch up with: the rooms' events and the outlier member events (invitations from other
+    /// servers), neither rejected nor soft-failed.
+    async fn events_for_push(
+        &self,
+        since: StreamOrdering,
+        upto: StreamOrdering,
+        limit: i64,
+    ) -> Result<Vec<StoredEvent>>;
     /// Rooms that had events in `(from, to]`.
     async fn rooms_with_events_in_range(
         &self,

@@ -42,7 +42,14 @@ impl Default for Notifier {
 
 impl Notifier {
     pub fn new() -> Self {
-        let (tx, _rx) = broadcast::channel(4096);
+        // `ASAROTON_NOTIFIER_CAPACITY` is for tests: a small channel lets a lab make a
+        // listener fall behind on purpose (scripts/pushcatchuptest.py).
+        let capacity = std::env::var("ASAROTON_NOTIFIER_CAPACITY")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(4096);
+        let (tx, _rx) = broadcast::channel(capacity);
         Self { tx }
     }
 
