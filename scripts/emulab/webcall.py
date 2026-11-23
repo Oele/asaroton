@@ -58,10 +58,17 @@ with sync_playwright() as p:
     page.fill("input[name=username], input[autocomplete=username]", user)
     page.fill("input[type=password]", pw)
     page.keyboard.press("Enter")
-    time.sleep(10)
+    # An account with cross-signing keys first gets "Confirm your digital identity", and setting
+    # up its crypto can take longer than ten seconds: wait until the login page is left or that
+    # screen shows (its close button is labelled "Skip").
+    for _ in range(60):
+        time.sleep(1)
+        if "#/login" not in page.url or page.get_by_text("Confirm your digital identity").count():
+            break
+    time.sleep(3)
     page.screenshot(path=f"{OUT}/web-postlogin.png")
     note("post-login url " + page.url)
-    for label in ["Skip verification", "I'll verify later", "Verify later", "Skip", "Not now", "Dismiss"]:
+    for label in ["Skip verification", "I'll verify later", "Verify later", "Skip", "Not now", "Dismiss", "Close"]:
         try:
             b = page.get_by_role("button", name=label).first
             if b.is_visible(timeout=1500):
