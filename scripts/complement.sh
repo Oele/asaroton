@@ -7,6 +7,12 @@ cd "$(dirname "$0")/.."
 REPO=$PWD
 COMPLEMENT_DIR=${COMPLEMENT_DIR:-$HOME/src/complement}
 IMAGE=${IMAGE:-complement-asaroton:latest}
+# Docker and Complement's Docker client find a rootless daemon through DOCKER_HOST, which a
+# login shell sets but cron does not: without it both go to /var/run/docker.sock and are
+# refused, and every test fails at setup. Use this user's rootless socket when there is one.
+if [ -z "${DOCKER_HOST:-}" ] && [ -S "/run/user/$(id -u)/docker.sock" ]; then
+    export DOCKER_HOST="unix:///run/user/$(id -u)/docker.sock"
+fi
 
 # Two Complement runs on one Docker daemon remove each other's homeserver containers and both
 # fail with "connection refused". Wait for a run that is already going instead. The lock is
