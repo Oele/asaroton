@@ -129,8 +129,11 @@ async fn persist_one(
     let sql = format!(
         "WITH ev AS (
             INSERT INTO events (stream_ordering, event_id, room_id, event_type, state_key, sender,
-                origin_server_ts, depth, json, state_group, rejected, soft_failed, outlier, received_ts)
-            VALUES (COALESCE($1::bigint, nextval('{seq}')), $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                origin_server_ts, depth, json, state_group, rejected, soft_failed, outlier, received_ts, topo)
+            VALUES (COALESCE($1::bigint, nextval('{seq}')), $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+                -- The local topological order (tracker #99): after the known prev events, not
+                -- the wire depth the sending server chose; the wire depth only without them.
+                COALESCE((SELECT MAX(COALESCE(p.topo, p.depth)) + 1 FROM events p WHERE p.event_id = ANY($15::text[])), $8))
             RETURNING stream_ordering
          ),
          edges AS (
@@ -1319,10 +1322,10 @@ impl EventStore for PostgresStore {
                 SELECT ee.prev_event_id, w.dist + 1 FROM event_edges ee JOIN walk w ON ee.event_id = w.event_id
                 WHERE w.dist < $3
              )
-             SELECT {EVENT_COLUMNS} FROM (SELECT DISTINCT event_id FROM walk) w
+             SELECT {EVENT_COLUMNS} FROM (SELECT event_id, MIN(dist) AS dist FROM walk GROUP BY event_id) w
              JOIN events e ON e.event_id = w.event_id JOIN rooms r ON r.room_id = e.room_id
              WHERE NOT e.outlier
-             ORDER BY e.depth DESC, e.stream_ordering DESC LIMIT $3"
+             ORDER BY w.dist ASC, COALESCE(e.topo, e.depth) DESC, e.stream_ordering DESC LIMIT $3"
         )))
         .bind(strings(latest))
         .bind(room_id.as_str())
@@ -1355,7 +1358,7 @@ impl EventStore for PostgresStore {
              SELECT {EVENT_COLUMNS} FROM (SELECT event_id, MIN(dist) AS dist FROM walk GROUP BY event_id) w
              JOIN events e ON e.event_id = w.event_id JOIN rooms r ON r.room_id = e.room_id
              WHERE e.room_id = $3 AND NOT (e.event_id = ANY($2)) AND e.depth >= $5 AND NOT e.outlier
-             ORDER BY w.dist ASC, e.depth DESC, e.stream_ordering DESC LIMIT $4"
+             ORDER BY w.dist ASC, COALESCE(e.topo, e.depth) DESC, e.stream_ordering DESC LIMIT $4"
         )))
         .bind(strings(latest))
         .bind(strings(earliest))
@@ -1406,10 +1409,21 @@ impl EventStore for PostgresStore {
         upto: StreamOrdering,
         limit: usize,
     ) -> Result<Vec<StoredEvent>> {
+        // Candidates from both indexed orders, the newest by depth and the newest to arrive, then
+        // the newest of them by the local order (tracker #99): events that a server built on top
+        // of the room with a reset (too low) depth arrived last and come first; a fork's state
+        // event that arrived late keeps its low place.
         let sql = format!(
             "SELECT {EVENT_COLUMNS} FROM events e JOIN rooms r ON r.room_id = e.room_id
-             WHERE e.room_id = $1 AND e.stream_ordering <= $2 AND NOT e.rejected AND NOT e.outlier AND NOT e.soft_failed
-             ORDER BY e.depth DESC, e.stream_ordering DESC LIMIT $3"
+             WHERE e.event_id IN (
+                (SELECT event_id FROM events
+                  WHERE room_id = $1 AND stream_ordering <= $2 AND NOT rejected AND NOT outlier AND NOT soft_failed
+                  ORDER BY depth DESC, stream_ordering DESC LIMIT $3)
+                UNION
+                (SELECT event_id FROM events
+                  WHERE room_id = $1 AND stream_ordering <= $2 AND NOT rejected AND NOT outlier AND NOT soft_failed
+                  ORDER BY stream_ordering DESC LIMIT $3))
+             ORDER BY COALESCE(e.topo, e.depth) DESC, e.stream_ordering DESC LIMIT $3"
         );
         let rows: Vec<EventRow> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
             .bind(room_id.as_str())

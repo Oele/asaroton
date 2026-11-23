@@ -330,12 +330,17 @@ impl Federation {
             }
         }
 
-        // Everything in dependency order.
-        let mut ordered: Vec<Pdu> = to_check
-            .iter()
-            .filter_map(|id| all.get(id).cloned())
-            .collect();
-        ordered.sort_by_key(|p| u64::from(p.depth()));
+        // Everything in dependency order: after the auth events it cites, not by the wire
+        // depth, which the sending server chose (tracker #99).
+        let ordered: Vec<Pdu> = auth_order(
+            to_check
+                .iter()
+                .filter_map(|id| all.get(id).cloned())
+                .collect(),
+            |p| p.event_id().to_string(),
+            |p| p.auth_events().iter().map(ToString::to_string).collect(),
+            |p| u64::from(p.depth()),
+        );
 
         let mut rejected: HashSet<OwnedEventId> = HashSet::new();
         let mut unchecked: HashSet<OwnedEventId> = HashSet::new();
@@ -1389,5 +1394,97 @@ impl PduFederationJson for Pdu {
             );
         }
         obj
+    }
+}
+
+/// Orders events so that each comes after the auth events it cites among them (Kahn's
+/// algorithm), ties by depth and then ID. A sort by the wire depth alone can put an auth event
+/// after an event citing it, and that event would then not inherit the auth event's rejection
+/// (tracker #99). Events in a cycle, which no valid chain has, follow at the end in depth order.
+pub(crate) fn auth_order<T>(
+    items: Vec<T>,
+    id: impl Fn(&T) -> String,
+    auths: impl Fn(&T) -> Vec<String>,
+    depth: impl Fn(&T) -> u64,
+) -> Vec<T> {
+    use std::collections::{BTreeSet, HashMap};
+    let ids: Vec<String> = items.iter().map(&id).collect();
+    let depths: Vec<u64> = items.iter().map(&depth).collect();
+    let index: HashMap<&str, usize> = ids
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.as_str(), i))
+        .collect();
+    let n = items.len();
+    let mut pending = vec![0usize; n];
+    let mut dependents: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (i, item) in items.iter().enumerate() {
+        let mut cited = HashSet::new();
+        for a in auths(item) {
+            if let Some(&j) = index.get(a.as_str())
+                && j != i
+                && cited.insert(j)
+            {
+                pending[i] += 1;
+                dependents[j].push(i);
+            }
+        }
+    }
+    let mut ready: BTreeSet<(u64, &str, usize)> = (0..n)
+        .filter(|&i| pending[i] == 0)
+        .map(|i| (depths[i], ids[i].as_str(), i))
+        .collect();
+    let mut order = Vec::with_capacity(n);
+    let mut placed = vec![false; n];
+    while let Some((_, _, i)) = ready.pop_first() {
+        order.push(i);
+        placed[i] = true;
+        for &d in &dependents[i] {
+            pending[d] -= 1;
+            if pending[d] == 0 {
+                ready.insert((depths[d], ids[d].as_str(), d));
+            }
+        }
+    }
+    let mut rest: Vec<usize> = (0..n).filter(|&i| !placed[i]).collect();
+    rest.sort_by_key(|&i| (depths[i], ids[i].as_str()));
+    order.extend(rest);
+    let mut slots: Vec<Option<T>> = items.into_iter().map(Some).collect();
+    order.into_iter().filter_map(|i| slots[i].take()).collect()
+}
+
+#[cfg(test)]
+mod auth_order_tests {
+    use super::auth_order;
+
+    fn order(items: &[(&str, &[&str], u64)]) -> Vec<String> {
+        auth_order(
+            items.to_vec(),
+            |t| t.0.to_owned(),
+            |t| t.1.iter().map(|s| (*s).to_owned()).collect(),
+            |t| t.2,
+        )
+        .into_iter()
+        .map(|t| t.0.to_owned())
+        .collect()
+    }
+
+    #[test]
+    fn auth_events_come_first_whatever_their_depth() {
+        // b cites a, c cites b, but the depths say the opposite.
+        let items: &[(&str, &[&str], u64)] = &[("c", &["b"], 0), ("b", &["a"], 1), ("a", &[], 5)];
+        assert_eq!(order(items), ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn independent_events_go_by_depth_then_id_and_outside_auth_events_are_ignored() {
+        let items: &[(&str, &[&str], u64)] = &[("y", &["known"], 2), ("x", &[], 2), ("w", &[], 1)];
+        assert_eq!(order(items), ["w", "x", "y"]);
+    }
+
+    #[test]
+    fn a_cycle_loses_nothing() {
+        let items: &[(&str, &[&str], u64)] = &[("p", &["q"], 3), ("q", &["p"], 1), ("r", &[], 9)];
+        assert_eq!(order(items), ["r", "q", "p"]);
     }
 }

@@ -382,6 +382,10 @@ mod tests {
                 20,
                 "d7b2e1624540e268479fa742be074fb74d51962824f1cb3b1d4686b43bba425ba0f04642321eabd7a22e0a4f508cbe51",
             ),
+            (
+                21,
+                "a774749609d1b2086e6e96605af104ec3d4aeee84f55d4662845dedd87a8e4364196766b09d3a21115fca8e8a15bc726",
+            ),
         ];
         let actual: Vec<(i64, String)> = MIGRATOR
             .iter()
