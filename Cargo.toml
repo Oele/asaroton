@@ -14,8 +14,8 @@ authors = ["The asaroton authors"]
 # The SFU that runs in asaroton's process (`[rtc.livekit] in_process`): musivum, a port of
 # LiveKit's media server, Apache-2.0 like asaroton. Pinned to a commit: its main moves, and it is
 # not on crates.io. Move the six revs together.
-musivum = { git = "https://github.com/Oele/musivum", rev = "53576a345eaf44939115a44e254aad73dbbfaf8e" }
-musivum-server = { git = "https://github.com/Oele/musivum", rev = "53576a345eaf44939115a44e254aad73dbbfaf8e" }
+musivum = { git = "https://github.com/Oele/musivum", rev = "e2d73daabfd881cee06804a2f2b88b0cc40c65d6" }
+musivum-server = { git = "https://github.com/Oele/musivum", rev = "e2d73daabfd881cee06804a2f2b88b0cc40c65d6" }
 # The OAuth 2.0 authorization server that runs in asaroton's process (`[oauth]`): lithostroton,
 # Apache-2.0, written from the Matrix spec and the RFCs. Pinned to a commit.
 lithostroton = { git = "https://github.com/Oele/lithostroton", rev = "afb489d17f617cc6ab84cc04dafe8cc05b2c8728" }
@@ -156,7 +156,7 @@ opt-level = 2
 # applies only from the workspace that is built, so it is repeated here, from the same rev.
 # Without it the build takes the unpatched crates and lacks musivum's codec and RTP fixes.
 [patch.crates-io]
-rtc-rtp = { git = "https://github.com/Oele/musivum", rev = "53576a345eaf44939115a44e254aad73dbbfaf8e" }
-rtc = { git = "https://github.com/Oele/musivum", rev = "53576a345eaf44939115a44e254aad73dbbfaf8e" }
-rtc-ice = { git = "https://github.com/Oele/musivum", rev = "53576a345eaf44939115a44e254aad73dbbfaf8e" }
-rtc-dtls = { git = "https://github.com/Oele/musivum", rev = "53576a345eaf44939115a44e254aad73dbbfaf8e" }
+rtc-rtp = { git = "https://github.com/Oele/musivum", rev = "e2d73daabfd881cee06804a2f2b88b0cc40c65d6" }
+rtc = { git = "https://github.com/Oele/musivum", rev = "e2d73daabfd881cee06804a2f2b88b0cc40c65d6" }
+rtc-ice = { git = "https://github.com/Oele/musivum", rev = "e2d73daabfd881cee06804a2f2b88b0cc40c65d6" }
+rtc-dtls = { git = "https://github.com/Oele/musivum", rev = "e2d73daabfd881cee06804a2f2b88b0cc40c65d6" }
