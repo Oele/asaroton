@@ -535,12 +535,19 @@ pub async fn event(
         .get_event(&req.body.event_id)
         .await?
         .ok_or_else(|| Error::not_found("Event not found."))?;
-    require_in_room(&app, &origin, ev.pdu.room_id()).await?;
-    let rules = rules_for(&app, ev.pdu.room_id()).await?;
+    let room_id = ev.pdu.room_id().to_owned();
+    require_in_room(&app, &origin, &room_id).await?;
+    let rules = rules_for(&app, &room_id).await?;
+    // The same history-visibility rule as backfill and get_missing_events: an event the
+    // origin's users may not see goes out redacted (tracker #98).
+    let pdu = filter_visible_to_server(&app, &origin, vec![ev], &rules)
+        .await?
+        .pop()
+        .ok_or_else(|| Error::not_found("Event not found."))?;
     Ok(get_event::v1::Response::new(
         app.config.server_name.clone(),
         ruma::MilliSecondsSinceUnixEpoch::now(),
-        raw_pdu(&ev.pdu, &rules).ok_or_else(|| Error::internal("serialising event"))?,
+        raw_pdu(&pdu, &rules).ok_or_else(|| Error::internal("serialising event"))?,
     ))
 }
 
@@ -672,6 +679,16 @@ pub async fn event_auth(
 ) -> Result<get_event_authorization::v1::Response> {
     let origin = req.origin()?.clone();
     require_in_room(&app, &origin, &req.body.room_id).await?;
+    // The event must be in the room the origin was checked for, or a server in any room could
+    // read the auth chain of an event in another (tracker #98).
+    let ev = app
+        .store
+        .get_event(&req.body.event_id)
+        .await?
+        .ok_or_else(|| Error::not_found("Event not found."))?;
+    if ev.pdu.room_id() != req.body.room_id {
+        return Err(Error::not_found("Event not in room."));
+    }
     let rules = rules_for(&app, &req.body.room_id).await?;
     let mut chain_ids = app
         .store
