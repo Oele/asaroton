@@ -520,13 +520,18 @@ impl EventStore for PostgresStore {
         if room_ids.is_empty() {
             return Ok(std::collections::HashMap::new());
         }
+        // One backward probe of events(room_id, stream_ordering) per room, not a MAX over every
+        // event of the rooms (tracker #92: the most frequent slow statement on cluephone.org).
         let ids: Vec<String> = room_ids.iter().map(ToString::to_string).collect();
         let rows = match event_types {
             Some(types) => {
                 sqlx::query(
-                    "SELECT room_id, MAX(stream_ordering) FROM events
-                     WHERE room_id = ANY($1) AND event_type = ANY($2) AND NOT outlier AND NOT rejected AND NOT soft_failed
-                     GROUP BY room_id",
+                    "SELECT r.room_id, e.stream_ordering FROM unnest($1::text[]) AS r(room_id)
+                     CROSS JOIN LATERAL (
+                        SELECT stream_ordering FROM events
+                         WHERE room_id = r.room_id AND event_type = ANY($2)
+                           AND NOT outlier AND NOT rejected AND NOT soft_failed
+                         ORDER BY stream_ordering DESC LIMIT 1) e",
                 )
                 .bind(&ids)
                 .bind(types)
@@ -535,9 +540,11 @@ impl EventStore for PostgresStore {
             }
             None => {
                 sqlx::query(
-                    "SELECT room_id, MAX(stream_ordering) FROM events
-                     WHERE room_id = ANY($1) AND NOT outlier AND NOT rejected AND NOT soft_failed
-                     GROUP BY room_id",
+                    "SELECT r.room_id, e.stream_ordering FROM unnest($1::text[]) AS r(room_id)
+                     CROSS JOIN LATERAL (
+                        SELECT stream_ordering FROM events
+                         WHERE room_id = r.room_id AND NOT outlier AND NOT rejected AND NOT soft_failed
+                         ORDER BY stream_ordering DESC LIMIT 1) e",
                 )
                 .bind(&ids)
                 .fetch_all(&self.pool)
