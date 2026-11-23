@@ -1,0 +1,8 @@
+# cargo audit settings (the watch job runs `cargo audit` on this tree).
+[advisories]
+ignore = [
+    # libsqlite3-sys (C SQLite CVE): in Cargo.lock only through sqlx's optional SQLite
+    # driver, which asaroton never enables (sqlx is built with `postgres` only), so it is
+    # not compiled; 0.39 is outside that driver's version range. Drop this when sqlx moves.
+    "RUSTSEC-2026-0459",
+]

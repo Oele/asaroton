@@ -50,9 +50,11 @@ pub fn normalise_email(raw: &str) -> Option<String> {
         && !domain.ends_with('.')
         && !domain.contains('@')
         && email.len() <= 254
-        && !email
-            .chars()
-            .any(|c| c.is_whitespace() || c.is_control() || c == '<' || c == '>');
+        // No quoted local parts or escapes: mail libraries and servers disagree on them, so the
+        // code could go to another address than the one shown (RUSTSEC-2026-0563).
+        && !email.chars().any(|c| {
+            c.is_whitespace() || c.is_control() || matches!(c, '<' | '>' | '"' | '\\')
+        });
     ok.then_some(email)
 }
 
@@ -287,5 +289,12 @@ mod tests {
         assert_eq!(normalise_email("ann example@example.org"), None);
         assert_eq!(normalise_email("ann@@example.org"), None);
         assert_eq!(normalise_email("<ann@example.org>"), None);
+        // Quoted local parts and escapes are refused (RUSTSEC-2026-0563).
+        assert_eq!(normalise_email("\"victim@example.org\"@evil.example"), None);
+        assert_eq!(normalise_email("ann\\@x@example.org"), None);
+        assert_eq!(
+            normalise_email("ann+tag@example.org"),
+            Some("ann+tag@example.org".into())
+        );
     }
 }
