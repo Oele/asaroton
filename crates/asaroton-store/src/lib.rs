@@ -578,30 +578,56 @@ pub trait ThreadSubscriptionStore: Send + Sync {
 #[async_trait]
 pub trait DelayedEventStore: Send + Sync {
     async fn add_delayed_event(&self, event: &DelayedEvent) -> Result<()>;
+    /// A pending delayed event (not yet sent or cancelled).
     async fn get_delayed_event(&self, delay_id: &str) -> Result<Option<DelayedEvent>>;
-    /// The delayed event a device already scheduled under this transaction ID, if any.
+    /// A delayed event, pending or kept after it was sent or cancelled.
+    async fn get_delayed_event_any(&self, delay_id: &str) -> Result<Option<DelayedEvent>>;
+    /// The delayed event a device already scheduled under this transaction ID, if any (also
+    /// one that was sent or cancelled since, so a retried request gets the same delay ID).
     async fn delayed_event_by_txn(
         &self,
         user_id: &UserId,
         device_id: Option<&DeviceId>,
         txn_id: &str,
     ) -> Result<Option<DelayedEvent>>;
+    /// The user's pending delayed events.
     async fn delayed_events_for_user(&self, user_id: &UserId) -> Result<Vec<DelayedEvent>>;
-    /// Removes the event; `false` if it was not there.
-    async fn remove_delayed_event(&self, delay_id: &str) -> Result<bool>;
-    /// Starts the timeout over from `now`; `false` if the event was not there.
+    /// Marks a pending event as sent or cancelled at `now`; `false` if it was not pending (so
+    /// of two callers only one goes on to send it). The outcome is recorded separately.
+    async fn finalise_delayed_event(&self, delay_id: &str, now: i64) -> Result<bool>;
+    /// Makes an event pending again after an explicit send failed (the spec keeps it scheduled).
+    async fn unfinalise_delayed_event(&self, delay_id: &str) -> Result<()>;
+    /// Records how a finalised event ended: the event it became (also kept in
+    /// `event_delay_ids` for `unsigned.delay_id`), or the error that cancelled it.
+    async fn record_delayed_event_outcome(
+        &self,
+        delay_id: &str,
+        event_id: Option<&ruma::EventId>,
+        error: Option<&serde_json::Value>,
+    ) -> Result<()>;
+    /// Deletes finalised events older than `before`, and beyond the newest `keep_per_user` of
+    /// each user; returns how many.
+    async fn prune_finalised_delayed_events(&self, before: i64, keep_per_user: i64) -> Result<u64>;
+    /// The delay IDs of those of `event_ids` that `user_id` sent from a delayed event.
+    async fn delay_ids_for_events(
+        &self,
+        user_id: &UserId,
+        event_ids: &[ruma::OwnedEventId],
+    ) -> Result<std::collections::HashMap<ruma::OwnedEventId, String>>;
+    /// Starts the timeout of a pending event over from `now`; `false` if it is not pending.
     async fn restart_delayed_event(&self, delay_id: &str, now: i64) -> Result<bool>;
-    /// Events whose timeout has passed at `now`, oldest first.
+    /// Pending events whose timeout has passed at `now`, oldest first.
     async fn due_delayed_events(&self, now: i64) -> Result<Vec<DelayedEvent>>;
-    /// When the next event is due (ms), if any is pending.
+    /// When the next pending event is due (ms), if any.
     async fn next_delayed_event_due(&self) -> Result<Option<i64>>;
-    /// Drops delayed state events for a state tuple that was just overwritten; returns how many.
+    /// Cancels pending delayed state events for a state tuple; returns how many.
     async fn remove_delayed_state_events(
         &self,
         room_id: &RoomId,
         event_type: &str,
         state_key: &str,
     ) -> Result<u64>;
+    /// How many pending delayed state events there are.
     async fn count_delayed_state_events(&self) -> Result<u64>;
 }
 

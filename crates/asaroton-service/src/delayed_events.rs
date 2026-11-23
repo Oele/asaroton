@@ -15,6 +15,20 @@ pub const MAX_DELAY_MS: i64 = 24 * 60 * 60 * 1000;
 /// How many delayed events one user may have scheduled at once. A call needs one or two per
 /// device; this leaves ample room and still bounds what one account can queue.
 pub const MAX_SCHEDULED: usize = 100;
+/// How long sent and cancelled delayed events are kept for `GET /delayed_events/{delayId}`
+/// (the spec suggests 7 days), and at most how many per user (it suggests 1000).
+const KEEP_FINALISED_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+const KEEP_FINALISED_PER_USER: i64 = 1000;
+/// How often the worker prunes them.
+const PRUNE_EVERY: Duration = Duration::from_hours(1);
+
+/// Which API a request came through: the merged spec's stable endpoints (v1.20) answer some
+/// cases differently from the proposal's unstable ones, which keep their old behaviour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DelayedApi {
+    Unstable,
+    Stable,
+}
 
 /// Scheduler state shared between the API and the worker.
 ///
@@ -61,6 +75,7 @@ impl Services {
         content: Value,
         delay_ms: i64,
         txn_id: Option<&str>,
+        api: DelayedApi,
     ) -> Result<String> {
         if delay_ms <= 0 {
             return Err(Error::invalid_param(
@@ -71,7 +86,10 @@ impl Services {
             // The proposal's own error code, under its unstable name while it is unstable.
             // Clients take it as the cue to read the limit from the capabilities and retry.
             return Err(Error::custom(
-                "ORG.MATRIX.MSC4140_DELAY_TOO_LARGE",
+                match api {
+                    DelayedApi::Unstable => "ORG.MATRIX.MSC4140_DELAY_TOO_LARGE",
+                    DelayedApi::Stable => "M_DELAY_TOO_LARGE",
+                },
                 http::StatusCode::BAD_REQUEST,
                 format!("The delay must not exceed {MAX_DELAY_MS} ms."),
             ));
@@ -127,6 +145,7 @@ impl Services {
             delay_ms,
             running_since: now_ts(),
             txn_id: txn_id.map(ToOwned::to_owned),
+            finalised: None,
         };
         self.store.add_delayed_event(&ev).await?;
         self.delayed.wake.notify_one();
@@ -155,38 +174,147 @@ impl Services {
             .collect())
     }
 
+    /// One of the user's delayed events as `GET /v1/delayed_events/{delayId}` shows it,
+    /// pending or kept after it was sent or cancelled.
+    pub async fn delayed_event_view(&self, user_id: &UserId, delay_id: &str) -> Result<Value> {
+        let ev = self
+            .store
+            .get_delayed_event_any(delay_id)
+            .await?
+            .filter(|ev| ev.user_id == user_id)
+            .ok_or_else(|| Error::not_found("No such delayed event."))?;
+        let mut v = json!({
+            "delay_id": ev.delay_id,
+            "room_id": ev.room_id,
+            "type": ev.event_type,
+            "delay_ms": ev.delay_ms,
+            "delayed_since_ts": ev.running_since,
+            "content": ev.content,
+        });
+        if let Some(k) = ev.state_key {
+            v["state_key"] = Value::String(k);
+        }
+        if let Some(f) = ev.finalised {
+            let mut fin = json!({ "finalised_ts": f.ts });
+            if let Some(id) = f.event_id {
+                fin["event_id"] = Value::String(id);
+            }
+            if let Some(err) = f.error {
+                fin["error"] = err;
+            }
+            v["finalised"] = fin;
+        }
+        Ok(v)
+    }
+
     /// Cancels, restarts or sends one of the user's delayed events.
+    ///
+    /// Through the unstable API an event that was already sent or cancelled is gone (404), as
+    /// it always was. Through the stable one it is kept for a while: sending a sent one or
+    /// cancelling a cancelled one succeeds, the opposite or a restart is a 409. A send that
+    /// fails answers with the error of sending the event and leaves it scheduled.
     pub async fn update_delayed_event(
         &self,
         user_id: &UserId,
         delay_id: &str,
         action: UpdateAction,
+        api: DelayedApi,
     ) -> Result<()> {
-        let ev = self
-            .store
-            .get_delayed_event(delay_id)
-            .await?
-            .filter(|ev| ev.user_id == user_id)
-            .ok_or_else(|| Error::not_found("No such delayed event."))?;
-        match action {
-            UpdateAction::Cancel => {
-                self.remove_delayed(&ev).await?;
-            }
-            UpdateAction::Restart => {
-                self.store.restart_delayed_event(delay_id, now_ts()).await?;
-            }
-            UpdateAction::Send => {
-                if self.remove_delayed(&ev).await? {
-                    self.fire_delayed(ev).await?;
+        // A second round only when another request or the worker finalised the event between
+        // reading it and acting on it.
+        for _ in 0..2 {
+            let ev = self
+                .store
+                .get_delayed_event_any(delay_id)
+                .await?
+                .filter(|ev| ev.user_id == user_id)
+                .ok_or_else(|| Error::not_found("No such delayed event."))?;
+            if let Some(fin) = &ev.finalised {
+                if api == DelayedApi::Unstable {
+                    return Err(Error::not_found("No such delayed event."));
                 }
+                let conflict = |msg: &str| {
+                    Error::custom("M_UNKNOWN", http::StatusCode::CONFLICT, msg.to_owned())
+                };
+                return match (action, fin.event_id.is_some()) {
+                    (UpdateAction::Send, true) | (UpdateAction::Cancel, false) => Ok(()),
+                    (UpdateAction::Send, false) => Err(conflict(
+                        "The delayed event was cancelled and cannot be sent.",
+                    )),
+                    (UpdateAction::Cancel, true) => Err(conflict(
+                        "The delayed event was sent and cannot be cancelled.",
+                    )),
+                    (UpdateAction::Restart, _) => Err(conflict(
+                        "The delayed event was sent or cancelled and cannot be restarted.",
+                    )),
+                };
+            }
+            let done = match action {
+                UpdateAction::Cancel => {
+                    self.store
+                        .finalise_delayed_event(delay_id, now_ts())
+                        .await?
+                }
+                UpdateAction::Restart => {
+                    self.store.restart_delayed_event(delay_id, now_ts()).await?
+                }
+                UpdateAction::Send => {
+                    if self
+                        .store
+                        .finalise_delayed_event(delay_id, now_ts())
+                        .await?
+                    {
+                        match self.fire_delayed(ev).await {
+                            Ok(event_id) => {
+                                self.store
+                                    .record_delayed_event_outcome(delay_id, Some(&event_id), None)
+                                    .await?;
+                            }
+                            Err(e) => {
+                                self.store.unfinalise_delayed_event(delay_id).await?;
+                                self.delayed.wake.notify_one();
+                                return Err(e);
+                            }
+                        }
+                        true
+                    } else {
+                        false
+                    }
+                }
+            };
+            if done {
+                self.delayed.wake.notify_one();
+                return Ok(());
             }
         }
-        self.delayed.wake.notify_one();
-        Ok(())
+        Err(Error::not_found("No such delayed event."))
     }
 
-    async fn remove_delayed(&self, ev: &DelayedEvent) -> Result<bool> {
-        Ok(self.store.remove_delayed_event(&ev.delay_id).await?)
+    /// Sends a due event (the worker): records the event it became, or cancels it with the
+    /// error that kept it from being sent, as the spec requires.
+    async fn send_due(&self, ev: DelayedEvent) -> Result<()> {
+        let delay_id = ev.delay_id.clone();
+        if !self
+            .store
+            .finalise_delayed_event(&delay_id, now_ts())
+            .await?
+        {
+            return Ok(());
+        }
+        match self.fire_delayed(ev).await {
+            Ok(event_id) => {
+                self.store
+                    .record_delayed_event_outcome(&delay_id, Some(&event_id), None)
+                    .await?;
+            }
+            Err(e) => {
+                tracing::debug!(delay_id, error = %e, "delayed event not sent: cancelled");
+                self.store
+                    .record_delayed_event_outcome(&delay_id, None, Some(&e.to_error_json()))
+                    .await?;
+            }
+        }
+        Ok(())
     }
 
     async fn fire_delayed(&self, ev: DelayedEvent) -> Result<OwnedEventId> {
@@ -218,28 +346,37 @@ impl Services {
     }
 }
 
-/// Starts the worker that sends delayed events when their timeout passes.
+/// Starts the worker that sends delayed events when their timeout passes, and prunes the
+/// sent and cancelled ones it keeps.
 pub fn start_worker(services: Arc<Services>) {
     tokio::spawn(async move {
+        let mut last_prune: Option<tokio::time::Instant> = None;
         loop {
             match services.store.due_delayed_events(now_ts()).await {
                 Ok(due) => {
                     for ev in due {
                         let delay_id = ev.delay_id.clone();
-                        match services.remove_delayed(&ev).await {
-                            Ok(true) => {
-                                if let Err(e) = services.fire_delayed(ev).await {
-                                    tracing::debug!(delay_id, error = %e, "delayed event not sent");
-                                }
-                            }
-                            Ok(false) => {}
-                            Err(e) => {
-                                tracing::warn!(delay_id, error = %e, "delayed event removal failed");
-                            }
+                        if let Err(e) = services.send_due(ev).await {
+                            tracing::warn!(delay_id, error = %e, "sending a due delayed event failed");
                         }
                     }
                 }
                 Err(e) => tracing::warn!(error = %e, "loading due delayed events failed"),
+            }
+            if last_prune.is_none_or(|t| t.elapsed() >= PRUNE_EVERY) {
+                last_prune = Some(tokio::time::Instant::now());
+                match services
+                    .store
+                    .prune_finalised_delayed_events(
+                        now_ts() - KEEP_FINALISED_MS,
+                        KEEP_FINALISED_PER_USER,
+                    )
+                    .await
+                {
+                    Ok(0) => {}
+                    Ok(n) => tracing::debug!(n, "pruned sent and cancelled delayed events"),
+                    Err(e) => tracing::warn!(error = %e, "pruning delayed events failed"),
+                }
             }
             let next = services.store.next_delayed_event_due().await.ok().flatten();
             let wait = next.map_or(Duration::from_secs(60), |due| {

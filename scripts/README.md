@@ -66,6 +66,7 @@ They need `cargo build`, the development database role from `.env.example`, and 
 | `scripts/remotemediatest.py` | Media fetched from other servers |
 | `scripts/inviteblocktest.py URL` | Invite filtering (MSC4155) |
 | `scripts/delayedeventstest.py URL` | Delayed events (MSC4140) |
+| `scripts/delayedstabletest.py` | Delayed events through the stable API (#87): schedule, GET with `finalised`, send/cancel/restart with the 200 and 409 cases, a failed send left scheduled, the worker sending and cancelling with the error, `unsigned.delay_id` for the sender only (`/messages`, `/sync`, sliding sync); the unstable API unchanged |
 | `scripts/keyuploadtest.py URL` | A device is visible to others only once its one-time keys are there |
 | `scripts/rtctest.py` | The MatrixRTC endpoints against a local LiveKit (see the note on its key in the script) |
 | `scripts/fedrtctest.py` | A call across two homeservers |

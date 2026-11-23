@@ -173,11 +173,26 @@ pub fn routes(router: Router<AppState>) -> Router<AppState> {
         _,
         _,
     >(r, &[], thread_subscriptions::changes);
-    // Delayed events (MSC4140).
-    let r = r.route(
-        "/_matrix/client/unstable/org.matrix.msc4140/rooms/{room_id}/delayed_event/{event_type}/{txn_id}",
-        axum::routing::put(delayed_events::schedule),
-    );
+    // Delayed events (MSC4140): the proposal's unstable endpoints and the spec's stable ones
+    // (v1.20), which keep sent and cancelled events for a while and answer some cases
+    // differently.
+    let r = r
+        .route(
+            "/_matrix/client/unstable/org.matrix.msc4140/rooms/{room_id}/delayed_event/{event_type}/{txn_id}",
+            axum::routing::put(delayed_events::schedule),
+        )
+        .route(
+            "/_matrix/client/v3/rooms/{room_id}/delayed_event/{event_type}/{txn_id}",
+            axum::routing::put(delayed_events::schedule_stable),
+        )
+        .route(
+            "/_matrix/client/v1/delayed_events/{delay_id}",
+            axum::routing::get(delayed_events::get_one),
+        )
+        .route(
+            "/_matrix/client/v1/delayed_events/{delay_id}/{action}",
+            axum::routing::post(delayed_events::update_stable),
+        );
     let r = crate::router::route_raw::<
         c::delayed_events::get_all_delayed_events::unstable::Request,
         _,

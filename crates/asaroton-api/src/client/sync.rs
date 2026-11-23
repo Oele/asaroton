@@ -99,6 +99,11 @@ async fn events_json(
         {
             u.insert("transaction_id".into(), json!(txn));
         }
+        if let Some(delay_id) = room.delay_ids.get(e.pdu.event_id())
+            && let Some(u) = v.get_mut("unsigned").and_then(|u| u.as_object_mut())
+        {
+            u.insert("delay_id".into(), json!(delay_id));
+        }
     }
     Ok(out)
 }

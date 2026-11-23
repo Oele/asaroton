@@ -1,6 +1,6 @@
 //! Delayed events (MSC4140).
 
-use asaroton_service::delayed_events::UpdateAction;
+use asaroton_service::delayed_events::{DelayedApi, UpdateAction};
 use axum::response::{IntoResponse, Response};
 use ruma::api::client::{
     delayed_events::get_all_delayed_events, message::send_message_event, state::send_state_event,
@@ -54,6 +54,7 @@ pub async fn send_message(
             content,
             delay_ms,
             Some(req.body.txn_id.as_str()),
+            DelayedApi::Unstable,
         )
         .await?;
     Ok(json_response(json!({ "delay_id": delay_id })))
@@ -80,6 +81,7 @@ pub async fn send_state(
             content,
             delay_ms,
             None,
+            DelayedApi::Unstable,
         )
         .await?;
     Ok(json_response(json!({ "delay_id": delay_id })))
@@ -99,8 +101,70 @@ pub async fn schedule(
     )>,
     body: axum::body::Bytes,
 ) -> Response {
-    match schedule_inner(&services, &headers, &room_id, &event_type, &txn_id, &body).await {
+    let api = DelayedApi::Unstable;
+    match schedule_inner(
+        &services,
+        &headers,
+        &room_id,
+        &event_type,
+        &txn_id,
+        &body,
+        api,
+    )
+    .await
+    {
         Ok(delay_id) => json_response(json!({ "delay_id": delay_id })),
+        Err(e) => e.into_response(),
+    }
+}
+
+/// `PUT /_matrix/client/v3/rooms/{roomId}/delayed_event/{eventType}/{txnId}` (spec v1.20):
+/// the same body (`delay_ms`, `content`, optional `state_key`), stable error codes.
+pub async fn schedule_stable(
+    axum::extract::State(services): axum::extract::State<AppState>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Path((room_id, event_type, txn_id)): axum::extract::Path<(
+        String,
+        String,
+        String,
+    )>,
+    body: axum::body::Bytes,
+) -> Response {
+    let api = DelayedApi::Stable;
+    match schedule_inner(
+        &services,
+        &headers,
+        &room_id,
+        &event_type,
+        &txn_id,
+        &body,
+        api,
+    )
+    .await
+    {
+        Ok(delay_id) => json_response(json!({ "delay_id": delay_id })),
+        Err(e) => e.into_response(),
+    }
+}
+
+/// `GET /_matrix/client/v1/delayed_events/{delayId}` (spec v1.20): one of the user's delayed
+/// events, pending or, for a while, after it was sent or cancelled (`finalised`).
+pub async fn get_one(
+    axum::extract::State(services): axum::extract::State<AppState>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Path(delay_id): axum::extract::Path<String>,
+) -> Response {
+    let result = async {
+        let sender = super::account::authenticate_headers(&services, &headers).await?;
+        Ok::<_, Error>(
+            services
+                .delayed_event_view(&sender.user_id, &delay_id)
+                .await?,
+        )
+    }
+    .await;
+    match result {
+        Ok(v) => json_response(v),
         Err(e) => e.into_response(),
     }
 }
@@ -112,6 +176,7 @@ async fn schedule_inner(
     event_type: &str,
     txn_id: &str,
     body: &[u8],
+    api: DelayedApi,
 ) -> Result<String> {
     let sender = super::account::authenticate_headers(services, headers).await?;
     let room_id = ruma::OwnedRoomId::try_from(room_id)
@@ -143,6 +208,7 @@ async fn schedule_inner(
             content,
             delay_ms,
             Some(txn_id),
+            api,
         )
         .await?)
 }
@@ -169,7 +235,7 @@ pub async fn update_with_body(
         .ok()
         .and_then(|v| v.get("action")?.as_str()?.parse::<UpdateAction>().ok());
     match action {
-        Some(action) => update(&services, &headers, &delay_id, action).await,
+        Some(action) => update(&services, &headers, &delay_id, action, DelayedApi::Unstable).await,
         None => Error::invalid_param("Missing or unknown action.").into_response(),
     }
 }
@@ -181,7 +247,19 @@ pub async fn update_with_path(
     axum::extract::Path((delay_id, action)): axum::extract::Path<(String, String)>,
 ) -> Response {
     match action.parse::<UpdateAction>() {
-        Ok(action) => update(&services, &headers, &delay_id, action).await,
+        Ok(action) => update(&services, &headers, &delay_id, action, DelayedApi::Unstable).await,
+        Err(()) => Error::unrecognized("Unknown delayed event action.").into_response(),
+    }
+}
+
+/// `POST /_matrix/client/v1/delayed_events/{delayId}/send|cancel|restart` (spec v1.20).
+pub async fn update_stable(
+    axum::extract::State(services): axum::extract::State<AppState>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Path((delay_id, action)): axum::extract::Path<(String, String)>,
+) -> Response {
+    match action.parse::<UpdateAction>() {
+        Ok(action) => update(&services, &headers, &delay_id, action, DelayedApi::Stable).await,
         Err(()) => Error::unrecognized("Unknown delayed event action.").into_response(),
     }
 }
@@ -191,11 +269,12 @@ async fn update(
     headers: &axum::http::HeaderMap,
     delay_id: &str,
     action: UpdateAction,
+    api: DelayedApi,
 ) -> Response {
     let result = async {
         let sender = super::account::authenticate_headers(services, headers).await?;
         services
-            .update_delayed_event(&sender.user_id, delay_id, action)
+            .update_delayed_event(&sender.user_id, delay_id, action, api)
             .await?;
         Ok::<_, Error>(())
     }

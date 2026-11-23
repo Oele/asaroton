@@ -112,6 +112,11 @@ async fn room_json(services: &AppState, user: &ruma::UserId, r: &RoomResult) -> 
         {
             u.insert("transaction_id".into(), json!(txn));
         }
+        if let Some(delay_id) = r.delay_ids.get(e.pdu.event_id())
+            && let Some(u) = ev.get_mut("unsigned").and_then(Value::as_object_mut)
+        {
+            u.insert("delay_id".into(), json!(delay_id));
+        }
     }
     let required_state: Vec<Value> = r.required_state.iter().map(client_event).collect();
     v.insert("required_state".into(), Value::Array(required_state));

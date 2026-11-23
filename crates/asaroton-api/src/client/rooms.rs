@@ -1681,24 +1681,41 @@ pub async fn search(
     Ok(resp)
 }
 
-/// `unsigned.transaction_id` for events the requesting device sent itself.
+/// `unsigned.delay_id` for the user's events that were sent from a delayed event (on every
+/// device), otherwise `unsigned.transaction_id` for events the requesting device sent itself.
 async fn add_txn_ids(
     services: &AppState,
     sender: &asaroton_auth::Sender,
     events: &[StoredEvent],
     values: &mut [Value],
 ) -> Result<()> {
-    let Some(device_id) = &sender.device_id else {
+    let own: Vec<ruma::OwnedEventId> = events
+        .iter()
+        .filter(|ev| ev.pdu.sender() == sender.user_id)
+        .map(|ev| ev.pdu.event_id().to_owned())
+        .collect();
+    if own.is_empty() {
         return Ok(());
-    };
+    }
+    let delay_ids = services
+        .store
+        .delay_ids_for_events(&sender.user_id, &own)
+        .await?;
     for (ev, v) in events.iter().zip(values.iter_mut()) {
         if ev.pdu.sender() != sender.user_id {
             continue;
         }
-        if let Some(txn) = services
-            .store
-            .get_event_txn_id(ev.pdu.event_id(), &sender.user_id, Some(device_id))
-            .await?
+        if let Some(delay_id) = delay_ids.get(ev.pdu.event_id()) {
+            if let Some(u) = v.get_mut("unsigned").and_then(Value::as_object_mut) {
+                u.insert("delay_id".into(), serde_json::json!(delay_id));
+            }
+            continue;
+        }
+        if let Some(device_id) = &sender.device_id
+            && let Some(txn) = services
+                .store
+                .get_event_txn_id(ev.pdu.event_id(), &sender.user_id, Some(device_id))
+                .await?
             && let Some(u) = v.get_mut("unsigned").and_then(Value::as_object_mut)
         {
             u.insert("transaction_id".into(), serde_json::json!(txn));

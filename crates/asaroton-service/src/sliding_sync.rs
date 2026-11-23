@@ -164,6 +164,8 @@ pub struct RoomResult {
     pub notification_count: u64,
     pub highlight_count: u64,
     pub txn_ids: HashMap<OwnedEventId, String>,
+    /// `event_id -> delay_id` for the user's events that were sent from a delayed event.
+    pub delay_ids: HashMap<OwnedEventId, String>,
     /// The state the connection has of the room once this answer arrives. Kept with the
     /// connection, not sent.
     pub(crate) state_given: Arc<StateGiven>,
@@ -1307,6 +1309,7 @@ impl Services {
             notification_count: 0,
             highlight_count: 0,
             txn_ids: HashMap::new(),
+            delay_ids: HashMap::new(),
             state_given: Arc::default(),
         };
         // An invite or a pending knock shows the room's stripped state and nothing else: the
@@ -1416,9 +1419,18 @@ impl Services {
                 .filter(|e| e.stream_ordering > s.events)
                 .count() as u64;
         }
+        // The user's own events: `unsigned.delay_id` for those sent from a delayed event (to
+        // every device), otherwise `unsigned.transaction_id` for the device that sent them.
+        let own: Vec<OwnedEventId> = events
+            .iter()
+            .filter(|ev| ev.pdu.sender() == user)
+            .map(|ev| ev.pdu.event_id().to_owned())
+            .collect();
+        out.delay_ids = self.store.delay_ids_for_events(user, &own).await?;
         if let Some(device_id) = &req.device_id {
             for ev in &events {
                 if ev.pdu.sender() == user
+                    && !out.delay_ids.contains_key(ev.pdu.event_id())
                     && let Some(txn) = self
                         .store
                         .get_event_txn_id(ev.pdu.event_id(), user, Some(device_id))

@@ -352,6 +352,19 @@ pub struct DelayedEvent {
     /// When the current timeout started (ms); the event is due at `running_since + delay_ms`.
     pub running_since: i64,
     pub txn_id: Option<String>,
+    /// How it ended, once it was sent or cancelled; `None` while it is pending.
+    pub finalised: Option<DelayedEventFinalised>,
+}
+
+/// How a delayed event ended (kept for a while after it was sent or cancelled).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DelayedEventFinalised {
+    /// When it was sent or cancelled (ms).
+    pub ts: i64,
+    /// The event it became, if it was sent.
+    pub event_id: Option<String>,
+    /// The standard error response, if sending it failed and it was cancelled for that.
+    pub error: Option<serde_json::Value>,
 }
 
 // ------------------------------------------------------------------ rtc (MSC4195)

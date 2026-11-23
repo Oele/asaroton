@@ -37,6 +37,21 @@ pub enum Error {
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 impl Error {
+    /// The standard error response body (`errcode` and `error`) a client would get for this
+    /// error; internal failures become `M_UNKNOWN` without their details.
+    pub fn to_error_json(&self) -> serde_json::Value {
+        match self {
+            Error::Matrix { kind, message, .. } => {
+                serde_json::json!({ "errcode": kind.errcode().to_string(), "error": message })
+            }
+            Error::Custom {
+                errcode, message, ..
+            } => {
+                serde_json::json!({ "errcode": errcode, "error": message })
+            }
+            _ => serde_json::json!({ "errcode": "M_UNKNOWN", "error": "Internal server error" }),
+        }
+    }
     pub fn matrix(kind: ErrorKind, status: http::StatusCode, message: impl Into<String>) -> Self {
         Self::Matrix {
             kind,

@@ -681,7 +681,12 @@ impl Services {
         tracing::info!(user_id = %leave.user_id, room_id = %leave.room_id, delay_id = %leave.delay_id, "participant disconnected: sending delegated leave");
         let _ = self.store.remove_delegated_leave(&leave.delay_id).await;
         match self
-            .update_delayed_event(&leave.user_id, &leave.delay_id, UpdateAction::Send)
+            .update_delayed_event(
+                &leave.user_id,
+                &leave.delay_id,
+                UpdateAction::Send,
+                crate::delayed_events::DelayedApi::Unstable,
+            )
             .await
         {
             Ok(()) => {}
