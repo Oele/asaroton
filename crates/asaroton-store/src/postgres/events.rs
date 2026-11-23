@@ -1334,7 +1334,10 @@ impl EventStore for PostgresStore {
         min_depth: i64,
     ) -> Result<Vec<StoredEvent>> {
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
-        // Walk back from `latest` (exclusive) without crossing `earliest`.
+        // Walk back from `latest` (exclusive) without crossing `earliest`, breadth-first as the
+        // spec defines it: the `limit` events nearest to `latest` (fewest steps; the newest
+        // first among equals), so the prev events the caller lacks are the last to be cut
+        // (tracker #86). The caller of this function orders them oldest first for the answer.
         let rows: Vec<EventRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "WITH RECURSIVE walk AS (
                 SELECT ee.prev_event_id AS event_id, 1 AS dist FROM event_edges ee WHERE ee.event_id = ANY($1)
@@ -1342,10 +1345,10 @@ impl EventStore for PostgresStore {
                 SELECT ee.prev_event_id, w.dist + 1 FROM event_edges ee JOIN walk w ON ee.event_id = w.event_id
                 WHERE w.dist < $4 AND NOT (w.event_id = ANY($2))
              )
-             SELECT {EVENT_COLUMNS} FROM (SELECT DISTINCT event_id FROM walk) w
+             SELECT {EVENT_COLUMNS} FROM (SELECT event_id, MIN(dist) AS dist FROM walk GROUP BY event_id) w
              JOIN events e ON e.event_id = w.event_id JOIN rooms r ON r.room_id = e.room_id
              WHERE e.room_id = $3 AND NOT (e.event_id = ANY($2)) AND e.depth >= $5 AND NOT e.outlier
-             ORDER BY e.depth ASC, e.stream_ordering ASC LIMIT $4"
+             ORDER BY w.dist ASC, e.depth DESC, e.stream_ordering DESC LIMIT $4"
         )))
         .bind(strings(latest))
         .bind(strings(earliest))

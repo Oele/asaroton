@@ -398,7 +398,9 @@ pub trait EventStore: Send + Sync {
     /// last position looked at, `None` when there is nothing left.
     async fn search_backfill_batch(&self, after: i64, limit: usize)
     -> Result<(usize, Option<i64>)>;
-    /// Events between `earliest` (exclusive) and `latest` (inclusive) by walking prev events.
+    /// Up to `limit` events found by walking prev events back from `latest` (exclusive)
+    /// without crossing `earliest` (exclusive): breadth-first, the nearest to `latest` first,
+    /// as `/get_missing_events` defines it. In no particular order.
     async fn missing_events_between(
         &self,
         room_id: &RoomId,
