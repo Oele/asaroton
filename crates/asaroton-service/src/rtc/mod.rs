@@ -32,6 +32,8 @@ pub const TRANSPORT_TYPE: &str = "livekit";
 
 /// The slot the legacy `/sfu/get` endpoint predates: Element Call's single per-room call.
 const LEGACY_SLOT_ID: &str = "m.call#ROOM";
+/// That slot under MSC4196's stable identifiers.
+const STABLE_CALL_SLOT_ID: &str = "m.call#room";
 
 /// The federation token endpoint, at the unstable path every current implementation serves.
 pub const FEDERATION_GET_TOKEN_PATH: &str =
@@ -89,8 +91,15 @@ fn hash_of(parts: &[&str]) -> String {
     STANDARD_NO_PAD.encode(Sha256::digest(json))
 }
 
-/// The `LiveKit` room name for a slot of a Matrix room.
+/// The `LiveKit` room name for a slot of a Matrix room. The old spelling of the call slot,
+/// `m.call#ROOM`, counts as MSC4196's stable `m.call#room`, as lk-jwt-service 0.10 maps it, so
+/// clients on either side of the rename meet in one `LiveKit` room (tracker #91).
 pub fn livekit_room_name(room_id: &RoomId, slot_id: &str) -> String {
+    let slot_id = if slot_id == LEGACY_SLOT_ID {
+        STABLE_CALL_SLOT_ID
+    } else {
+        slot_id
+    };
     hash_of(&[room_id.as_str(), slot_id])
 }
 
@@ -756,5 +765,23 @@ mod tests {
             "J+T45tGruxc+HrUOqJJlyQSV33m728Cme4+vt8/SWrU"
         );
         assert_eq!(legacy_identity(alice, "DEV"), "@alice:example.com:DEV");
+    }
+
+    #[test]
+    fn both_spellings_of_the_call_slot_meet_in_one_livekit_room() {
+        let room = ruma::room_id!("!roomid:example.com");
+        assert_eq!(
+            livekit_room_name(room, "m.call#ROOM"),
+            livekit_room_name(room, "m.call#room")
+        );
+        assert_eq!(
+            livekit_room_name(room, "m.call#room"),
+            hash_of(&[room.as_str(), "m.call#room"])
+        );
+        // Other slots are taken as they are.
+        assert_ne!(
+            livekit_room_name(room, "m.call#Other"),
+            livekit_room_name(room, "m.call#other")
+        );
     }
 }
