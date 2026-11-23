@@ -14,7 +14,7 @@ Needs what scripts/fedlab.py needs. Takes a few seconds.
 
 Usage: scripts/emailtest.py [--keep]
 """
-import email, glob, os, re, tempfile, urllib.error, urllib.parse, urllib.request
+import email, glob, json, os, re, tempfile, urllib.error, urllib.parse, urllib.request
 
 from fedlab import check, run_lab
 
@@ -68,6 +68,17 @@ def run(hs, peers):
     check(st == 200 and r.get("sid") == sid and len(mails()) == 1, f"the same send_attempt again: same sid, no second mail ({st})")
     st, r = request(a_token, "ann@example.org", "secret-a1", 2)
     check(st == 429 and r.get("errcode") == "M_LIMIT_EXCEEDED", f"a new send_attempt within a minute is held back ({st}, {r.get('errcode')})")
+    # A browser on another origin can read when to try again (tracker #95).
+    req = urllib.request.Request(hs.url + "/_matrix/client/v3/account/3pid/email/requestToken", method="POST",
+                                 data=json.dumps({"client_secret": "secret-a1", "email": "ann@example.org", "send_attempt": 3}).encode(),
+                                 headers={"Content-Type": "application/json", "Authorization": f"Bearer {a_token}", "Origin": "https://web.example"})
+    try:
+        urllib.request.urlopen(req, timeout=10)
+        headers = {}
+    except urllib.error.HTTPError as e:
+        headers = {k.lower(): v for k, v in e.headers.items()}
+    check(headers.get("retry-after", "").isdigit() and "retry-after" in headers.get("access-control-expose-headers", "").lower(),
+          f"the 429 has Retry-After and exposes it to other origins ({headers.get('retry-after')}, {headers.get('access-control-expose-headers')})")
 
     # Not before the code is back; a wrong code is refused; the right one works.
     st, r = add(a_token, sid, "secret-a1")

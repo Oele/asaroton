@@ -377,6 +377,12 @@ pub(crate) fn add_cors(headers: &mut http::HeaderMap) {
         header::ACCESS_CONTROL_ALLOW_HEADERS,
         http::HeaderValue::from_static("X-Requested-With, Content-Type, Authorization"),
     );
+    // A browser client on another origin may read only the headers listed here; 429 answers
+    // carry `Retry-After`, which the spec prefers to `retry_after_ms` (tracker #95).
+    headers.insert(
+        header::ACCESS_CONTROL_EXPOSE_HEADERS,
+        http::HeaderValue::from_static("Retry-After"),
+    );
 }
 
 #[cfg(test)]
