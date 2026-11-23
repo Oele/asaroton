@@ -80,7 +80,9 @@ st, r = req("POST", f"/_matrix/client/v3/join/{urllib.parse.quote(room)}", {}, b
 st, r = req("GET", "/_matrix/client/versions")
 check(r["unstable_features"].get("org.matrix.msc4143") is True, "versions advertises org.matrix.msc4143")
 st, r = req("GET", "/_matrix/client/unstable/org.matrix.msc4143/rtc/transports", token=atok)
-check(st == 200 and r["rtc_transports"][0]["type"] == "livekit" and r["rtc_transports"][0]["url"] == LK_URL and r["rtc_transports"][0]["livekit_service_url"] == HS + PREFIX, f"transports: {r}")
+check(st == 200 and r["rtc_transports"][0] == {"type": "m.livekit", "url": LK_URL}
+      and r["rtc_transports"][1]["type"] == "livekit" and r["rtc_transports"][1]["url"] == LK_URL
+      and r["rtc_transports"][1]["livekit_service_url"] == HS + PREFIX, f"transports: m.livekit first, then the legacy entry: {r}")
 st, r = req("GET", "/_matrix/client/v1/rtc/transports")
 check(st == 401, f"transports without token -> 401 ({st})")
 st, r = req("GET", "/.well-known/matrix/client")

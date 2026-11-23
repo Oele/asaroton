@@ -26,9 +26,13 @@ use sha2::{Digest, Sha256};
 
 use crate::{Error, Result, Services, config::LivekitSettings, delayed_events::UpdateAction};
 
-/// The transport type identifier. The MSC says `m.livekit`; every implementation uses
-/// `livekit`, so that is what clients look for.
+/// The legacy transport type, from the drafts of MSC4195: an entry with a
+/// `livekit_service_url`, which Element Call builds before 0.29 look for.
 pub const TRANSPORT_TYPE: &str = "livekit";
+/// The transport type of the merged MSC4195: an entry with the SFU's WebSocket `url`, tokens
+/// from this server's `/_matrix/client/v1/rtc/livekit/get_token` (Element Call 0.29,
+/// matrix-js-sdk 45.2, ruma 0.18's `Focus::Livekit`).
+pub const STABLE_TRANSPORT_TYPE: &str = "m.livekit";
 
 /// The slot the legacy `/sfu/get` endpoint predates: Element Call's single per-room call.
 const LEGACY_SLOT_ID: &str = "m.call#ROOM";
@@ -241,12 +245,17 @@ impl Services {
         self.config.rtc.is_some()
     }
 
-    /// The transports this server offers, for `/rtc/transports`. Besides the SFU `url` of the
-    /// merged proposal, the entry carries the `livekit_service_url` of the earlier drafts: the
-    /// Element Call builds in the field (Element Web 1.12.33's component, for one) only accept a
-    /// transport that has it, and the proposal's appendix sanctions advertising both.
+    /// The transports this server offers, for `/rtc/transports`: the merged proposal's
+    /// `m.livekit` entry first, then the legacy `livekit` entry with the `livekit_service_url`
+    /// of the earlier drafts, which the Element Call builds in the field before 0.29 (Element
+    /// Web 1.12.33's component, for one) only accept. A client takes the first type it knows.
     pub fn rtc_transports(&self) -> Vec<Value> {
-        self.rtc_foci()
+        let Some(s) = self.config.rtc.as_ref() else {
+            return Vec::new();
+        };
+        let mut out = vec![json!({ "type": STABLE_TRANSPORT_TYPE, "url": s.url })];
+        out.extend(self.rtc_foci());
+        out
     }
 
     /// The `org.matrix.msc4143.rtc_foci` entry for `.well-known/matrix/client`, for clients
@@ -322,8 +331,12 @@ impl Services {
             "roomJoin": true,
             "roomCreate": false,
             "canPublish": can_publish,
+            // Data channels only with audio and video (MSC4576); otherwise LiveKit's default
+            // would let a participant who may not publish send data.
+            "canPublishData": can_publish,
             "canSubscribe": true,
-            "canUpdateOwnMetadata": true,
+            // The merged MSC4195: SHOULD be false; no MatrixRTC client uses its own metadata.
+            "canUpdateOwnMetadata": false,
             "hidden": false,
         });
         let jwt = jwt::sign(

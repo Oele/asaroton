@@ -42,6 +42,9 @@ pub async fn versions(
         ("net.oele.search_without_words".to_owned(), true),
         // MatrixRTC transports, when a LiveKit SFU is configured.
         ("org.matrix.msc4143".to_owned(), services.has_rtc()),
+        // The stable MSC4195 endpoints (`/v1/rtc/livekit/get_token` and
+        // `delegate_delayed_leave`) and the `m.livekit` transport are served.
+        ("org.matrix.msc4195.stable".to_owned(), services.has_rtc()),
         // Thread subscriptions and their sliding sync extension.
         ("io.element.msc4306".to_owned(), true),
         ("io.element.msc4308".to_owned(), true),
