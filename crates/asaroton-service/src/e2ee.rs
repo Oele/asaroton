@@ -89,6 +89,10 @@ impl Services {
                 .set_fallback_keys(user_id, device_id, &rows)
                 .await?;
         }
+        // The counts as the upload left them, read before the device keys make the device
+        // visible: someone who claims a key the moment they see it would otherwise make the
+        // answer one short now and then (keyuploadtest).
+        let counts = self.one_time_key_counts(user_id, device_id).await?;
         if let Some(dk) = device_keys {
             let existing = self.store.get_device_keys(user_id, device_id).await?;
             if existing.as_ref() != Some(&dk) {
@@ -97,7 +101,7 @@ impl Services {
                     .await?;
             }
         }
-        self.one_time_key_counts(user_id, device_id).await
+        Ok(counts)
     }
 
     /// Unclaimed one-time keys per algorithm (always includes `signed_curve25519`).
