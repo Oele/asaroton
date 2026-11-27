@@ -25,6 +25,8 @@ They need `cargo build`, the development database role from `.env.example`, and 
 | `scripts/ssinvitetest.py URL` | A pending invite does not stop sliding sync from long-polling (test server with open registration) |
 | `scripts/syncaccesstest.py URL` | Sync shows a user only what they may read: knocks, bans, declined invites, history visibility |
 | `scripts/syncwaketest.py URL` | A waiting sync wakes for an invitation or a room created on another device |
+| `scripts/ssleaveracetest.py URL [TRIALS]` | A leave or ban that commits while a sliding sync answer is built still reaches the client as the user's own membership in `required_state` (#104); kicked and banned rooms stay in the lists (MSC4186); a self-left room does not |
+| `scripts/ssresubscribetest.py URL` | A room subscribed again after a `limited` list answer gets its latest events at once, as an expanded timeline (#103); without a gap nothing old is sent again |
 | `scripts/sslazytest.py` | Sliding sync with lazily loaded members hands out the memberships a timeline is about |
 | `scripts/createroomtest.py` | CreateRoom under pressure: several rooms at once, and a sync that shows a new room whole or not yet |
 | `scripts/clientendpointstest.py` | Small client endpoints: capabilities under r0, the empty 3pid list, /keys/changes |

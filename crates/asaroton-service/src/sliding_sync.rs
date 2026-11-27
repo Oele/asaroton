@@ -169,6 +169,9 @@ pub struct RoomResult {
     /// The state the connection has of the room once this answer arrives. Kept with the
     /// connection, not sent.
     pub(crate) state_given: Arc<StateGiven>,
+    /// The stream position up to which the room was read: where the next answer goes on
+    /// from. Kept with the connection, not sent.
+    pub(crate) read_upto: i64,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -358,6 +361,9 @@ struct ConnState {
     /// The users whose profiles the profiles extension has handed out (MSC4262); `None` while
     /// the extension is off on this connection.
     profile_users: Option<BTreeSet<OwnedUserId>>,
+    /// For each kick or ban of the user: whether it put them out as a member. Such rooms stay
+    /// in the lists (MSC4186); what an event did never changes, so it is worked out once.
+    put_out: HashMap<OwnedEventId, bool>,
 }
 
 /// The last state the client acknowledged, and the one produced by the latest response (which
@@ -726,6 +732,31 @@ impl Services {
         let ignored = self.ignored_users(user).await?;
         let direct = self.direct_rooms(user).await?;
 
+        // Kicks and bans: whether each put the user out as a member (not a ban of someone who
+        // was never in, nor a withdrawn invite or a refused knock).
+        let mut put_out: HashMap<OwnedEventId, bool> = HashMap::new();
+        let mut before_cache = HashMap::new();
+        for m in &memberships {
+            let by_other = match m.membership {
+                MembershipState::Ban => true,
+                MembershipState::Leave => m.sender != *user,
+                _ => false,
+            };
+            if !by_other {
+                continue;
+            }
+            let was_member = match base.and_then(|b| b.put_out.get(&m.event_id)) {
+                Some(known) => *known,
+                None => match self.store.get_event(&m.event_id).await? {
+                    Some(ev) => {
+                        self.membership_before(user, &ev, &mut before_cache).await? == "join"
+                    }
+                    None => false,
+                },
+            };
+            put_out.insert(m.event_id.clone(), was_member);
+        }
+
         // Recency: the newest event in each joined room, and the newest "bump" event.
         let joined_ids: Vec<OwnedRoomId> = memberships
             .iter()
@@ -755,6 +786,13 @@ impl Services {
                 // the knocker sees the room they asked to join, and later its answer.
                 MembershipState::Join | MembershipState::Knock => true,
                 MembershipState::Invite => !ignored.contains(&m.sender),
+                // "Rooms the user has been kicked or banned from will always be included"
+                // (MSC4186, Lists), when they were in it: otherwise a user who joins and is
+                // put out before an answer sent the room as joined is never told. A room the
+                // user left themselves is reported once, below, and then drops out.
+                MembershipState::Leave | MembershipState::Ban => {
+                    put_out.get(&m.event_id).copied().unwrap_or(false)
+                }
                 _ => false,
             })
             .collect();
@@ -855,6 +893,7 @@ impl Services {
                     &ignored,
                     direct.contains(room_id),
                     bump,
+                    latest.get(room_id).copied(),
                 )
                 .await?;
             let invite = r.invite_state.as_deref().map(invite_fingerprint);
@@ -870,23 +909,21 @@ impl Services {
             tracks.insert(
                 room_id.clone(),
                 RoomTrack {
-                    // A room the user is out of was read up to their leave, which may lie
-                    // above this answer's position; reading on from the position would send
-                    // the last events before the leave a second time.
-                    timeline_upto: if matches!(
-                        sel.membership.membership,
-                        MembershipState::Leave | MembershipState::Ban
-                    ) {
-                        now.events.max(sel.membership.stream_ordering)
-                    } else {
-                        now.events
-                    },
+                    // Not always this answer's position: a room the user is out of was read
+                    // up to their leave, and a joined room may have been read further (see
+                    // `sliding_room`). Reading on from the position would send those events
+                    // a second time.
+                    timeline_upto: r.read_upto,
                     membership_at: sel.membership.stream_ordering,
                     required_state: sel.required_state.clone(),
                     // The longest timeline the connection was given, so that dropping a
                     // subscription and taking it again does not send the same events twice.
-                    // A room that starts over has been given what it is sent now.
-                    timeline_limit: if r.initial {
+                    // A room that starts over has been given what it is sent now, and so has
+                    // a room sent with a gap (`limited`): the client holds the latest events
+                    // from here on, not the older ones from before the gap (matrix-rust-sdk
+                    // drops them), so a longer limit later has to send them again (MSC4186,
+                    // "Changes to timeline_limit"; tracker #103).
+                    timeline_limit: if r.initial || r.limited {
                         sel.timeline_limit
                     } else {
                         sel.timeline_limit
@@ -1128,6 +1165,7 @@ impl Services {
             rooms: tracks,
             list_counts,
             profile_users,
+            put_out,
         };
         Ok((result, state))
     }
@@ -1264,6 +1302,7 @@ impl Services {
         ignored: &HashSet<OwnedUserId>,
         is_dm: bool,
         bump: i64,
+        newest: Option<i64>,
     ) -> Result<RoomResult> {
         let user = &req.user_id;
         let room_id = &sel.room_id;
@@ -1311,6 +1350,7 @@ impl Services {
             txn_ids: HashMap::new(),
             delay_ids: HashMap::new(),
             state_given: Arc::default(),
+            read_upto: now.events,
         };
         // An invite or a pending knock shows the room's stripped state and nothing else: the
         // user is not in the room, so its timeline and state are not theirs to read. (A knock
@@ -1340,7 +1380,23 @@ impl Services {
         // banned). Such a room is frozen at the membership event that took them out: the
         // timeline ends there, and so do its state, name and avatar.
         let left = m.membership != MembershipState::Join;
-        let upper = if left { m.stream_ordering } else { now.events };
+        // The room is shown as of one point, the same for its timeline and its state, at
+        // which the user is in it as the answer says: the answer's position, or the user's
+        // membership if that came later (the memberships are read after the position). A
+        // room sent for the first time goes on to its newest event as read with the
+        // memberships, so that a room `createRoom` just finished comes whole. A change that
+        // commits while the answer is built comes in the next one, timeline and state
+        // together; were the state read as it is by then, a leave could reach
+        // `required_state` in this answer and be held back from the next, which reports the
+        // room as left (tracker #104).
+        let upper = if left {
+            m.stream_ordering
+        } else if initial {
+            now.events.max(m.stream_ordering).max(newest.unwrap_or(0))
+        } else {
+            now.events.max(m.stream_ordering)
+        };
+        out.read_upto = now.events.max(upper);
         let lower = if initial {
             None
         } else {
@@ -1488,15 +1544,18 @@ impl Services {
                 _ => Vec::new(),
             }
         } else if full {
-            self.store.current_state_pdus(room_id).await?
+            let current = self.store.current_state_pdus(room_id).await?;
+            self.state_as_of(room_id, upper, current).await?
         } else if let Some(l) = lower {
             // What changed since the last position, and what differs from what the
             // connection holds. The second covers state that fell back to an earlier event:
             // in a room with two loose ends the connection may have been given the outcome
             // of one resolution, and a later event tips it back to what the room's newest
             // event already had, so that "then" and "now" look the same.
-            self.state_changes_and(room_id, l, |e| given.is_some_and(|g| g.has_another(e)))
-                .await?
+            let changed = self
+                .state_changes_and(room_id, l, |e| given.is_some_and(|g| g.has_another(e)))
+                .await?;
+            self.state_as_of(room_id, upper, changed).await?
         } else {
             Vec::new()
         };
@@ -1522,7 +1581,7 @@ impl Services {
             if wanted.is_empty() {
             } else if !left {
                 let found = self.store.current_state_pdus_for(room_id, &wanted).await?;
-                state.extend(found);
+                state.extend(self.state_as_of(room_id, upper, found).await?);
             } else if let Some(group) = leave_state {
                 // A room the user is out of is not read past their leave.
                 let ids: Vec<OwnedEventId> = self
@@ -1535,9 +1594,25 @@ impl Services {
                 state.extend(self.store.get_events(&ids).await?);
             }
         }
+        // The answer that reports the room as left, or as left again, carries the user's own
+        // membership event when the client asks for it, whatever the connection was given
+        // before: clients built on the Rust SDK read their membership from `required_state`
+        // only, and take a room without it as joined.
+        let own = |e: &StoredEvent| {
+            e.pdu.event_type() == &TimelineEventType::RoomMember
+                && e.pdu.state_key() == Some(user.as_str())
+        };
+        let reported_gone = left && (initial || track.is_none_or(|t| t.membership != m.membership));
+        if reported_gone
+            && !state.iter().any(&own)
+            && let Some(ev) = self.store.get_event(&m.event_id).await?
+            && required_state_matches(&sel.required_state, &ev, user, |_| false)
+        {
+            state.push(ev);
+        }
         // State the connection has is not sent again (see `StateGiven`).
         if let Some(g) = given {
-            state.retain(|e| !g.has(e));
+            state.retain(|e| !g.has(e) || (reported_gone && own(e)));
         }
         out.state_given = StateGiven::with(given, &state, &about, user);
         out.required_state = state;
@@ -1609,6 +1684,45 @@ impl Services {
         }
         out.timeline = events;
         Ok(out)
+    }
+
+    /// State events read from the current state, as they were at stream position `upper`: an
+    /// entry written after it (a change that committed while the answer was being built) is
+    /// replaced by the room's entry at `upper`, or left out when it had none then. The entry
+    /// at `upper` is the state after the room's newest event up to there.
+    async fn state_as_of(
+        &self,
+        room_id: &RoomId,
+        upper: i64,
+        events: Vec<StoredEvent>,
+    ) -> Result<Vec<StoredEvent>> {
+        if events.iter().all(|e| e.stream_ordering <= upper) {
+            return Ok(events);
+        }
+        let (mut kept, late): (Vec<StoredEvent>, Vec<StoredEvent>) =
+            events.into_iter().partition(|e| e.stream_ordering <= upper);
+        let keys: Vec<(StateEventType, String)> = late
+            .iter()
+            .filter_map(|e| e.pdu.state_tuple().map(|(t, k)| (t, k.to_owned())))
+            .collect();
+        let group = self
+            .store
+            .room_events_in_range(room_id, upper + 1, None, Direction::Backwards, 1)
+            .await?
+            .first()
+            .and_then(|e| e.state_group);
+        if let Some(group) = group {
+            let ids: Vec<OwnedEventId> = self
+                .store
+                .state_at_group_filtered(group, &keys)
+                .await?
+                .into_iter()
+                .map(|e| e.event_id)
+                .filter(|id| !kept.iter().any(|e| e.pdu.event_id() == id))
+                .collect();
+            kept.extend(self.store.get_events(&ids).await?);
+        }
+        Ok(kept)
     }
 
     /// The full state at a state group, as events.
@@ -1891,6 +2005,7 @@ mod tests {
             rooms: HashMap::new(),
             list_counts: BTreeMap::new(),
             profile_users: None,
+            put_out: HashMap::new(),
         };
         let conns = SlidingSyncConnections::default();
         let key = ConnKey {
