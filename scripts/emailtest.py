@@ -132,6 +132,8 @@ def run(hs, peers):
     st, r = hs.req("POST", "/_matrix/client/v3/account/deactivate",
                    {"auth": {"type": "m.login.password", "session": r.get("session"),
                              "identifier": {"type": "m.id.user", "user": "bob"}, "password": "pwpwpwpw"}}, b_token)
+    check(st == 200 and r.get("id_server_unbind_result") == "success",
+          f"deactivation answers success: no address is bound to an identity server ({st}, {r})")
     st, r = request(a_token, "bob@example.org", "secret-a2", 1)
     check(st == 200, f"a deactivated account frees its addresses ({st}, {r.get('errcode')})")
 

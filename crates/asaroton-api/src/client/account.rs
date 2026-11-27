@@ -461,6 +461,10 @@ pub async fn change_password(
     Ok(change_password::v3::Response::new())
 }
 
+/// `POST /account/deactivate`. asaroton binds no address to an identity server, so there is
+/// nothing to unbind, and the spec says the answer must then be `success` (tracker #102).
+/// (`/account/3pid/delete` and `/account/3pid/unbind` keep `no-support`: their spec has no
+/// such rule, and "not able to determine an identity server to unbind from" is the case.)
 pub async fn deactivate(
     services: AppState,
     req: Ruma<deactivate::v3::Request>,
@@ -469,7 +473,7 @@ pub async fn deactivate(
     uia_for_sender(&services, sender, req.body.auth.as_ref()).await?;
     services.deactivate(&sender.user_id).await?;
     Ok(deactivate::v3::Response::new(
-        ruma::api::client::account::ThirdPartyIdRemovalStatus::NoSupport,
+        ruma::api::client::account::ThirdPartyIdRemovalStatus::Success,
     ))
 }
 
