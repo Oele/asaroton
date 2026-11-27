@@ -378,15 +378,49 @@ pub(crate) fn add_cors(headers: &mut http::HeaderMap) {
         http::HeaderValue::from_static("X-Requested-With, Content-Type, Authorization"),
     );
     // A browser client on another origin may read only the headers listed here; 429 answers
-    // carry `Retry-After`, which the spec prefers to `retry_after_ms` (tracker #95).
-    headers.insert(
-        header::ACCESS_CONTROL_EXPOSE_HEADERS,
-        http::HeaderValue::from_static("Retry-After"),
-    );
+    // carry `Retry-After`, which the spec prefers to `retry_after_ms` (tracker #95). Added to
+    // what a handler listed itself, not in its place: the sign-in rendezvous (MSC4108)
+    // exposes its `ETag`.
+    let exposed = match headers.get(header::ACCESS_CONTROL_EXPOSE_HEADERS) {
+        Some(own) => {
+            let own = own.to_str().unwrap_or_default();
+            if own
+                .split(',')
+                .any(|h| h.trim().eq_ignore_ascii_case("retry-after"))
+            {
+                return;
+            }
+            http::HeaderValue::from_str(&format!("{own}, Retry-After"))
+                .unwrap_or_else(|_| http::HeaderValue::from_static("Retry-After"))
+        }
+        None => http::HeaderValue::from_static("Retry-After"),
+    };
+    headers.insert(header::ACCESS_CONTROL_EXPOSE_HEADERS, exposed);
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cors_keeps_the_headers_a_handler_exposes() {
+        let exposed = |own: Option<&'static str>| {
+            let mut h = http::HeaderMap::new();
+            if let Some(own) = own {
+                h.insert(
+                    http::header::ACCESS_CONTROL_EXPOSE_HEADERS,
+                    http::HeaderValue::from_static(own),
+                );
+            }
+            super::add_cors(&mut h);
+            h[http::header::ACCESS_CONTROL_EXPOSE_HEADERS]
+                .to_str()
+                .unwrap()
+                .to_owned()
+        };
+        assert_eq!(exposed(None), "Retry-After");
+        assert_eq!(exposed(Some("ETag")), "ETag, Retry-After");
+        assert_eq!(exposed(Some("ETag, retry-after")), "ETag, retry-after");
+    }
+
     #[test]
     fn nul_anywhere_in_a_body_is_found() {
         let found = |s: &str| super::holds_nul(&serde_json::from_str(s).unwrap());
