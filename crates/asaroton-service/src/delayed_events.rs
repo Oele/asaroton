@@ -2,7 +2,7 @@
 //! cancelled, restarted or sent early. Element Call uses them to expire call membership state
 //! when a client drops off.
 
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use asaroton_store::{DelayedEvent, now_ts};
 use ruma::{DeviceId, OwnedEventId, RoomId, UserId};
@@ -40,6 +40,26 @@ pub enum DelayedApi {
 pub struct DelayedEvents {
     /// Woken whenever the schedule changes so the worker recomputes its next deadline.
     pub(crate) wake: tokio::sync::Notify,
+    /// The delayed events being sent this moment. One is marked as finalised before it is
+    /// sent (so that it is sent once) and gets its outcome after; in between it has neither
+    /// an event nor an error, like a cancelled one, and is shown as still scheduled.
+    sending: parking_lot::Mutex<HashSet<String>>,
+}
+
+/// A delayed event in [`DelayedEvents::sending`] for as long as this lives.
+struct Sending<'a>(&'a DelayedEvents, String);
+
+impl<'a> Sending<'a> {
+    fn start(delayed: &'a DelayedEvents, delay_id: &str) -> Self {
+        delayed.sending.lock().insert(delay_id.to_owned());
+        Self(delayed, delay_id.to_owned())
+    }
+}
+
+impl Drop for Sending<'_> {
+    fn drop(&mut self) {
+        self.0.sending.lock().remove(&self.1);
+    }
 }
 
 /// What `POST /delayed_events/{delay_id}` may do.
@@ -194,7 +214,11 @@ impl Services {
         if let Some(k) = ev.state_key {
             v["state_key"] = Value::String(k);
         }
-        if let Some(f) = ev.finalised {
+        if let Some(f) = ev.finalised.filter(|f| {
+            f.event_id.is_some()
+                || f.error.is_some()
+                || !self.delayed.sending.lock().contains(delay_id)
+        }) {
             let mut fin = json!({ "finalised_ts": f.ts });
             if let Some(id) = f.event_id {
                 fin["event_id"] = Value::String(id);
@@ -259,6 +283,7 @@ impl Services {
                     self.store.restart_delayed_event(delay_id, now_ts()).await?
                 }
                 UpdateAction::Send => {
+                    let _sending = Sending::start(&self.delayed, delay_id);
                     if self
                         .store
                         .finalise_delayed_event(delay_id, now_ts())
@@ -294,6 +319,7 @@ impl Services {
     /// error that kept it from being sent, as the spec requires.
     async fn send_due(&self, ev: DelayedEvent) -> Result<()> {
         let delay_id = ev.delay_id.clone();
+        let _sending = Sending::start(&self.delayed, &delay_id);
         if !self
             .store
             .finalise_delayed_event(&delay_id, now_ts())
