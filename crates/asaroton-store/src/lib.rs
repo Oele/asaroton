@@ -226,6 +226,13 @@ pub trait RoomStore: Send + Sync {
     ) -> Result<Vec<OwnedRoomId>>;
     /// One user's receipts in a room (their read positions).
     async fn user_receipts(&self, room_id: &RoomId, user_id: &UserId) -> Result<Vec<Receipt>>;
+    /// One user's read receipts (`m.read`, `m.read.private`) in every room, as the stream
+    /// position of the event each points at: `(room, thread, position)`. Receipts for events
+    /// this server does not have are left out.
+    async fn user_read_positions(
+        &self,
+        user_id: &UserId,
+    ) -> Result<Vec<(OwnedRoomId, Option<String>, StreamOrdering)>>;
     async fn max_receipt_stream_id(&self) -> Result<i64>;
 }
 

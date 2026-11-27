@@ -1,13 +1,16 @@
 //! Push gateway delivery: events that notify a user are sent to the user's HTTP pushers.
 //!
-//! One worker reads the room events in order and works out who is to be notified of what.
-//! It does not wait for gateways: each pusher has a queue of its own, drained by a task that
-//! runs while the queue has something in it, so a slow or dead gateway (three attempts over
-//! seven seconds) delays only that pusher's notifications, and each pusher still gets its
-//! notifications in the order of the events.
+//! One worker follows the room events as they are written and works out who is to be notified
+//! of what, several events at a time. When it falls behind and notifications are lost, a
+//! catch-up reads the events it missed from the database, in a task of its own, so that the
+//! events after them are not held up (tracker #100). Neither waits for gateways: each pusher
+//! has a queue of its own, drained by a task that runs while the queue has something in it,
+//! so a slow or dead gateway (three attempts over seven seconds) delays only that pusher's
+//! notifications. A pusher gets its notifications in the order of the events, except that
+//! those of a catch-up can come after newer ones.
 
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{BTreeSet, HashMap, HashSet, VecDeque},
     hash::Hash,
     sync::Arc,
     time::{Duration, Instant},
@@ -15,8 +18,10 @@ use std::{
 
 use asaroton_service::{Notification, Result as ServiceResult, Services};
 use asaroton_store::{Pusher, StoredEvent};
-use ruma::{OwnedUserId, RoomId, events::StateEventType};
+use futures::StreamExt;
+use ruma::{OwnedRoomId, OwnedUserId, RoomId, events::StateEventType};
 use serde_json::{Value, json};
+use tokio::sync::{broadcast, mpsc};
 
 use crate::outbound::Outbound;
 
@@ -87,7 +92,7 @@ type PushJob = (Arc<Pusher>, Arc<Value>);
 /// per member per event, read again when a pusher is set or removed, and every few seconds for
 /// changes that do not announce themselves (a logout drops its pushers).
 struct WithPushers {
-    users: HashSet<OwnedUserId>,
+    users: Arc<HashSet<OwnedUserId>>,
     generation: u64,
     refreshed: Option<Instant>,
 }
@@ -104,7 +109,7 @@ impl WithPushers {
         {
             self.generation = current;
             match services.store.users_with_pushers().await {
-                Ok(users) => self.users = users.into_iter().collect(),
+                Ok(users) => self.users = Arc::new(users.into_iter().collect()),
                 Err(e) => tracing::warn!(error = %e, "could not list users with pushers"),
             }
             self.refreshed = Some(Instant::now());
@@ -115,149 +120,259 @@ impl WithPushers {
 /// How many events a catch-up reads from the database at a time.
 const CATCH_UP_BATCH: i64 = 500;
 
-async fn worker(services: Arc<Services>, outbound: Outbound) {
-    let queues: Arc<PerKeyQueues<PusherKey, PushJob>> =
-        Arc::new(PerKeyQueues::new(MOST_QUEUED_PER_PUSHER));
-    let mut rx = services.notifier.subscribe();
-    let mut with_pushers = WithPushers {
-        users: HashSet::new(),
-        generation: 0,
-        refreshed: None,
-    };
-    let enqueue = |pusher: Pusher, notification: Arc<Value>| {
+/// How many events are worked on at once: the live ones, and those of a catch-up.
+const PARALLEL: usize = 8;
+
+/// How many of the stream positions handled live are remembered (see `Live::seen`).
+const SEEN_WINDOW: usize = 2048;
+
+/// A pusher's notification, ready for its queue.
+type Push = (Pusher, Arc<Value>);
+
+/// What the live worker and the catch-up share: the per-pusher queues and how to fill them.
+#[derive(Clone)]
+struct Pushing {
+    services: Arc<Services>,
+    outbound: Outbound,
+    queues: Arc<PerKeyQueues<PusherKey, PushJob>>,
+}
+
+impl Pushing {
+    fn enqueue(&self, (pusher, notification): Push) {
         let key: PusherKey = (
             pusher.user_id.clone(),
             pusher.app_id.clone(),
             pusher.pushkey.clone(),
         );
-        let (start, dropped) = queues.push(&key, (Arc::new(pusher), notification));
+        let (start, dropped) = self.queues.push(&key, (Arc::new(pusher), notification));
         if dropped {
             tracing::warn!(user = %key.0, app = %key.1, "push gateway too far behind: its oldest notification was dropped");
         }
         if start {
-            let (services, outbound, queues) =
-                (Arc::clone(&services), outbound.clone(), Arc::clone(&queues));
+            let this = self.clone();
             tokio::spawn(async move {
-                while let Some((pusher, notification)) = queues.next(&key) {
-                    deliver(&services, &outbound, &pusher, &notification).await;
+                while let Some((pusher, notification)) = this.queues.next(&key) {
+                    deliver(&this.services, &this.outbound, &pusher, &notification).await;
                 }
             });
         }
+    }
+}
+
+/// A stretch of events whose notifications were lost, for the catch-up: `(from, upto]`, less
+/// the positions in `skip`, which were handled live.
+struct CatchUp {
+    from: i64,
+    upto: i64,
+    skip: HashSet<i64>,
+}
+
+/// The live worker's place in the event stream.
+struct Live {
+    rx: broadcast::Receiver<Arc<Notification>>,
+    services: Arc<Services>,
+    with_pushers: WithPushers,
+    catch_up: mpsc::UnboundedSender<CatchUp>,
+    /// Every event at or below this position has been handled, live or by a catch-up.
+    floor: i64,
+    /// The positions above `floor` handled live. Events are written in parallel, so their
+    /// notifications do not come in the order of their positions: one handled live may be
+    /// above an event whose notification is lost afterwards. A catch-up therefore goes on
+    /// from `floor`, not from the highest position seen, and passes over these. The oldest
+    /// are let go when there are more than [`SEEN_WINDOW`]; an event that comes that late is
+    /// not expected.
+    seen: BTreeSet<i64>,
+    /// Events at or below this position were handed to a catch-up; their notifications,
+    /// still in the channel, are passed over.
+    caught_up_to: i64,
+}
+
+impl Live {
+    /// The next live event to work on, with the users who have a pusher; `None` when the
+    /// server shuts down. Lost notifications are handed to the catch-up on the way.
+    async fn next(&mut self) -> Option<(OwnedRoomId, i64, Arc<HashSet<OwnedUserId>>)> {
+        loop {
+            match self.rx.recv().await {
+                Ok(n) => {
+                    let Notification::RoomEvent {
+                        room_id,
+                        stream_ordering,
+                    } = &*n
+                    else {
+                        continue;
+                    };
+                    let at = *stream_ordering;
+                    if at <= self.caught_up_to || !self.seen.insert(at) {
+                        continue;
+                    }
+                    while self.seen.len() > SEEN_WINDOW {
+                        if let Some(oldest) = self.seen.pop_first() {
+                            self.floor = self.floor.max(oldest);
+                        }
+                    }
+                    self.with_pushers.refresh(&self.services).await;
+                    if self.with_pushers.users.is_empty() {
+                        continue;
+                    }
+                    return Some((room_id.clone(), at, Arc::clone(&self.with_pushers.users)));
+                }
+                Err(broadcast::error::RecvError::Lagged(lost)) => {
+                    // The channel dropped notifications this worker had no time for: the
+                    // catch-up reads the events from the database instead, up to the
+                    // position below which all are written, so that none goes unpushed.
+                    let upto = match self.services.store.stream_positions().await {
+                        Ok(p) => p.events,
+                        Err(e) => {
+                            tracing::warn!(error = %e, lost, "the push worker fell behind and cannot catch up: notifications of these events are not pushed");
+                            continue;
+                        }
+                    };
+                    tracing::info!(
+                        lost,
+                        from = self.floor,
+                        upto,
+                        "the push worker fell behind: catching up from the database"
+                    );
+                    let skip: HashSet<i64> = self.seen.range(..=upto).copied().collect();
+                    self.seen.retain(|&at| at > upto);
+                    if upto > self.floor {
+                        let _ = self.catch_up.send(CatchUp {
+                            from: self.floor,
+                            upto,
+                            skip,
+                        });
+                    }
+                    self.floor = self.floor.max(upto);
+                    self.caught_up_to = self.caught_up_to.max(upto);
+                }
+                Err(broadcast::error::RecvError::Closed) => return None,
+            }
+        }
+    }
+}
+
+async fn worker(services: Arc<Services>, outbound: Outbound) {
+    let pushing = Pushing {
+        services: Arc::clone(&services),
+        outbound,
+        queues: Arc::new(PerKeyQueues::new(MOST_QUEUED_PER_PUSHER)),
     };
-    // The stream position up to which every event has been looked at: where a catch-up starts
-    // when the notifications run ahead of the worker. Events at or below `caught_up_to` came in
-    // a catch-up, and their notifications, still in the channel, are passed over.
-    let mut handled_upto = services
+    let (catch_up, catch_ups) = mpsc::unbounded_channel();
+    tokio::spawn(catch_up_worker(pushing.clone(), catch_ups));
+    let rx = services.notifier.subscribe();
+    let floor = services
         .store
         .stream_positions()
         .await
         .map_or(0, |p| p.events);
-    let mut caught_up_to = 0;
-    loop {
-        let n = match rx.recv().await {
-            Ok(n) => n,
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(lost)) => {
-                // The channel dropped notifications this worker had no time for: read the
-                // events from the database instead, up to the position below which all are
-                // written, so that none goes unpushed.
-                let upto = match services.store.stream_positions().await {
-                    Ok(p) => p.events,
-                    Err(e) => {
-                        tracing::warn!(error = %e, lost, "the push worker fell behind and cannot catch up: notifications of these events are not pushed");
-                        continue;
-                    }
-                };
-                tracing::info!(
-                    lost,
-                    from = handled_upto,
-                    upto,
-                    "the push worker fell behind: catching up from the database"
-                );
-                with_pushers.refresh(&services).await;
-                catch_up(&services, handled_upto, upto, &with_pushers.users, &enqueue).await;
-                handled_upto = handled_upto.max(upto);
-                caught_up_to = caught_up_to.max(upto);
-                continue;
-            }
-            Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
-        };
-        let Notification::RoomEvent {
-            room_id,
-            stream_ordering,
-        } = &*n
-        else {
-            continue;
-        };
-        if *stream_ordering <= caught_up_to {
-            continue;
+    let live = Live {
+        rx,
+        services: Arc::clone(&services),
+        with_pushers: WithPushers {
+            users: Arc::default(),
+            generation: 0,
+            refreshed: None,
+        },
+        catch_up,
+        floor,
+        seen: BTreeSet::new(),
+        caught_up_to: 0,
+    };
+    // Several events at a time, their notifications queued in the order of the events.
+    futures::stream::unfold(live, |mut live| async move {
+        let next = live.next().await?;
+        Some((next, live))
+    })
+    .map(|(room_id, at, users)| {
+        let services = Arc::clone(&services);
+        async move {
+            handle_event(&services, &room_id, at, &users)
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::warn!(%room_id, error = %e, "push delivery failed");
+                    Vec::new()
+                })
         }
-        with_pushers.refresh(&services).await;
-        if !with_pushers.users.is_empty()
-            && let Err(e) = handle_event(
-                &services,
-                room_id,
-                *stream_ordering,
-                &with_pushers.users,
-                &enqueue,
-            )
-            .await
-        {
-            tracing::warn!(%room_id, error = %e, "push delivery failed");
+    })
+    .buffered(PARALLEL)
+    .for_each(|pushes| {
+        for push in pushes {
+            pushing.enqueue(push);
         }
-        handled_upto = handled_upto.max(*stream_ordering);
+        std::future::ready(())
+    })
+    .await;
+}
+
+/// Works through the catch-ups the live worker hands over, one after the other.
+async fn catch_up_worker(pushing: Pushing, mut jobs: mpsc::UnboundedReceiver<CatchUp>) {
+    let mut with_pushers = WithPushers {
+        users: Arc::default(),
+        generation: 0,
+        refreshed: None,
+    };
+    while let Some(job) = jobs.recv().await {
+        with_pushers.refresh(&pushing.services).await;
+        catch_up(&pushing, &job, &with_pushers.users).await;
     }
 }
 
-/// Pushes for the events in `(since, upto]`, read from the database (after the notifications of
+/// Pushes for the events of a catch-up, read from the database (after the notifications of
 /// some of them were lost).
-async fn catch_up(
-    services: &Services,
-    since: i64,
-    upto: i64,
-    with_pushers: &HashSet<OwnedUserId>,
-    enqueue: &impl Fn(Pusher, Arc<Value>),
-) {
+async fn catch_up(pushing: &Pushing, job: &CatchUp, with_pushers: &Arc<HashSet<OwnedUserId>>) {
     if with_pushers.is_empty() {
         return;
     }
-    let mut from = since;
-    while from < upto {
+    let services = &pushing.services;
+    let mut from = job.from;
+    while from < job.upto {
         let batch = match services
             .store
-            .events_for_push(from, upto, CATCH_UP_BATCH)
+            .events_for_push(from, job.upto, CATCH_UP_BATCH)
             .await
         {
             Ok(batch) => batch,
             Err(e) => {
-                tracing::warn!(error = %e, from, upto, "the push worker could not read events to catch up with");
+                tracing::warn!(error = %e, from, upto = job.upto, "the push worker could not read events to catch up with");
                 return;
             }
         };
         let Some(last) = batch.last().map(|e| e.stream_ordering) else {
             return;
         };
-        for ev in batch {
-            if ev.outlier && invitee_of(&ev.pdu).is_none() {
-                continue;
-            }
-            let room_id = ev.pdu.room_id().to_owned();
-            if let Err(e) = push_for_event(services, &room_id, ev, with_pushers, enqueue).await {
-                tracing::warn!(%room_id, error = %e, "push delivery failed");
-            }
-        }
+        let todo = batch.into_iter().filter(|ev| {
+            !job.skip.contains(&ev.stream_ordering)
+                && (!ev.outlier || invitee_of(&ev.pdu).is_some())
+        });
+        futures::stream::iter(todo)
+            .map(|ev| async move {
+                let room_id = ev.pdu.room_id().to_owned();
+                pushes_for_event(services, &room_id, ev, with_pushers)
+                    .await
+                    .unwrap_or_else(|e| {
+                        tracing::warn!(%room_id, error = %e, "push delivery failed");
+                        Vec::new()
+                    })
+            })
+            .buffered(PARALLEL)
+            .for_each(|pushes| {
+                for push in pushes {
+                    pushing.enqueue(push);
+                }
+                std::future::ready(())
+            })
+            .await;
         from = last;
     }
 }
 
-/// Works out who of the room's members is to be notified of the event, and hands each of
-/// their HTTP pushers the notification (`enqueue`, which does not wait for the gateway).
+/// The notifications for the event at a stream position, for its pushers.
 async fn handle_event(
     services: &Services,
     room_id: &RoomId,
     stream_ordering: i64,
     with_pushers: &HashSet<OwnedUserId>,
-    enqueue: &impl Fn(Pusher, Arc<Value>),
-) -> ServiceResult<()> {
+) -> ServiceResult<Vec<Push>> {
     let found = services
         .store
         .events_after(stream_ordering - 1, 1)
@@ -274,21 +389,21 @@ async fn handle_event(
             .await?
         {
             Some(ev) if ev.outlier && invitee_of(&ev.pdu).is_some() => ev,
-            _ => return Ok(()),
+            _ => return Ok(Vec::new()),
         },
     };
-    push_for_event(services, room_id, ev, with_pushers, enqueue).await
+    pushes_for_event(services, room_id, ev, with_pushers).await
 }
 
-/// Who of the room's members (and the user an invitation is for) is to be notified of `ev`;
-/// each of their HTTP pushers gets the notification.
-async fn push_for_event(
+/// Who of the room's members (and the user an invitation is for) is to be notified of `ev`:
+/// the notification for each of their HTTP pushers.
+async fn pushes_for_event(
     services: &Services,
     room_id: &RoomId,
     ev: asaroton_store::StoredEvent,
     with_pushers: &HashSet<OwnedUserId>,
-    enqueue: &impl Fn(Pusher, Arc<Value>),
-) -> ServiceResult<()> {
+) -> ServiceResult<Vec<Push>> {
+    let mut out = Vec::new();
     let mut recipients: Vec<OwnedUserId> = services
         .store
         .members(room_id, Some("join"))
@@ -338,11 +453,9 @@ async fn push_for_event(
         let notification = Arc::new(
             build_notification(services, room_id, &ev, &user_id, highlight, unread).await?,
         );
-        for pusher in pushers {
-            enqueue(pusher, Arc::clone(&notification));
-        }
+        out.extend(pushers.into_iter().map(|p| (p, Arc::clone(&notification))));
     }
-    Ok(())
+    Ok(out)
 }
 
 /// The user a membership event invites, if it is an invitation.
@@ -359,19 +472,7 @@ fn invitee_of(pdu: &asaroton_core::Pdu) -> Option<OwnedUserId> {
 
 /// Unread notifications across every joined room (the badge count).
 async fn unread_total(services: &Services, user: &ruma::UserId) -> u64 {
-    let Ok(rooms) = services.store.rooms_for_user(user, "join").await else {
-        return 0;
-    };
-    let Ok(upto) = services.store.max_stream_ordering().await else {
-        return 0;
-    };
-    let mut total = 0;
-    for r in rooms {
-        if let Ok(c) = services.unread_counts(&r, user, upto).await {
-            total += c.total.notification_count;
-        }
-    }
-    total
+    services.badge_count(user).await.unwrap_or(0)
 }
 
 async fn build_notification(

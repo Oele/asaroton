@@ -622,6 +622,31 @@ impl RoomStore for PostgresStore {
         rows.iter().map(receipt_from_row).collect()
     }
 
+    async fn user_read_positions(
+        &self,
+        user_id: &UserId,
+    ) -> Result<Vec<(OwnedRoomId, Option<String>, crate::StreamOrdering)>> {
+        let rows = sqlx::query(
+            "SELECT r.room_id, NULLIF(r.thread_id, ''), e.stream_ordering FROM receipts r
+             JOIN events e ON e.event_id = r.event_id
+             WHERE r.user_id = $1 AND r.receipt_type IN ('m.read', 'm.read.private')",
+        )
+        .bind(user_id.as_str())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(|r| {
+                let room: String = r.get(0);
+                Ok((
+                    OwnedRoomId::try_from(room)
+                        .map_err(|e| crate::Error::Corrupt(format!("receipt room ID: {e}")))?,
+                    r.get(1),
+                    r.get(2),
+                ))
+            })
+            .collect()
+    }
+
     async fn receipts_for_room(&self, room_id: &RoomId, since: i64) -> Result<Vec<crate::Receipt>> {
         let rows = sqlx::query(
             "SELECT room_id, user_id, receipt_type, thread_id, event_id, data, stream_id FROM receipts

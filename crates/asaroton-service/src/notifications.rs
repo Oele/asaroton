@@ -1,12 +1,13 @@
 //! Unread notification counts: push rules evaluated against the events a user has not read
 //! yet, overall and per thread.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use asaroton_store::{Direction, StreamOrdering};
 use ruma::{
-    OwnedEventId, RoomId, UserId,
+    OwnedEventId, OwnedRoomId, RoomId, UserId,
     events::StateEventType,
+    events::room::member::MembershipState,
     push::{Action, HighlightTweakValue, PushConditionPowerLevelsCtx, PushConditionRoomCtx, Tweak},
     room_version_rules::RoomPowerLevelsRules,
     serde::Raw,
@@ -59,6 +60,44 @@ impl Services {
     }
 }
 
+/// A user's read positions in a room, from their read receipts: unthreaded receipts cover
+/// everything, "main" the main timeline, and a thread receipt only that thread.
+#[derive(Debug, Default)]
+struct ReadMarks {
+    unthreaded: Option<StreamOrdering>,
+    main: Option<StreamOrdering>,
+    threads: BTreeMap<String, StreamOrdering>,
+}
+
+impl ReadMarks {
+    fn add(&mut self, thread: Option<&str>, pos: StreamOrdering) {
+        let bump = |slot: &mut Option<StreamOrdering>| {
+            if slot.is_none_or(|s| s < pos) {
+                *slot = Some(pos);
+            }
+        };
+        match thread {
+            None => bump(&mut self.unthreaded),
+            Some("main") => bump(&mut self.main),
+            Some(t) => {
+                let e = self.threads.entry(t.to_owned()).or_insert(pos);
+                if *e < pos {
+                    *e = pos;
+                }
+            }
+        }
+    }
+
+    /// The oldest read position, below which nothing counts.
+    fn floor(&self) -> Option<StreamOrdering> {
+        [self.unthreaded, self.main]
+            .into_iter()
+            .flatten()
+            .chain(self.threads.values().copied())
+            .min()
+    }
+}
+
 impl Services {
     /// Unread counts for `user` in `room_id`, considering events up to `upto` (inclusive).
     pub async fn unread_counts(
@@ -67,11 +106,7 @@ impl Services {
         user: &UserId,
         upto: StreamOrdering,
     ) -> Result<UnreadCounts> {
-        // Read positions: unthreaded receipts cover everything, "main" the main timeline,
-        // and a thread receipt only that thread.
-        let mut unthreaded: Option<StreamOrdering> = None;
-        let mut main: Option<StreamOrdering> = None;
-        let mut threads: BTreeMap<String, StreamOrdering> = BTreeMap::new();
+        let mut marks = ReadMarks::default();
         for r in self.store.user_receipts(room_id, user).await? {
             if !matches!(r.receipt_type.as_str(), "m.read" | "m.read.private") {
                 continue;
@@ -79,36 +114,76 @@ impl Services {
             let Some(ev) = self.store.get_event(&r.event_id).await? else {
                 continue;
             };
-            let pos = ev.stream_ordering;
-            let bump = |slot: &mut Option<StreamOrdering>| {
-                if slot.is_none_or(|s| s < pos) {
-                    *slot = Some(pos);
-                }
-            };
-            match r.thread_id.as_deref() {
-                None => bump(&mut unthreaded),
-                Some("main") => bump(&mut main),
-                Some(t) => {
-                    let e = threads.entry(t.to_owned()).or_insert(pos);
-                    if *e < pos {
-                        *e = pos;
-                    }
-                }
-            }
+            marks.add(r.thread_id.as_deref(), ev.stream_ordering);
         }
-        let mut floor = [unthreaded, main]
-            .into_iter()
-            .flatten()
-            .chain(threads.values().copied())
-            .min();
-        if floor.is_none() {
-            floor = self
-                .store
+        let member_since = if marks.floor().is_none() {
+            self.store
                 .get_membership(room_id, user)
                 .await?
-                .map(|m| m.stream_ordering.saturating_sub(1));
+                .map(|m| m.stream_ordering)
+        } else {
+            None
+        };
+        self.unread_counts_from(room_id, user, upto, marks, member_since, None)
+            .await
+    }
+
+    /// The unread notifications across every room the user is in: the badge count of a push.
+    /// The read positions, the memberships and each room's newest event are read once for
+    /// all rooms, and a room whose counts were worked out before and that has had no event
+    /// since costs no query (where each room on its own costs several: tracker #100).
+    pub async fn badge_count(&self, user: &UserId) -> Result<u64> {
+        let upto = self.store.max_stream_ordering().await?;
+        let joined: Vec<(OwnedRoomId, StreamOrdering)> = self
+            .store
+            .memberships_for_user(user)
+            .await?
+            .into_iter()
+            .filter(|m| m.membership == MembershipState::Join)
+            .map(|m| (m.room_id, m.stream_ordering))
+            .collect();
+        let ids: Vec<OwnedRoomId> = joined.iter().map(|(r, _)| r.clone()).collect();
+        let newest = self.store.latest_stream_orderings(&ids, None).await?;
+        let mut marks: HashMap<OwnedRoomId, ReadMarks> = HashMap::new();
+        for (room, thread, pos) in self.store.user_read_positions(user).await? {
+            marks.entry(room).or_default().add(thread.as_deref(), pos);
         }
-        let floor = floor.unwrap_or(0);
+        let mut total = 0;
+        for (room_id, member_since) in joined {
+            let marks = marks.remove(&room_id).unwrap_or_default();
+            let newest = newest.get(&room_id).copied();
+            match self
+                .unread_counts_from(&room_id, user, upto, marks, Some(member_since), newest)
+                .await
+            {
+                Ok(c) => total += c.total.notification_count,
+                Err(e) => self.unread_counts_failed(&room_id, &e),
+            }
+        }
+        Ok(total)
+    }
+
+    /// [`Services::unread_counts`] from the user's read positions in the room, the position
+    /// of their membership (which counts when they have no receipt) and, when known, the
+    /// room's newest event (no event after the cached counts means nothing to read).
+    async fn unread_counts_from(
+        &self,
+        room_id: &RoomId,
+        user: &UserId,
+        upto: StreamOrdering,
+        marks: ReadMarks,
+        member_since: Option<StreamOrdering>,
+        newest: Option<StreamOrdering>,
+    ) -> Result<UnreadCounts> {
+        let floor = marks
+            .floor()
+            .or_else(|| member_since.map(|s| s.saturating_sub(1)))
+            .unwrap_or(0);
+        let ReadMarks {
+            unthreaded,
+            main,
+            threads,
+        } = marks;
         if floor >= upto {
             return Ok(UnreadCounts::default());
         }
@@ -131,7 +206,7 @@ impl Services {
             Some(c) => (c.counted_upto, c.counts),
             None => (floor, UnreadCounts::default()),
         };
-        let events = if start >= upto {
+        let events = if start >= upto || newest.is_some_and(|n| n <= start) {
             Vec::new()
         } else {
             self.store
