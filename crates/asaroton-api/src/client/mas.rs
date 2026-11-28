@@ -85,7 +85,7 @@ pub async fn query_user(
                     "user_id": u.user_id,
                     "display_name": u.display_name,
                     "avatar_url": u.avatar_url,
-                    "is_suspended": false,
+                    "is_suspended": u.is_suspended,
                     "is_deactivated": u.is_deactivated,
                 }),
             ))

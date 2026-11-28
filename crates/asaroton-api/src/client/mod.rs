@@ -10,6 +10,7 @@ pub mod keys;
 pub mod mas;
 pub mod media;
 pub mod misc;
+pub mod moderation;
 pub mod push;
 pub mod rooms;
 pub mod rtc;
@@ -80,6 +81,11 @@ pub fn routes(router: Router<AppState>) -> Router<AppState> {
     );
     let r = route::<c::device::delete_device::v3::Request, _, _>(r, account::delete_device);
     let r = route::<c::device::delete_devices::v3::Request, _, _>(r, account::delete_devices);
+    // account moderation by server admins (v1.18)
+    let r = route::<c::admin::is_user_locked::v1::Request, _, _>(r, moderation::get_locked);
+    let r = route::<c::admin::lock_user::v1::Request, _, _>(r, moderation::set_locked);
+    let r = route::<c::admin::is_user_suspended::v1::Request, _, _>(r, moderation::get_suspended);
+    let r = route::<c::admin::suspend_user::v1::Request, _, _>(r, moderation::set_suspended);
     // profile
     let r = route::<c::profile::get_profile::v3::Request, _, _>(r, account::get_profile);
     let r = route::<c::profile::get_display_name::v3::Request, _, _>(r, account::get_display_name);

@@ -96,7 +96,8 @@ fn user_json(u: &asaroton_store::User) -> Value {
         "is_guest": u.is_guest,
         "user_type": if u.appservice_id.is_some() { Some("support") } else { None },
         "creation_ts": u.created_ts,
-        "locked": false,
+        "locked": u.is_locked,
+        "suspended": u.is_suspended,
         "shadow_banned": false,
         "erased": false,
     })
@@ -196,6 +197,11 @@ pub async fn put_user(
         async {
             let admin = require_admin(&services, &headers).await?;
             let id = parse_user(&services, &user_id)?;
+            for (key, what) in [("locked", "lock"), ("suspended", "suspend")] {
+                if id == admin.user_id && body.get(key) == Some(&Value::Bool(true)) {
+                    return Err(Error::forbidden(format!("You may not {what} yourself.")));
+                }
+            }
             let existing = services.store.get_user(&id).await?;
             let created = existing.is_none();
             let user_id = match existing {
@@ -242,6 +248,14 @@ pub async fn put_user(
                         services.store.set_deactivated(&user_id, false).await?;
                     }
                 }
+            }
+            // Locking (v1.12) and suspension (v1.13), as the spec's admin endpoints set them;
+            // here another admin can be reached too.
+            if let Some(locked) = body.get("locked").and_then(Value::as_bool) {
+                services.set_locked(&user_id, locked).await?;
+            }
+            if let Some(suspended) = body.get("suspended").and_then(Value::as_bool) {
+                services.set_suspended(&user_id, suspended).await?;
             }
             match body.get("displayname") {
                 Some(Value::String(n)) if !created => {

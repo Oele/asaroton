@@ -70,7 +70,7 @@ pub fn capabilities(
     req: &Ruma<get_capabilities::v3::Request>,
 ) -> Result<axum::response::Response> {
     use axum::response::IntoResponse;
-    let _ = req.sender()?;
+    let sender = req.sender()?;
     let mut available = serde_json::Map::new();
     for v in &asaroton_core::SUPPORTED_ROOM_VERSIONS {
         available.insert(v.to_string(), serde_json::json!("stable"));
@@ -83,7 +83,7 @@ pub fn capabilities(
         "max_delay_ms": asaroton_service::delayed_events::MAX_DELAY_MS,
         "max_scheduled": asaroton_service::delayed_events::MAX_SCHEDULED,
     });
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "capabilities": {
             "m.delayed_events": delayed_events,
             "org.matrix.msc4140.delayed_events": delayed_events,
@@ -92,16 +92,23 @@ pub fn capabilities(
                 "available": available,
             },
             "m.change_password": { "enabled": services.mas.is_none() },
-            "m.set_displayname": { "enabled": true },
-            "m.set_avatar_url": { "enabled": true },
+            // A suspended account changes no profile (v1.13).
+            "m.set_displayname": { "enabled": !sender.suspended },
+            "m.set_avatar_url": { "enabled": !sender.suspended },
             "m.3pid_changes": { "enabled": services.config.email.is_some() && services.mas.is_none() },
             "m.get_login_token": { "enabled": false },
             "m.forget_forced_upon_leave": { "enabled": false },
-            "m.profile_fields": { "enabled": true },
+            "m.profile_fields": { "enabled": !sender.suspended },
             // Whether link previews are offered (v1.20, MSC4452).
             "m.preview_url": { "enabled": services.config.url_previews },
         }
     });
+    // Account moderation (v1.18): a server admin may lock and suspend accounts. Left out for
+    // everyone else, as the spec asks when both would be false.
+    if sender.is_admin {
+        body["capabilities"]["m.account_moderation"] =
+            serde_json::json!({ "suspend": true, "lock": true });
+    }
     let mut resp = axum::Json(body).into_response();
     crate::extract::add_cors(resp.headers_mut());
     Ok(resp)

@@ -389,6 +389,25 @@ impl Services {
         Ok(())
     }
 
+    /// Locks or unlocks a local account (Matrix v1.12). Its sessions stay: while it is
+    /// locked, every request with them but a logout is refused with `M_USER_LOCKED`, at once,
+    /// and they work again when the lock is lifted.
+    pub async fn set_locked(&self, user_id: &UserId, locked: bool) -> Result<()> {
+        self.store.set_locked(user_id, locked).await?;
+        self.auth.forget_user(user_id);
+        tracing::info!(%user_id, locked, "account lock changed");
+        Ok(())
+    }
+
+    /// Suspends a local account or lifts its suspension (Matrix v1.13), at once for its
+    /// sessions. What a suspended account may do is decided per request (asaroton-api).
+    pub async fn set_suspended(&self, user_id: &UserId, suspended: bool) -> Result<()> {
+        self.store.set_suspended(user_id, suspended).await?;
+        self.auth.forget_user(user_id);
+        tracing::info!(%user_id, suspended, "account suspension changed");
+        Ok(())
+    }
+
     /// Devices of a user, newest last.
     pub async fn devices(&self, user_id: &UserId) -> Result<Vec<Device>> {
         Ok(self.store.list_devices(user_id).await?)
