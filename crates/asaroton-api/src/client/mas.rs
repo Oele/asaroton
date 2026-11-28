@@ -143,7 +143,14 @@ pub async fn provision_user(
             let set_avatar = body.get("set_avatar_url").and_then(Value::as_str);
             let unset_avatar = body.get("unset_avatar_url").and_then(Value::as_bool) == Some(true);
             let id = user_for(&services, localpart)?;
+            // A suspended account keeps its profile (v1.13): the rest of the provisioning
+            // goes through, its name and avatar stay.
+            let mut keep_profile = false;
             let (status, user_id) = match services.store.get_user(&id).await? {
+                Some(u) if u.is_suspended => {
+                    keep_profile = true;
+                    (StatusCode::OK, u.user_id)
+                }
                 Some(u) => {
                     if let Some(n) = set_name {
                         services.set_display_name(&u.user_id, Some(n)).await?;
@@ -166,7 +173,9 @@ pub async fn provision_user(
                     (StatusCode::CREATED, created.user_id)
                 }
             };
-            if let Some(a) = set_avatar {
+            if keep_profile {
+                tracing::info!(%user_id, "provisioning a suspended account: its profile stays");
+            } else if let Some(a) = set_avatar {
                 services.set_avatar_url(&user_id, Some(a)).await?;
             } else if unset_avatar {
                 services.set_avatar_url(&user_id, None).await?;
@@ -226,6 +235,9 @@ pub async fn set_displayname(
             require_mas(&services, &headers)?;
             let u = existing_user(&services, body_str(&body, "localpart")?).await?;
             let name = body_str(&body, "displayname")?;
+            if u.is_suspended {
+                return Err(Error::suspended());
+            }
             services.set_display_name(&u.user_id, Some(name)).await?;
             Ok((StatusCode::OK, json!({})))
         }
@@ -243,6 +255,9 @@ pub async fn unset_displayname(
         async {
             require_mas(&services, &headers)?;
             let u = existing_user(&services, body_str(&body, "localpart")?).await?;
+            if u.is_suspended {
+                return Err(Error::suspended());
+            }
             services.set_display_name(&u.user_id, None).await?;
             Ok((StatusCode::OK, json!({})))
         }

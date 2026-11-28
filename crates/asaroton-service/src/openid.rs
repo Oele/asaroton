@@ -22,17 +22,29 @@ impl Services {
         Ok(token)
     }
 
+    /// The owner of one of this server's `OpenID` tokens, if it is valid: not expired, and its
+    /// account neither locked (v1.12) nor suspended (v1.13), whose tokens prove nothing to
+    /// widgets, integration managers or calls' SFUs while it lasts.
+    pub async fn openid_token_owner(&self, token: &str) -> Result<Option<OwnedUserId>> {
+        let Some(owner) = self.store.openid_token_owner(token, now_ts()).await? else {
+            return Ok(None);
+        };
+        let usable = self
+            .store
+            .get_user(&owner)
+            .await?
+            .is_none_or(|u| !u.is_locked && !u.is_suspended);
+        Ok(usable.then_some(owner))
+    }
+
     /// The owner of an `OpenID` token, for the federation `openid/userinfo` endpoint.
     pub async fn openid_userinfo(&self, token: &str) -> Result<OwnedUserId> {
-        self.store
-            .openid_token_owner(token, now_ts())
-            .await?
-            .ok_or_else(|| {
-                Error::custom(
-                    "M_UNKNOWN_TOKEN",
-                    http::StatusCode::UNAUTHORIZED,
-                    "Access token unknown or expired.",
-                )
-            })
+        self.openid_token_owner(token).await?.ok_or_else(|| {
+            Error::custom(
+                "M_UNKNOWN_TOKEN",
+                http::StatusCode::UNAUTHORIZED,
+                "Access token unknown or expired.",
+            )
+        })
     }
 }

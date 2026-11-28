@@ -74,6 +74,11 @@ fn allowed_when_locked<T: 'static>() -> bool {
     id == TypeId::of::<logout::v3::Request>() || id == TypeId::of::<logout_all::v3::Request>()
 }
 
+/// Whether a path belongs to the client-server API (media included).
+fn is_client_path(path: &str) -> bool {
+    path.starts_with("/_matrix/client/") || path.starts_with("/_matrix/media/")
+}
+
 fn auth_kind<T: IncomingRequest>() -> Auth
 where
     T::Authentication: 'static,
@@ -170,9 +175,11 @@ where
         let auth = auth_kind::<T>();
         let token = extract_token(&req);
         let sender = match (auth, token) {
-            // An endpoint without authentication ignores a token, even one it does not know,
-            // but not a locked account's (v1.12: "all but" the logouts).
-            (Auth::None, Some(token)) => {
+            // A client endpoint without authentication ignores a token, even one it does not
+            // know, but not a locked account's (v1.12: "all but" the logouts). Only on the
+            // client and media APIs: elsewhere (federation `openid/userinfo`) the token is no
+            // access token at all.
+            (Auth::None, Some(token)) if is_client_path(req.uri().path()) => {
                 if services
                     .auth
                     .authenticate_allowing_locked(&token)
@@ -468,6 +475,16 @@ mod tests {
         assert!(!super::allowed_when_locked::<
             account::deactivate::v3::Request,
         >());
+    }
+
+    #[test]
+    fn only_client_paths_look_at_a_token_they_do_not_need() {
+        assert!(super::is_client_path("/_matrix/client/v3/profile/@a:b"));
+        assert!(super::is_client_path("/_matrix/media/v3/download/b/x"));
+        assert!(!super::is_client_path(
+            "/_matrix/federation/v1/openid/userinfo"
+        ));
+        assert!(!super::is_client_path("/_matrix/key/v2/server"));
     }
 
     #[test]

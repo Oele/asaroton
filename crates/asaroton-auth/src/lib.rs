@@ -12,7 +12,10 @@ pub mod token;
 pub mod uia;
 
 use std::{
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -79,6 +82,9 @@ pub struct Authenticator {
     /// Recently validated tokens and until when each is trusted. Logout, device deletion and
     /// account changes drop the affected entries.
     cache: Arc<dashmap::DashMap<String, (Sender, Instant)>>,
+    /// Counts the `forget_*` calls. A lookup that a forget overtook may have read the account
+    /// as it was before the change (a lock, say): it answers its request but is not cached.
+    generation: Arc<AtomicU64>,
     /// When each device's last-seen timestamp was last written.
     touched: Arc<dashmap::DashMap<(OwnedUserId, OwnedDeviceId), Instant>>,
 }
@@ -96,17 +102,22 @@ impl Authenticator {
             appservices: Vec::new(),
             mas: None,
             cache: Arc::new(dashmap::DashMap::new()),
+            generation: Arc::new(AtomicU64::new(0)),
             touched: Arc::new(dashmap::DashMap::new()),
         }
     }
 
     /// Drops one token from the cache (logout).
     pub fn forget_token(&self, token: &str) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
         self.cache.remove(token);
     }
 
     /// Drops every cached token of a user (device deletion, deactivation, flag changes).
     pub fn forget_user(&self, user_id: &ruma::UserId) {
+        // Counted before the entries go: a lookup that inserts after this sees the new count
+        // and takes its entry out again; one that inserted before is removed here.
+        self.generation.fetch_add(1, Ordering::SeqCst);
         self.cache.retain(|_, (s, _)| s.user_id != user_id);
     }
 
@@ -185,6 +196,7 @@ impl Authenticator {
             }
             return Ok(sender);
         }
+        let generation = self.generation.load(Ordering::SeqCst);
         let (sender, valid_until) = self.authenticate_uncached(token).await?;
         if self.cache.len() > 100_000 {
             self.cache.retain(|_, (_, until)| *until > now);
@@ -193,6 +205,10 @@ impl Authenticator {
             token.to_owned(),
             (sender.clone(), valid_until.min(now + CACHE_TTL)),
         );
+        if self.generation.load(Ordering::SeqCst) != generation {
+            // Something was forgotten while this was read, perhaps this very account.
+            self.cache.remove(token);
+        }
         Ok(sender)
     }
 

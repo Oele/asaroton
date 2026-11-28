@@ -197,9 +197,12 @@ pub async fn put_user(
         async {
             let admin = require_admin(&services, &headers).await?;
             let id = parse_user(&services, &user_id)?;
-            for (key, what) in [("locked", "lock"), ("suspended", "suspend")] {
-                if id == admin.user_id && body.get(key) == Some(&Value::Bool(true)) {
-                    return Err(Error::forbidden(format!("You may not {what} yourself.")));
+            // Not on one's own account, either way (as the spec's endpoints).
+            for key in ["locked", "suspended"] {
+                if id == admin.user_id && body.get(key).is_some_and(Value::is_boolean) {
+                    return Err(Error::forbidden(format!(
+                        "You may not change `{key}` on your own account."
+                    )));
                 }
             }
             let existing = services.store.get_user(&id).await?;

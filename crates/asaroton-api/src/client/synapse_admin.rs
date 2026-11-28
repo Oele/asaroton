@@ -150,7 +150,10 @@ async fn send_server_notice_inner(
         .auth
         .authenticate(&token)
         .await
-        .map_err(|_| crate::Error::forbidden("Invalid access token."))?;
+        .map_err(|e| match e {
+            asaroton_auth::AuthError::Locked => e.into(),
+            _ => crate::Error::forbidden("Invalid access token."),
+        })?;
     let is_admin = services
         .store
         .get_user(&sender.user_id)

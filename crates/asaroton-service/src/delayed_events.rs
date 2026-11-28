@@ -349,21 +349,26 @@ impl Services {
     }
 
     async fn fire_delayed(&self, ev: DelayedEvent) -> Result<OwnedEventId> {
-        // An account suspended after it scheduled this (Matrix v1.13) sends only what ends
-        // something: an emptied event (how a call's membership ends) or its own leave. Anything
-        // else would reach the room as if the suspension were not there.
-        if self
-            .store
-            .get_user(&ev.user_id)
-            .await?
-            .is_some_and(|u| u.is_suspended)
+        // An account locked (v1.12) or suspended (v1.13) after it scheduled this sends only
+        // what ends something: its call membership emptied, or its own leave. Anything else
+        // would reach the room as if the lock or suspension were not there.
+        if let Some(user) = self.store.get_user(&ev.user_id).await?
+            && (user.is_locked || user.is_suspended)
             && !ends_something(&ev)
         {
-            return Err(Error::matrix(
-                ruma::api::error::ErrorKind::UserSuspended,
-                http::StatusCode::FORBIDDEN,
-                "You cannot perform this action while suspended.",
-            ));
+            return Err(if user.is_locked {
+                Error::matrix(
+                    ruma::api::error::ErrorKind::UserLocked,
+                    http::StatusCode::UNAUTHORIZED,
+                    "This account has been locked.",
+                )
+            } else {
+                Error::matrix(
+                    ruma::api::error::ErrorKind::UserSuspended,
+                    http::StatusCode::FORBIDDEN,
+                    "You cannot perform this action while suspended.",
+                )
+            });
         }
         match ev.state_key {
             Some(key) => {
@@ -394,18 +399,20 @@ impl Services {
     }
 }
 
-/// Whether a delayed event only ends something: empty content (a call membership's delayed
-/// leave) or its sender's own membership set to `leave`. The one kind a suspended account
+/// Whether a delayed event only ends something: its sender's call membership (a call's delayed
+/// leave) or its own membership set to `leave`. The one kind a locked or suspended account
 /// still sends.
 fn ends_something(ev: &DelayedEvent) -> bool {
-    let empty = ev
-        .content
-        .as_object()
-        .is_some_and(serde_json::Map::is_empty);
     let own_leave = ev.event_type == "m.room.member"
         && ev.state_key.as_deref() == Some(ev.user_id.as_str())
         && ev.content.get("membership").and_then(Value::as_str) == Some("leave");
-    empty || own_leave
+    own_leave
+        || crate::rtc::ends_own_call_membership(
+            &ev.user_id,
+            &ev.event_type,
+            ev.state_key.as_deref(),
+            &ev.content,
+        )
 }
 
 /// Starts the worker that sends delayed events when their timeout passes, and prunes the
@@ -480,7 +487,7 @@ mod tests {
     }
 
     #[test]
-    fn a_suspended_account_still_ends_its_call_and_leaves() {
+    fn a_locked_or_suspended_account_still_ends_its_call_and_leaves() {
         let ends = |ev: &DelayedEvent| super::ends_something(ev);
         assert!(ends(&delayed(
             "org.matrix.msc3401.call.member",
@@ -488,6 +495,25 @@ mod tests {
             json!({})
         )));
         assert!(ends(&delayed("m.rtc.member", None, json!({}))));
+        assert!(ends(&delayed(
+            "org.matrix.msc3401.call.member",
+            Some("@alice:example.org_DEV"),
+            json!({})
+        )));
+        // Emptying anything else ends no call: an empty ACL shuts every server out.
+        assert!(!ends(&delayed("m.room.server_acl", Some(""), json!({}))));
+        assert!(!ends(&delayed("m.room.power_levels", Some(""), json!({}))));
+        // Nor does ending someone else's call membership, or one that still has content.
+        assert!(!ends(&delayed(
+            "org.matrix.msc3401.call.member",
+            Some("_@bob:example.org_DEV"),
+            json!({})
+        )));
+        assert!(!ends(&delayed(
+            "org.matrix.msc3401.call.member",
+            Some("_@alice:example.org_DEV"),
+            json!({"application": "m.call"})
+        )));
         assert!(ends(&delayed(
             "m.room.member",
             Some("@alice:example.org"),

@@ -12,7 +12,9 @@ a session from there too.
   server's user, 404 for an unknown account, 403 for another admin and for changing their own
   account. The unstable MSC4323 paths answer too.
 - The capability: an admin's `/capabilities` has `m.account_moderation`, Bob's does not.
-- Locked: `/sync`, `/send`, setting and reading `/profile` (reading needs no token, but she
+- Locked: her OpenID token from before vouches for nobody over federation, and a delayed
+  message she scheduled before is not sent (`M_USER_LOCKED`). `/sync`, `/send`, setting and
+  reading `/profile` (reading needs no token, but she
   sends hers; a made-up token is still ignored there), `/versions`, `/whoami`, `/capabilities`,
   a handler that reads its token itself (`/mutual_rooms`), `/login` with the right password
   and `/refresh` all give 401 `M_USER_LOCKED` with `soft_logout`; a wrong password is still a
@@ -21,8 +23,11 @@ a session from there too.
   token locked too). The admin API's user object says `locked`. Unlocked, the same tokens and
   refresh token work at once.
 - Suspended: `/sync`, `/messages`, `/leave` (and rejecting an invite), redacting her own event
-  through `/send` and `/redact`, key backup, device keys, cross-signing, to-device, account
-  data, presence without a message, and a read receipt (kept private) work; `/send` of a
+  through `/send` and `/redact`, hanging up a call she was in, key backup, device keys,
+  cross-signing, to-device, account data, presence without a message, and a read receipt
+  (kept private) work; redacting her own topic, joining a call, emptying another's call
+  membership, a custom receipt type, a new OpenID token (and her old one is refused over
+  federation), `/send` of a
   message, `/join` (also of the room she is invited to), `/invite`, display name, avatar, a
   custom profile field, `/createRoom`, a topic, typing, an upload and redacting Bob's event
   give 403 `M_USER_SUSPENDED`. Her capabilities say she cannot change her profile. A new login
@@ -103,6 +108,29 @@ def run(hs, peers):
 
     def whoami(token):
         return hs.req("GET", "/_matrix/client/v3/account/whoami", None, token)
+
+    def userinfo(openid_token):
+        """What this server tells another one about an OpenID token (no signature needed)."""
+        try:
+            with urllib.request.urlopen(f"{hs.fed}/_matrix/federation/v1/openid/userinfo?access_token={q(openid_token)}", timeout=30) as resp:
+                return resp.status, json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read() or b"{}")
+
+    def openid(token):
+        st, r = hs.req("POST", f"/_matrix/client/v3/user/{q(alice)}/openid/request_token", {}, token)
+        return ok(st, r, "openid token")["access_token"]
+
+    def delayed_outcome(delay_id):
+        """(event ID, errcode) once the delayed event has been sent or cancelled."""
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            rows = query(f"SELECT finalised_ts, COALESCE(finalised_event_id, ''), COALESCE(finalised_error->>'errcode', '') "
+                         f"FROM delayed_events WHERE delay_id = '{delay_id}'")
+            if rows and rows[0][0] and (rows[0][1] or rows[0][2]):
+                return rows[0][1] or None, rows[0][2] or None
+            time.sleep(0.3)
+        return None, None
 
     st, meta = hs.req("GET", "/_matrix/client/v1/auth_metadata")
     ok(st, meta, "auth_metadata")
@@ -185,6 +213,10 @@ def run(hs, peers):
 
     # ---------------------------------------------------------------- locked
     print("-- locked")
+    early_openid = openid(a)
+    check(userinfo(early_openid) == (200, {"sub": alice}), "an OpenID token vouches for Alice before")
+    st, r = send(a, room, {"msgtype": "m.text", "body": "alice locked out"}, query_string=f"{DELAY}=2500")
+    locked_delayed = ok(st, r, "delayed message")["delay_id"]
     oauth = oauth_sign_in("MODOAUTH1")
     check(oauth is not None and whoami(oauth["access_token"])[0] == 200, "Alice also signs in through OAuth (lithostroton)")
     st, r = login("alice")
@@ -215,6 +247,10 @@ def run(hs, peers):
     st, oauth = post_form(meta["token_endpoint"], {"grant_type": "refresh_token", "refresh_token": oauth["refresh_token"], "client_id": client_id})
     check(st == 200 and locked(whoami(oauth.get("access_token"))),
           f"an OAuth refresh keeps the session, and its new token is locked too ({st}, {oauth.get('error')})")
+    st, r = userinfo(early_openid)
+    check(st == 401, f"her OpenID token from before vouches for nobody now ({st} {r.get('errcode')})")
+    event_id, errcode = delayed_outcome(locked_delayed)
+    check(event_id is None and errcode == "M_USER_LOCKED", f"her delayed message is not sent: M_USER_LOCKED ({event_id}, {errcode})")
     st, r = hs.req("GET", f"/_synapse/admin/v2/users/{q(alice)}", None, adm)
     check(st == 200 and r.get("locked") is True and r.get("suspended") is False, f"the admin API's user says locked ({r.get('locked')}, {r.get('suspended')})")
     count_tokens = lambda: int(query(f"SELECT count(*) FROM access_tokens WHERE user_id = '{alice}'")[0][0])
@@ -237,6 +273,12 @@ def run(hs, peers):
     # ---------------------------------------------------------------- suspended
     print("-- suspended")
     alice_said = ok(*text(a, room, "alice one"), "alice")["event_id"]
+    st, r = hs.req("PUT", f"/_matrix/client/v3/rooms/{q(room)}/state/m.room.topic/", {"topic": "alice's topic"}, a)
+    alice_topic = ok(st, r, "topic")["event_id"]
+    early_openid = openid(a)
+    call_key = f"_{alice}_CALLDEV"
+    ok(*hs.req("PUT", f"/_matrix/client/v3/rooms/{q(room)}/state/org.matrix.msc3401.call.member/{q(call_key)}",
+               {"application": "m.call", "call_id": "", "device_id": "CALLDEV", "focus_active": {"type": "livekit"}}, a), "Alice in a call")
     alice_again = ok(*text(a, room, "alice two"), "alice")["event_id"]
     st, r = hs.req("POST", "/_matrix/client/v3/createRoom", {"preset": "private_chat", "invite": [alice]}, b)
     invited = ok(st, r, "createRoom with Alice invited")["room_id"]
@@ -292,6 +334,8 @@ def run(hs, peers):
     check(st == 200, f"account data ({st} {r})")
     st, r = hs.req("PUT", f"/_matrix/client/v3/presence/{q(alice)}/status", {"presence": "unavailable"}, a)
     check(st == 200, f"presence without a message ({st} {r})")
+    st, r = hs.req("PUT", f"/_matrix/client/v3/rooms/{q(room)}/state/org.matrix.msc3401.call.member/{q(call_key)}", {}, a)
+    check(st == 200, f"hanging up the call she was in (its membership emptied through /state) ({st} {r})")
     st, r = hs.req("POST", f"/_matrix/client/v3/rooms/{q(room)}/receipt/m.read/{q(bob_said)}", {}, a)
     check(st == 200, f"a read receipt ({st} {r})")
     kinds = query(f"SELECT receipt_type FROM receipts WHERE user_id = '{alice}' AND room_id = '{room}'")
@@ -302,6 +346,17 @@ def run(hs, peers):
     check(suspended(send(a, room, {"redacts": bob_said}, "m.room.redaction")), "redacting Bob's event through /send")
     check(suspended(hs.req("PUT", f"/_matrix/client/v3/rooms/{q(room)}/redact/{q(bob_said)}/{uuid.uuid4().hex}", {}, a)),
           "and through /redact (she has the power for it)")
+    check(suspended(hs.req("PUT", f"/_matrix/client/v3/rooms/{q(room)}/redact/{q(alice_topic)}/{uuid.uuid4().hex}", {}, a)),
+          "redacting her own topic (state: it would change the room for everyone)")
+    check(suspended(hs.req("PUT", f"/_matrix/client/v3/rooms/{q(room)}/state/org.matrix.msc3401.call.member/{q(call_key)}",
+                           {"application": "m.call", "call_id": ""}, a)), "joining a call")
+    check(suspended(hs.req("PUT", f"/_matrix/client/v3/rooms/{q(room)}/state/org.matrix.msc3401.call.member/{q('_' + bob + '_X')}", {}, a)),
+          "emptying someone else's call membership")
+    check(suspended(hs.req("POST", f"/_matrix/client/v3/rooms/{q(room)}/receipt/org.example.custom/{q(bob_said)}", {}, a)),
+          "a receipt of another kind (it would go to the room's servers)")
+    st, r = userinfo(early_openid)
+    check(st == 401, f"her OpenID token from before vouches for nobody ({st} {r.get('errcode')})")
+    check(suspended(hs.req("POST", f"/_matrix/client/v3/user/{q(alice)}/openid/request_token", {}, a)), "a new OpenID token")
     check(suspended(hs.req("POST", f"/_matrix/client/v3/join/{q(second)}", {}, a)), "joining")
     check(suspended(hs.req("POST", f"/_matrix/client/v3/rooms/{q(invited)}/join", {}, a)), "accepting an invite")
     check(suspended(hs.req("POST", f"/_matrix/client/v3/rooms/{q(room)}/invite", {"user_id": carol}, a)), "inviting")

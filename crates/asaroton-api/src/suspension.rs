@@ -15,14 +15,17 @@
 //! - A write is allowed, refused, or looked at, as [`RULES`] says. A write that is not in the
 //!   table is refused, so that an endpoint added later stays closed to a suspended account
 //!   until someone decides otherwise.
-//! - Looked at ([`inspect`]): `/send` and `/redact` may redact the account's own events and
-//!   nothing else (`/send` of any other event type is refused); `/state` may only set the
-//!   account's own membership to `leave`; presence may change without a status message;
+//! - Looked at ([`inspect`]): `/send` and `/redact` may redact the account's own events (not
+//!   state events, whose redaction changes the room for everyone) and nothing else; `/state`
+//!   may only set the account's own membership to `leave`; both may end its own call
+//!   membership (hanging up a call it was in); presence may change without a status message;
 //!   public read receipts are kept as private ones, so that the account's unread counts stay
-//!   right while others are shown nothing.
+//!   right while others are shown nothing, and other receipt types are refused.
 //!
 //! Not done: the room the spec suggests for talking to the server's admins. Who is suspended
-//! can still reach them by email or through `/.well-known/matrix/support`.
+//! can still reach them by email or through `/.well-known/matrix/support`. Verifying another
+//! user in a room is refused with the rest of `/send` (in an encrypted room its events cannot
+//! be told from messages); verifying the account's own devices goes over to-device and works.
 
 use std::{
     any::{Any, TypeId},
@@ -31,11 +34,14 @@ use std::{
 };
 
 use asaroton_auth::Sender;
+use asaroton_service::rtc::ends_own_call_membership;
 use ruma::{
     EventId, RoomId,
     api::IncomingRequest,
     events::{MessageLikeEventType, StateEventType},
 };
+
+use serde_json::Value;
 
 use crate::{AppState, Error, Result};
 
@@ -209,13 +215,18 @@ async fn inspect(
 ) -> Result<()> {
     use ruma::api::client as c;
     if let Some(req) = request.downcast_ref::<c::message::send_message_event::v3::Request>() {
-        // Only a redaction (v1.18 lets one go through `/send`), of the account's own event.
+        let content = serde_json::from_str::<Value>(req.body.json().get()).unwrap_or_default();
+        // Ending its own call membership (the sticky message form), as a hang-up does.
+        if ends_own_call_membership(&sender.user_id, &req.event_type.to_string(), None, &content) {
+            return Ok(());
+        }
+        // Otherwise only a redaction (v1.18 lets one go through `/send`) of its own event.
         if req.event_type != MessageLikeEventType::RoomRedaction {
             return Err(Error::suspended());
         }
-        let target = serde_json::from_str::<serde_json::Value>(req.body.json().get())
-            .ok()
-            .and_then(|c| c.get("redacts")?.as_str().map(str::to_owned))
+        let target = content
+            .get("redacts")
+            .and_then(Value::as_str)
             .and_then(|id| ruma::OwnedEventId::try_from(id).ok());
         return match target {
             Some(target) => own_event(services, sender, &req.room_id, &target).await,
@@ -226,13 +237,19 @@ async fn inspect(
         return own_event(services, sender, &req.room_id, &req.event_id).await;
     }
     if let Some(req) = request.downcast_ref::<c::state::send_state_event::v3::Request>() {
-        // Leaving through `/state`, as `/leave` would. Nothing else: state is what everyone
-        // in the room sees (and a join this way is a join).
+        // Leaving through `/state`, as `/leave` would, or hanging up a call it was in. Nothing
+        // else: state is what everyone in the room sees (and a join this way is a join).
+        let content = serde_json::from_str::<Value>(req.body.json().get()).unwrap_or_default();
         let leaves = req.event_type == StateEventType::RoomMember
             && req.state_key == sender.user_id.as_str()
-            && serde_json::from_str::<serde_json::Value>(req.body.json().get())
-                .is_ok_and(|c| c.get("membership").and_then(|m| m.as_str()) == Some("leave"));
-        return if leaves {
+            && content.get("membership").and_then(Value::as_str) == Some("leave");
+        let hangs_up = ends_own_call_membership(
+            &sender.user_id,
+            &req.event_type.to_string(),
+            Some(&req.state_key),
+            &content,
+        );
+        return if leaves || hangs_up {
             Ok(())
         } else {
             Err(Error::suspended())
@@ -247,11 +264,17 @@ async fn inspect(
         };
     }
     if let Some(req) = request.downcast_mut::<c::receipt::create_receipt::v3::Request>() {
+        // Read markers for itself; a public read receipt is kept as a private one, and any
+        // other kind (which would go to the room's servers) is refused.
         use c::receipt::create_receipt::v3::ReceiptType;
-        if req.receipt_type == ReceiptType::Read {
-            req.receipt_type = ReceiptType::ReadPrivate;
-        }
-        return Ok(());
+        return match req.receipt_type {
+            ReceiptType::Read => {
+                req.receipt_type = ReceiptType::ReadPrivate;
+                Ok(())
+            }
+            ReceiptType::ReadPrivate | ReceiptType::FullyRead => Ok(()),
+            _ => Err(Error::suspended()),
+        };
     }
     if let Some(req) = request.downcast_mut::<c::read_marker::set_read_marker::v3::Request>() {
         if let Some(public) = req.read_receipt.take() {
@@ -262,19 +285,21 @@ async fn inspect(
     Err(Error::suspended())
 }
 
-/// Allowed when `event_id` is an event of the account's own in `room_id`; otherwise (another
-/// member's, or one this server does not have) refused.
+/// Allowed when `event_id` is one of the account's own events in `room_id` that is no state
+/// event; otherwise (another member's, one this server does not have, or state, whose
+/// redaction would change the room for everyone: an ACL redacted in room versions up to 10
+/// shuts every server out) refused.
 async fn own_event(
     services: &AppState,
     sender: &Sender,
     room_id: &RoomId,
     event_id: &EventId,
 ) -> Result<()> {
-    let own = services
-        .store
-        .get_event(event_id)
-        .await?
-        .is_some_and(|e| e.pdu.sender() == sender.user_id && e.pdu.room_id() == room_id);
+    let own = services.store.get_event(event_id).await?.is_some_and(|e| {
+        e.pdu.sender() == sender.user_id
+            && e.pdu.room_id() == room_id
+            && e.pdu.state_key().is_none()
+    });
     if own { Ok(()) } else { Err(Error::suspended()) }
 }
 

@@ -26,6 +26,34 @@ use sha2::{Digest, Sha256};
 
 use crate::{Error, Result, Services, config::LivekitSettings, delayed_events::UpdateAction};
 
+/// The event types of a call membership: MSC3401's state event as Element Call sends it, and
+/// the names `MatrixRTC` (MSC4143) gives it.
+pub const CALL_MEMBER_TYPES: &[&str] = &[
+    "org.matrix.msc3401.call.member",
+    "m.call.member",
+    "org.matrix.msc4143.rtc.member",
+    "m.rtc.member",
+];
+
+/// Whether an event only ends its sender's own call membership: a call member event with empty
+/// content, under a state key that is the sender's (`@user`, `@user_DEVICE`, `_@user_DEVICE`)
+/// or none (the sticky message form). What a locked or suspended account may still send, so
+/// that a call it was in when the lock or suspension came does not linger.
+pub fn ends_own_call_membership(
+    sender: &UserId,
+    event_type: &str,
+    state_key: Option<&str>,
+    content: &Value,
+) -> bool {
+    let own_key = state_key.is_none_or(|k| {
+        let user = sender.as_str();
+        k == user || k.starts_with(&format!("{user}_")) || k.starts_with(&format!("_{user}_"))
+    });
+    CALL_MEMBER_TYPES.contains(&event_type)
+        && own_key
+        && content.as_object().is_some_and(serde_json::Map::is_empty)
+}
+
 /// The legacy transport type, from the drafts of MSC4195: an entry with a
 /// `livekit_service_url`, which Element Call builds before 0.29 look for.
 pub const TRANSPORT_TYPE: &str = "livekit";
@@ -498,9 +526,7 @@ impl Services {
     /// Who an `OpenID` token belongs to, asking the issuing server when it is not us.
     async fn verify_openid(&self, token: &OpenIdToken) -> Result<OwnedUserId> {
         let owner = if token.matrix_server_name == self.config.server_name {
-            self.store
-                .openid_token_owner(&token.access_token, now_ts())
-                .await?
+            self.openid_token_owner(&token.access_token).await?
         } else {
             self.federation()
                 .remote_openid_userinfo(&token.matrix_server_name, &token.access_token)
