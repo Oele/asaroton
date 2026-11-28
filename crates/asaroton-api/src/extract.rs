@@ -170,6 +170,19 @@ where
         let auth = auth_kind::<T>();
         let token = extract_token(&req);
         let sender = match (auth, token) {
+            // An endpoint without authentication ignores a token, even one it does not know,
+            // but not a locked account's (v1.12: "all but" the logouts).
+            (Auth::None, Some(token)) => {
+                if services
+                    .auth
+                    .authenticate_allowing_locked(&token)
+                    .await
+                    .is_ok_and(|s| s.locked)
+                {
+                    return Err(AuthError::Locked.into());
+                }
+                None
+            }
             (Auth::None | Auth::Server, _) => None,
             (Auth::Required | Auth::Appservice, None) => return Err(Error::missing_token()),
             (Auth::Optional | Auth::AppserviceOptional, None) => None,
