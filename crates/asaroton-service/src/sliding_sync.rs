@@ -357,17 +357,39 @@ struct RoomTrack {
     membership: MembershipState,
     notification_count: u64,
     highlight_count: u64,
-    /// The name, avatar and DM flag the connection was given, so that `/v4/sync` can say
-    /// when they change or go (`RoomResult::name_cleared` and the others).
-    name: Option<String>,
-    avatar: Option<String>,
-    is_dm: bool,
+    /// What `/v4/sync` showed of the room besides its timeline and state; `None` on the
+    /// unstable endpoint, which does not compare these.
+    shown: Option<Shown>,
     /// Fingerprint of the stripped state last sent for an invite, so the invite is sent again
     /// only when it changes. Without this an invited room was part of every response and the
     /// request never long-polled.
     invite: Option<u64>,
     /// The state this connection has of the room.
     state_given: Arc<StateGiven>,
+}
+
+/// What a `/v4/sync` connection was shown of a room besides its timeline and state: its name,
+/// avatar and DM flag (so that it can be told when they change or go, see
+/// `RoomResult::name_cleared`), and the lists it is in (so that it is told when the room moves
+/// between them).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Shown {
+    name: Option<String>,
+    /// An avatar with an empty URL is none.
+    avatar: Option<String>,
+    is_dm: bool,
+    lists: Vec<String>,
+}
+
+impl Shown {
+    fn of(r: &RoomResult) -> Self {
+        Self {
+            name: r.name.clone(),
+            avatar: r.avatar.clone().filter(|a| !a.is_empty()),
+            is_dm: r.is_dm,
+            lists: r.lists.clone(),
+        }
+    }
 }
 
 /// The state a connection has of one room: for each state key, the event it was sent as
@@ -761,7 +783,7 @@ fn required_state_matches(
 
 /// Whether the room's name and its avatar went since the connection was shown the room
 /// (`shown_before`): it had one, and `out` has none. An avatar with an empty URL is none.
-fn cleared(shown_before: Option<&RoomTrack>, out: &RoomResult) -> (bool, bool) {
+fn cleared(shown_before: Option<&Shown>, out: &RoomResult) -> (bool, bool) {
     let set = |v: &Option<String>| v.as_deref().is_some_and(|s| !s.is_empty());
     shown_before.map_or((false, false), |t| {
         (
@@ -769,6 +791,21 @@ fn cleared(shown_before: Option<&RoomTrack>, out: &RoomResult) -> (bool, bool) {
             set(&t.avatar) && !set(&out.avatar),
         )
     })
+}
+
+/// Whether lazy loading sends every membership that changed since the last answer, beside
+/// those of the people the timeline is about (MSC4186, rule 3): only on `/v4/sync`, and only
+/// for an answer that goes on from the last one (not `full`: a room sent anew or with more
+/// state) with no gap in its timeline. A timeline limit of 0 never shows whether there was a
+/// gap, so it does not count as without one: a room that sat in such a list for days would
+/// get every membership change of those days.
+fn sends_every_membership_change(
+    dialect: Dialect,
+    full: bool,
+    timeline_limit: usize,
+    limited: bool,
+) -> bool {
+    dialect == Dialect::V4 && !full && timeline_limit > 0 && !limited
 }
 
 /// Whom a timeline is about: whoever sent one of its events, and whoever one of its
@@ -1109,9 +1146,6 @@ impl Services {
                 )
                 .await?;
             let invite = r.invite_state.as_deref().map(invite_fingerprint);
-            // A room whose only news is that it moved into another list, or out of one, is
-            // not sent: `lists` is not compared (open question 3 of the v4 plan). The counts
-            // tell the client that the lists changed.
             let unchanged = track.is_some_and(|t| {
                 !r.initial
                     && r.timeline.is_empty()
@@ -1126,12 +1160,17 @@ impl Services {
                         // `/v4/sync` has no notification counts (MSC4186; open question 9),
                         // and says when the name, the avatar or the DM flag change and when
                         // state is gone. An invite or a knock shows only its stripped state.
+                        // A room that moved into another list, or out of one, is sent with
+                        // its new `lists`, also when nothing else changed (open question 3 of
+                        // the v4 plan): with the order kept on the server, the counts alone
+                        // do not tell the client which room moved.
                         Dialect::V4 => {
+                            let now = Shown::of(&r);
                             r.stubs.is_empty()
-                                && (r.invite_state.is_some()
-                                    || (t.name == r.name
-                                        && t.avatar == r.avatar
-                                        && t.is_dm == r.is_dm))
+                                && t.shown.as_ref().is_some_and(|was| {
+                                    was.lists == now.lists
+                                        && (r.invite_state.is_some() || *was == now)
+                                })
                         }
                     }
             });
@@ -1161,9 +1200,7 @@ impl Services {
                     membership: sel.membership.membership.clone(),
                     notification_count: r.notification_count,
                     highlight_count: r.highlight_count,
-                    name: r.name.clone(),
-                    avatar: r.avatar.clone(),
-                    is_dm: r.is_dm,
+                    shown: (req.dialect == Dialect::V4).then(|| Shown::of(&r)),
                     invite,
                     state_given: Arc::clone(&r.state_given),
                 },
@@ -1652,20 +1689,25 @@ impl Services {
             lists,
             initial,
             is_dm,
-            is_dm_changed: !initial && track.is_some_and(|t| t.is_dm != is_dm),
+            is_dm_changed: !initial
+                && track
+                    .and_then(|t| t.shown.as_ref())
+                    .is_some_and(|s| s.is_dm != is_dm),
             bump_stamp: u64::try_from(bump).unwrap_or(0),
             read_upto: now.events,
             ..RoomResult::new(m.membership.clone())
         };
         // What the connection was given of the room as a room (not an invite's or a knock's
         // stripped state), for telling it that the name or the avatar went.
-        let shown_before = track.filter(|t| {
-            !initial
-                && !matches!(
-                    t.membership,
-                    MembershipState::Invite | MembershipState::Knock
-                )
-        });
+        let shown_before = track
+            .filter(|t| {
+                !initial
+                    && !matches!(
+                        t.membership,
+                        MembershipState::Invite | MembershipState::Knock
+                    )
+            })
+            .and_then(|t| t.shown.as_ref());
         // An invite or a pending knock shows the room's stripped state and nothing else: the
         // user is not in the room, so its timeline and state are not theirs to read. (A knock
         // used to fall through to the joined path below, which let anyone who could knock on
@@ -1827,10 +1869,9 @@ impl Services {
         let mut about = timeline_members(&events);
         about.extend(sticky_senders.iter().cloned());
         let lazy = sel.required_state.loads_members_lazily();
-        // `/v4/sync` adds a third kind (MSC4186, rule 3 of lazy loading): every membership
-        // that changed since the last answer, when this answer has no gap. The pool of an
+        // `/v4/sync` adds a third kind (see `sends_every_membership_change`). The pool of an
         // answer that is not full holds only what changed.
-        let every_change = req.dialect == Dialect::V4 && !full && !more;
+        let every_change = sends_every_membership_change(req.dialect, full, limit, more);
         let lazy_member = |u: &UserId| {
             every_change || about.contains(u) || given.is_some_and(|g| g.has_member(u))
         };
@@ -1846,8 +1887,10 @@ impl Services {
         } else {
             None
         };
-        // State gone from the room since the last answer, for `/v4/sync`'s stubs.
-        let mut gone: Vec<(StateEventType, String)> = Vec::new();
+        // State the connection has that the room no longer has, for `/v4/sync`'s stubs. A
+        // room the user is out of is shown as it was at their leave, and gets none.
+        let stub_given = given.filter(|_| req.dialect == Dialect::V4 && !left);
+        let mut gone: Vec<(String, String)> = Vec::new();
         let pool: Vec<StoredEvent> = if sel.required_state.is_empty() {
             Vec::new()
         } else if left {
@@ -1869,6 +1912,11 @@ impl Services {
             }
         } else if full {
             let current = self.store.current_state_pdus(room_id).await?;
+            // Sent in full again (more state asked for): what the connection has and the
+            // room lost goes as stubs here too, or it would stay with the client for good.
+            if let Some(g) = stub_given {
+                gone = self.gone_keys(room_id, g, &current).await?;
+            }
             self.state_as_of(room_id, upper, current).await?
         } else if let Some(l) = lower {
             // What changed since the last position, and what differs from what the
@@ -1881,7 +1929,7 @@ impl Services {
                     room_id,
                     l,
                     |e| given.is_some_and(|g| g.has_another(e)),
-                    req.dialect == Dialect::V4,
+                    stub_given.map(|g| &**g),
                 )
                 .await?;
             gone = removed;
@@ -1949,7 +1997,6 @@ impl Services {
         if let Some(g) = given {
             out.stubs = gone
                 .into_iter()
-                .map(|(ty, key)| (ty.to_string(), key))
                 .filter(|(ty, key)| {
                     g.has_key(ty, key)
                         && sel.required_state.matches(ty, key, user, lazy_member)
@@ -2169,28 +2216,31 @@ impl Services {
         also: impl Fn(&StoredEvent) -> bool,
     ) -> Result<Vec<StoredEvent>> {
         Ok(self
-            .state_changes_and_removed(room_id, since, also, false)
+            .state_changes_and_removed(room_id, since, also, None)
             .await?
             .0)
     }
 
-    /// [`Services::state_changes_and`], and, when `removed` is asked for, the state keys that
-    /// the state as of `since` had and the current state has not (a state reset can take
-    /// state away).
+    /// [`Services::state_changes_and`], and, given what a connection has (`gone_of`), the
+    /// state keys of it that the current state no longer has (see [`Services::gone_keys`]).
     async fn state_changes_and_removed(
         &self,
         room_id: &RoomId,
         since: i64,
         also: impl Fn(&StoredEvent) -> bool,
-        removed: bool,
-    ) -> Result<(Vec<StoredEvent>, Vec<(StateEventType, String)>)> {
+        gone_of: Option<&StateGiven>,
+    ) -> Result<(Vec<StoredEvent>, Vec<(String, String)>)> {
         let at = self
             .store
             .room_events_in_range(room_id, since + 1, None, Direction::Backwards, 1)
             .await?;
         let current = self.store.current_state_pdus(room_id).await?;
+        let gone = match gone_of {
+            Some(given) => self.gone_keys(room_id, given, &current).await?,
+            None => Vec::new(),
+        };
         let Some(group) = at.first().and_then(|e| e.state_group) else {
-            return Ok((current, Vec::new()));
+            return Ok((current, gone));
         };
         let before: HashMap<(StateEventType, String), String> = self
             .store
@@ -2199,23 +2249,6 @@ impl Services {
             .into_iter()
             .map(|e| ((e.event_type, e.state_key), e.event_id.to_string()))
             .collect();
-        let now: HashSet<(StateEventType, String)> = current
-            .iter()
-            .filter_map(|e| e.pdu.state_tuple().map(|(t, k)| (t, k.to_owned())))
-            .collect();
-        let mut gone = Vec::new();
-        for key in before.keys().filter(|k| removed && !now.contains(*k)) {
-            // Read once more by its key: the events above are joined with the events table,
-            // and an entry missing there is no reason to tell a client the state is gone.
-            if self
-                .store
-                .current_state_event(room_id, &key.0, &key.1)
-                .await?
-                .is_none()
-            {
-                gone.push(key.clone());
-            }
-        }
         let changed = current
             .into_iter()
             .filter(|e| {
@@ -2227,6 +2260,41 @@ impl Services {
             })
             .collect();
         Ok((changed, gone))
+    }
+
+    /// The state keys a connection has (`given`) that the room's current state (`current`, as
+    /// read) no longer has: state a state reset took away. Each is read once more by itself:
+    /// `current` is joined with the events table, and an entry missing there is no reason to
+    /// tell a client that the state is gone.
+    async fn gone_keys(
+        &self,
+        room_id: &RoomId,
+        given: &StateGiven,
+        current: &[StoredEvent],
+    ) -> Result<Vec<(String, String)>> {
+        let mut now: HashMap<String, HashSet<&str>> = HashMap::new();
+        for e in current {
+            if let Some((ty, key)) = e.pdu.state_tuple() {
+                now.entry(ty.to_string()).or_default().insert(key);
+            }
+        }
+        let mut gone = Vec::new();
+        for (ty, keys) in &given.0 {
+            for key in keys.keys() {
+                if now.get(ty).is_some_and(|k| k.contains(key.as_str())) {
+                    continue;
+                }
+                if self
+                    .store
+                    .current_state_event(room_id, &StateEventType::from(ty.as_str()), key)
+                    .await?
+                    .is_none()
+                {
+                    gone.push((ty.clone(), key.clone()));
+                }
+            }
+        }
+        Ok(gone)
     }
 
     /// Rooms marked as direct chats in the user's `m.direct` account data.
@@ -2282,30 +2350,19 @@ impl Services {
             {
                 continue;
             }
-            let keys: Vec<(StateEventType, String)> = self
+            let children: HashSet<OwnedRoomId> = self
                 .store
-                .current_state(space)
+                .current_state_pdus_of_type(space, &StateEventType::SpaceChild)
                 .await?
                 .into_iter()
-                .filter(|e| e.event_type == StateEventType::SpaceChild)
-                .map(|e| (e.event_type, e.state_key))
+                .filter(|e| {
+                    serde_json::from_str::<Value>(e.pdu.content().get())
+                        .ok()
+                        .and_then(|c| c.get("via")?.as_array().map(|v| !v.is_empty()))
+                        .unwrap_or(false)
+                })
+                .filter_map(|e| OwnedRoomId::try_from(e.pdu.state_key()?).ok())
                 .collect();
-            let children: HashSet<OwnedRoomId> = if keys.is_empty() {
-                HashSet::new()
-            } else {
-                self.store
-                    .current_state_pdus_for(space, &keys)
-                    .await?
-                    .into_iter()
-                    .filter(|e| {
-                        serde_json::from_str::<Value>(e.pdu.content().get())
-                            .ok()
-                            .and_then(|c| c.get("via")?.as_array().map(|v| !v.is_empty()))
-                            .unwrap_or(false)
-                    })
-                    .filter_map(|e| OwnedRoomId::try_from(e.pdu.state_key()?).ok())
-                    .collect()
-            };
             out.space_children.insert(space.clone(), children);
         }
         Ok(out)
@@ -2452,27 +2509,14 @@ mod tests {
 
     #[test]
     fn a_name_or_avatar_that_went_is_cleared() {
-        let track = |name: Option<&str>, avatar: Option<&str>| RoomTrack {
-            timeline_upto: 0,
-            membership_at: 0,
-            required_state: RequiredState::default(),
-            timeline_limit: 1,
-            membership: MembershipState::Join,
-            notification_count: 0,
-            highlight_count: 0,
-            name: name.map(str::to_owned),
-            avatar: avatar.map(str::to_owned),
-            is_dm: false,
-            invite: None,
-            state_given: Arc::default(),
-        };
         let now = |name: Option<&str>, avatar: Option<&str>| {
             let mut r = RoomResult::new(MembershipState::Join);
             r.name = name.map(str::to_owned);
             r.avatar = avatar.map(str::to_owned);
             r
         };
-        let had = track(Some("Room"), Some("mxc://x.test/a"));
+        let shown = |name, avatar| Shown::of(&now(name, avatar));
+        let had = shown(Some("Room"), Some("mxc://x.test/a"));
         assert_eq!(cleared(Some(&had), &now(None, None)), (true, true));
         assert_eq!(cleared(Some(&had), &now(None, Some(""))), (true, true));
         assert_eq!(
@@ -2480,10 +2524,38 @@ mod tests {
             (false, false)
         );
         assert_eq!(
-            cleared(Some(&track(None, None)), &now(None, None)),
+            cleared(Some(&shown(None, None)), &now(None, None)),
             (false, false)
         );
         assert_eq!(cleared(None, &now(None, None)), (false, false));
+        // An avatar with an empty URL is shown as none, so it compares equal to none.
+        assert_eq!(shown(None, Some("")), shown(None, None));
+        assert_ne!(shown(None, Some("mxc://x.test/a")), shown(None, None));
+        let mut in_lists = now(None, None);
+        in_lists.lists = vec!["fav".to_owned()];
+        assert_ne!(Shown::of(&in_lists), shown(None, None), "lists count");
+    }
+
+    #[test]
+    fn every_membership_change_only_on_v4_answers_without_a_gap() {
+        // dialect, full, timeline limit, limited
+        let rule = sends_every_membership_change;
+        assert!(
+            rule(Dialect::V4, false, 5, false),
+            "an incremental answer, no gap"
+        );
+        assert!(!rule(Dialect::V4, false, 5, true), "limited");
+        assert!(
+            !rule(Dialect::V4, true, 5, false),
+            "full: initial or expanded"
+        );
+        assert!(!rule(Dialect::V4, false, 0, false), "a timeline limit of 0");
+        for (full, limit, limited) in [(false, 5, false), (false, 0, false), (true, 1, true)] {
+            assert!(
+                !rule(Dialect::Unstable, full, limit, limited),
+                "the unstable endpoint keeps its rule"
+            );
+        }
     }
 
     #[test]

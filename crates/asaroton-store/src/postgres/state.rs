@@ -282,6 +282,23 @@ impl StateStore for PostgresStore {
         rows.into_iter().map(StoredEvent::try_from).collect()
     }
 
+    async fn current_state_pdus_of_type(
+        &self,
+        room_id: &RoomId,
+        event_type: &StateEventType,
+    ) -> Result<Vec<StoredEvent>> {
+        let rows: Vec<EventRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT {EVENT_COLUMNS} FROM current_state_events c
+             JOIN events e ON e.event_id = c.event_id JOIN rooms r ON r.room_id = e.room_id
+             WHERE c.room_id = $1 AND c.event_type = $2"
+        )))
+        .bind(room_id.as_str())
+        .bind(event_type.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(StoredEvent::try_from).collect()
+    }
+
     async fn current_state_pdus_for(
         &self,
         room_id: &RoomId,

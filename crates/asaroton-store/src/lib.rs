@@ -519,6 +519,12 @@ pub trait StateStore: Send + Sync {
     ) -> Result<Option<OwnedEventId>>;
     /// Current state as full PDUs.
     async fn current_state_pdus(&self, room_id: &RoomId) -> Result<Vec<StoredEvent>>;
+    /// The current state events of one type.
+    async fn current_state_pdus_of_type(
+        &self,
+        room_id: &RoomId,
+        event_type: &StateEventType,
+    ) -> Result<Vec<StoredEvent>>;
     /// The current state events for the given keys only.
     async fn current_state_pdus_for(
         &self,
