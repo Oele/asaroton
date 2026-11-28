@@ -22,7 +22,8 @@ Alice syncs over `POST /_matrix/client/v4/sync`; Bob and Carol act. What is chec
   5. typing (MSC4508): bare `user_ids`; nothing for a room Alice is banned from.
   6. Scope: a room that drops out of a list's range and comes back gets the tag, the receipt
      and the typing of while it was out; with more than 100 receipts changed while it was out
-     it gets its initial receipts instead of the backlog. `rooms` names subscriptions only: a room in a list
+     the connection expires (`M_UNKNOWN_POS`, as MSC4551 has it), and when it starts over the
+     room gets its initial receipts. `rooms` names subscriptions only: a room in a list
      that is not subscribed is not covered by it. An unknown extension is ignored.
 
 Needs what scripts/fedlab.py needs. Takes some seconds.
@@ -292,11 +293,14 @@ def run(hs, peers):
         st, x = hs.req("POST", f"/_matrix/client/v3/rooms/{q(busy)}/receipt/m.read/{q(far)}", {"thread_id": f"$thread{i}:sender.test"}, b)
         assert st == 200, x
     send(c, busy, "Busy comes back")
-    r = ok(backlog, r["pos"])
+    st, e = sync(backlog, r["pos"])
+    check(st == 400 and e.get("errcode") == "M_UNKNOWN_POS", f"with a backlog of more than 100 receipts the connection expires: M_UNKNOWN_POS ({st} {e.get('errcode')})")
+    st, e = sync(backlog, r["pos"])
+    check(st == 400 and e.get("errcode") == "M_UNKNOWN_POS", f"for good: the same pos again ({st} {e.get('errcode')})")
+    r = ok(backlog)
     got = readers(r, busy)
-    check(list(r.get("rooms", {})) == [busy], "Busy comes back on top")
-    check((seen, "m.read", alice) in got and not any(ev == far for ev, _, _ in got),
-          f"with a backlog of more than 100 receipts it starts over: Alice's own receipts, none of the backlog ({sorted(got)})")
+    check(list(r.get("rooms", {})) == [busy] and (seen, "m.read", alice) in got and not any(ev == far for ev, _, _ in got),
+          f"the connection started over: Busy enters scope with its initial receipts, Alice's own and none of the backlog ({sorted(got)})")
 
     print("-- rooms names subscriptions")
     named = {"conn_id": "named", "lists": lists_all, "extensions": {"receipts": {"enabled": True, "lists": [], "rooms": [two]}}}

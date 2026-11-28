@@ -706,6 +706,21 @@ impl SlidingSyncConnections {
         }
     }
 
+    /// Drops connection `key` when working out an answer ended in `M_UNKNOWN_POS` (the
+    /// connection expires, see `MAX_RECEIPTS_BACKLOG`), so that none of its positions works
+    /// any more.
+    fn expire_on(&self, key: &ConnKey, error: &Error) {
+        if matches!(
+            error,
+            Error::Matrix {
+                kind: ruma::api::error::ErrorKind::UnknownPos,
+                ..
+            }
+        ) {
+            self.conns.remove(key);
+        }
+    }
+
     /// Remembers what the answer to request number `request` tells the client, unless a
     /// newer request has been made on the connection in the meantime. A client that gives up
     /// on a waiting request and asks again is answered by the new one; the old one may still
@@ -904,17 +919,15 @@ fn cleared(shown_before: Option<&Shown>, out: &RoomResult) -> (bool, bool) {
 }
 
 /// The most receipts a room is sent as what changed since its position in the receipts
-/// extension on `/v4/sync`; past it the room gets its initial receipts instead, as when it enters
-/// scope for the first time (MSC4551: the user's own receipts, and everyone's on the answer's
-/// timeline). A room that was out of scope for long, or a client that was away for long, can
-/// have a backlog as large as the room's full receipts (one per member, receipt type and
-/// thread), which is what MSC4551 keeps out of a first entry. A hundred covers a room with a few
-/// dozen active readers coming back after a while.
+/// extension on `/v4/sync`. A room that was out of scope for long, or a client that was away for
+/// long, can have a backlog as large as the room's full receipts (one per member, receipt type
+/// and thread), which is what MSC4551 keeps out of a room's first entry. A hundred covers a room
+/// with a few dozen active readers coming back after a while.
 ///
-/// MSC4551 asks a server that does not send the whole backlog to expire the connection
-/// instead; that makes every room of the connection start over for the sake of one, so the one
-/// room starts over here. Other users' receipts on events outside the timeline may then stay
-/// stale at the client until they change again.
+/// Past it the connection expires (`M_UNKNOWN_POS`), as MSC4551 has it: a server that does not
+/// send every receipt that changed while a room was out MUST NOT send only some of them, and
+/// expires the connection instead. The cost is the client's: it starts the connection over, and
+/// every room in scope gets its initial receipts again.
 const MAX_RECEIPTS_BACKLOG: usize = 100;
 
 /// How many heroes a room without a name gets.
@@ -1008,7 +1021,10 @@ impl Services {
         let began = std::time::Instant::now();
         let (base, request, nonce) = self.sliding_sync.resolve(&key, req.pos.as_deref())?;
         let mut rx = self.notifier.subscribe();
-        let (mut result, mut state) = self.compute_sliding_sync(&req, base.as_ref()).await?;
+        let (mut result, mut state) = self
+            .compute_sliding_sync(&req, base.as_ref())
+            .await
+            .inspect_err(|e| self.sliding_sync.expire_on(&key, e))?;
         if base.is_some() && result.quiet && !req.timeout.is_zero() {
             let user_id = req.user_id.clone();
             let rooms: Vec<OwnedRoomId> = self
@@ -1046,7 +1062,10 @@ impl Services {
                 if !woke {
                     break;
                 }
-                (result, state) = self.compute_sliding_sync(&req, base.as_ref()).await?;
+                (result, state) = self
+                    .compute_sliding_sync(&req, base.as_ref())
+                    .await
+                    .inspect_err(|e| self.sliding_sync.expire_on(&key, e))?;
                 if !result.quiet {
                     break;
                 }
@@ -1739,8 +1758,9 @@ impl Services {
     /// the user rejoins: the room is `initial`) gets its initial receipts: everyone's on the
     /// events of this answer's timeline, and all the user's own. A room that was in scope gets
     /// what changed after its position, which for a room coming back into scope is what changed
-    /// while it was out; when that is more than `MAX_RECEIPTS_BACKLOG`, the initial receipts
-    /// instead. A room sent with an expanded timeline also gets the receipts on its timeline.
+    /// while it was out; when that is more than `MAX_RECEIPTS_BACKLOG`, the connection expires
+    /// (an `M_UNKNOWN_POS` error). A room sent with an expanded timeline also gets the receipts
+    /// on its timeline.
     /// Other users' private receipts are never sent. Returns bare `m.receipt` contents.
     async fn receipts_v4(
         &self,
@@ -1771,8 +1791,8 @@ impl Services {
                 .and_then(|p| p.get(room_id))
                 .copied()
                 .filter(|_| shown.is_none_or(|r| !r.initial));
-            // What changed after the room's position, unless that is too much (see
-            // `MAX_RECEIPTS_BACKLOG`): then the room starts over, as if entering scope anew.
+            // What changed after the room's position, all of it or none: too much of it (see
+            // `MAX_RECEIPTS_BACKLOG`) expires the connection.
             let backlog = match at {
                 Some(at) => {
                     let changed: Vec<asaroton_store::Receipt> = self
@@ -1782,7 +1802,15 @@ impl Services {
                         .into_iter()
                         .filter(|r| r.receipt_type != "m.read.private" || r.user_id == *user)
                         .collect();
-                    (changed.len() <= MAX_RECEIPTS_BACKLOG).then_some((at, changed))
+                    if changed.len() > MAX_RECEIPTS_BACKLOG {
+                        return Err(Error::matrix(
+                            ruma::api::error::ErrorKind::UnknownPos,
+                            http::StatusCode::BAD_REQUEST,
+                            "Too many receipts changed since this position; start the \
+                             connection over.",
+                        ));
+                    }
+                    Some((at, changed))
                 }
                 None => None,
             };
@@ -3075,6 +3103,17 @@ mod tests {
         let key = conn_key(me, "D", "c1");
         conns.store_pending(&key, empty_state(2), 1, "");
         assert!(!conns.conns.contains_key(&key));
+    }
+
+    #[test]
+    fn an_unknown_pos_while_answering_expires_the_connection() {
+        let conns = SlidingSyncConnections::default();
+        let pos = start(&conns, "@a:x.test", "D", "c");
+        let key = conn_key("@a:x.test", "D", "c");
+        conns.expire_on(&key, &Error::invalid_param("not this one"));
+        assert!(conns.resolve(&key, Some(&pos)).is_ok());
+        conns.expire_on(&key, &unknown_pos());
+        assert!(conns.resolve(&key, Some(&pos)).is_err());
     }
 
     #[test]
