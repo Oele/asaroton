@@ -713,10 +713,12 @@ impl SlidingSyncConnections {
     /// answer goes nowhere. Were its state kept, the client's next position would confirm
     /// events and state that it was never sent.
     ///
-    /// A connection that was dropped meanwhile (see [`Self::make_room_for`]) stays dropped.
-    fn store_pending(&self, key: &ConnKey, state: ConnState, request: u64) {
+    /// A connection that was dropped meanwhile (see [`Self::make_room_for`]) stays dropped, and
+    /// one started anew under the same key (another `nonce`) is not given the old one's state.
+    fn store_pending(&self, key: &ConnKey, state: ConnState, request: u64, nonce: &str) {
         if let Some(mut conn) = self.conns.get_mut(key)
             && conn.requests == request
+            && conn.nonce == nonce
         {
             conn.pending = Some(state);
         }
@@ -1081,7 +1083,8 @@ impl Services {
                 .map_or(0, |(_, events)| events.len()),
             "sliding sync answered"
         );
-        self.sliding_sync.store_pending(&key, state, request);
+        self.sliding_sync
+            .store_pending(&key, state, request, &nonce);
         Ok(result)
     }
 
@@ -2991,7 +2994,7 @@ mod tests {
     fn start(conns: &SlidingSyncConnections, user: &str, device: &str, conn_id: &str) -> String {
         let key = conn_key(user, device, conn_id);
         let (_, request, nonce) = conns.resolve(&key, None).unwrap();
-        conns.store_pending(&key, empty_state(1), request);
+        conns.store_pending(&key, empty_state(1), request, &nonce);
         format_pos(&SyncToken::default(), &nonce, 1)
     }
 
@@ -3070,7 +3073,7 @@ mod tests {
         assert_eq!(conns.conns.len(), before);
         // A request that was still running on the dropped connection does not bring it back.
         let key = conn_key(me, "D", "c1");
-        conns.store_pending(&key, empty_state(2), 1);
+        conns.store_pending(&key, empty_state(2), 1, "");
         assert!(!conns.conns.contains_key(&key));
     }
 
@@ -3120,17 +3123,17 @@ mod tests {
         };
         let (base, first, nonce) = conns.resolve(&key, None).unwrap();
         assert!(base.is_none());
-        conns.store_pending(&key, state(1), first);
+        conns.store_pending(&key, state(1), first, &nonce);
         let pos = |seq| format_pos(&SyncToken::default(), &nonce, seq);
 
         // A request that waits, and one that the client makes after giving up on it.
         let (_, waiting, _) = conns.resolve(&key, Some(&pos(1))).unwrap();
         let (_, newer, _) = conns.resolve(&key, Some(&pos(1))).unwrap();
-        conns.store_pending(&key, state(2), newer);
+        conns.store_pending(&key, state(2), newer, &nonce);
         // The first one finishes late, with other content under the same number.
         let mut late = state(2);
         late.list_counts.insert("late".to_owned(), 1);
-        conns.store_pending(&key, late, waiting);
+        conns.store_pending(&key, late, waiting, &nonce);
         let (confirmed, _, _) = conns.resolve(&key, Some(&pos(2))).unwrap();
         assert!(
             confirmed.is_some_and(|s| s.list_counts.is_empty()),
@@ -3164,7 +3167,7 @@ mod tests {
             receipts_upto: None,
             typing_scope: None,
         };
-        conns.store_pending(&key, state.clone(), first);
+        conns.store_pending(&key, state.clone(), first, &nonce);
         let pos = format_pos(&token, &nonce, 1);
         assert_eq!(SyncToken::parse(&pos).map(|t| t.events), Some(42));
         assert_eq!(
@@ -3181,7 +3184,7 @@ mod tests {
         );
         let (_, again, _) = conns.resolve(&key, None).unwrap();
         state.seq = 1;
-        conns.store_pending(&key, state, again);
+        conns.store_pending(&key, state, again, &nonce);
         assert!(conns.resolve(&key, Some(&pos)).is_err());
     }
 
