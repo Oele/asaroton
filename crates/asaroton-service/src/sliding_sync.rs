@@ -7,7 +7,10 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     hash::{DefaultHasher, Hash, Hasher},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
@@ -556,6 +559,9 @@ struct Connection {
     /// How many requests were made on this connection. Only the newest may leave its state
     /// behind as `pending` (see `SlidingSyncConnections::store_pending`).
     requests: u64,
+    /// When a request last came on this connection, on `SlidingSyncConnections::clock`: the
+    /// one used longest ago goes first when there are too many.
+    last_used: u64,
 }
 
 /// A connection's position as clients see it: `<sync token>~<nonce>~<number>`. The sync token
@@ -575,13 +581,82 @@ fn parse_pos(pos: &str) -> Option<(&str, u64)> {
     Some((nonce, seq))
 }
 
-/// Per-connection state of every sliding sync client.
-#[derive(Debug, Default)]
+/// At most this many connections per user and device, on both endpoints together (MSC4186:
+/// servers SHOULD limit the connections per device). A client keeps one or two (the Rust SDK:
+/// one for the room list, one for encryption); fifty leaves room for a client that starts new
+/// ones without ending old ones, and keeps one device from filling the server.
+const MAX_CONNECTIONS_PER_DEVICE: usize = 50;
+/// At most this many connections in all. Past it, those used longest ago are dropped down to
+/// [`CONNECTIONS_KEPT`]: the sort that finds them then runs once per thousand new connections.
+const MAX_CONNECTIONS: usize = 10_000;
+const CONNECTIONS_KEPT: usize = 9_000;
+
+/// Per-connection state of every sliding sync client. A connection that is dropped to keep
+/// within the limits is expired: a request with one of its positions gets `M_UNKNOWN_POS`.
+#[derive(Debug)]
 pub struct SlidingSyncConnections {
     conns: DashMap<ConnKey, Connection>,
+    /// Ticks with every request, to tell which connection was used longest ago.
+    clock: AtomicU64,
+    per_device: usize,
+    max_total: usize,
+    kept: usize,
+}
+
+impl Default for SlidingSyncConnections {
+    fn default() -> Self {
+        Self::with_limits(
+            MAX_CONNECTIONS_PER_DEVICE,
+            MAX_CONNECTIONS,
+            CONNECTIONS_KEPT,
+        )
+    }
 }
 
 impl SlidingSyncConnections {
+    fn with_limits(per_device: usize, max_total: usize, kept: usize) -> Self {
+        Self {
+            conns: DashMap::new(),
+            clock: AtomicU64::new(0),
+            per_device,
+            max_total,
+            kept,
+        }
+    }
+
+    /// Makes room for a new connection `key`: drops the device's connections used longest ago
+    /// while it has its fill, and when there are too many connections in all, those used
+    /// longest ago of all of them.
+    fn make_room_for(&self, key: &ConnKey) {
+        let oldest_first = |mut found: Vec<(u64, ConnKey)>| {
+            found.sort_unstable_by_key(|(used, _)| *used);
+            found
+        };
+        let mine = oldest_first(
+            self.conns
+                .iter()
+                .filter(|c| c.key().user == key.user && c.key().device == key.device)
+                .map(|c| (c.last_used, c.key().clone()))
+                .collect(),
+        );
+        let excess = (mine.len() + 1).saturating_sub(self.per_device);
+        for (_, old) in mine.iter().take(excess) {
+            self.conns.remove(old);
+        }
+        if self.conns.len() >= self.max_total {
+            let all = oldest_first(
+                self.conns
+                    .iter()
+                    .map(|c| (c.last_used, c.key().clone()))
+                    .collect(),
+            );
+            let excess = all.len().saturating_sub(self.kept);
+            for (_, old) in all.iter().take(excess) {
+                self.conns.remove(old);
+            }
+        }
+    }
+
     /// The state a request with position `pos` starts from, the request's number on its
     /// connection (to be handed back to `store_pending`) and the connection's nonce (for the
     /// answer's `pos`, see [`format_pos`]).
@@ -590,9 +665,19 @@ impl SlidingSyncConnections {
         key: &ConnKey,
         pos: Option<&str>,
     ) -> Result<(Option<ConnState>, u64, String)> {
-        let mut entry = self.conns.entry(key.clone()).or_default();
+        let now = self.clock.fetch_add(1, Ordering::Relaxed) + 1;
+        if pos.is_none() && !self.conns.contains_key(key) {
+            self.make_room_for(key);
+        }
+        let mut entry = match pos {
+            None => self.conns.entry(key.clone()).or_default(),
+            // A position of a connection that is not there (expired, dropped, never made)
+            // makes none.
+            Some(_) => self.conns.get_mut(key).ok_or_else(unknown_pos)?,
+        };
         let conn = &mut *entry;
         conn.requests += 1;
+        conn.last_used = now;
         let request = conn.requests;
         match pos {
             None => {
@@ -627,25 +712,13 @@ impl SlidingSyncConnections {
     /// be running here (behind a reverse proxy it is not dropped), and when it finishes its
     /// answer goes nowhere. Were its state kept, the client's next position would confirm
     /// events and state that it was never sent.
-    fn store_pending(&self, key: &ConnKey, state: ConnState, request: u64, nonce: &str) {
-        if self.conns.len() > 10_000 {
-            self.conns.clear();
-        }
-        match self.conns.entry(key.clone()) {
-            dashmap::Entry::Occupied(mut conn) => {
-                if conn.get().requests == request {
-                    conn.get_mut().pending = Some(state);
-                }
-            }
-            // Dropped with all the others just now: this request starts the connection anew.
-            dashmap::Entry::Vacant(slot) => {
-                slot.insert(Connection {
-                    confirmed: None,
-                    pending: Some(state),
-                    requests: request,
-                    nonce: nonce.to_owned(),
-                });
-            }
+    ///
+    /// A connection that was dropped meanwhile (see [`Self::make_room_for`]) stays dropped.
+    fn store_pending(&self, key: &ConnKey, state: ConnState, request: u64) {
+        if let Some(mut conn) = self.conns.get_mut(key)
+            && conn.requests == request
+        {
+            conn.pending = Some(state);
         }
     }
 }
@@ -828,6 +901,52 @@ fn cleared(shown_before: Option<&Shown>, out: &RoomResult) -> (bool, bool) {
     })
 }
 
+/// The most receipts a room is sent as what changed since its position in the receipts
+/// extension on `/v4/sync`; past it the room gets its initial receipts instead, as when it enters
+/// scope for the first time (MSC4551: the user's own receipts, and everyone's on the answer's
+/// timeline). A room that was out of scope for long, or a client that was away for long, can
+/// have a backlog as large as the room's full receipts (one per member, receipt type and
+/// thread), which is what MSC4551 keeps out of a first entry. A hundred covers a room with a few
+/// dozen active readers coming back after a while.
+///
+/// MSC4551 asks a server that does not send the whole backlog to expire the connection
+/// instead; that makes every room of the connection start over for the sake of one, so the one
+/// room starts over here. Other users' receipts on events outside the timeline may then stay
+/// stale at the client until they change again.
+const MAX_RECEIPTS_BACKLOG: usize = 100;
+
+/// How many heroes a room without a name gets.
+const MAX_HEROES: usize = 5;
+
+/// A room's heroes, from its members in the order of their memberships, the user left out. On
+/// `/v4/sync` (MSC4186): the joined members first, then the invited, then those who left or
+/// were banned, as for `m.heroes` in `/v3/sync`. The unstable endpoint takes joined and invited
+/// members alike, in the order they came, and nobody who left.
+fn heroes(members: &[Membership], user: &UserId, dialect: Dialect) -> Vec<Hero> {
+    let tier = |m: &MembershipState| match (m, dialect) {
+        (MembershipState::Join, _) | (MembershipState::Invite, Dialect::Unstable) => Some(0),
+        (MembershipState::Invite, Dialect::V4) => Some(1),
+        (MembershipState::Leave | MembershipState::Ban, Dialect::V4) => Some(2),
+        _ => None,
+    };
+    let mut picked: Vec<(u8, &Membership)> = members
+        .iter()
+        .filter(|m| m.user_id != *user)
+        .filter_map(|m| tier(&m.membership).map(|t| (t, m)))
+        .collect();
+    // Stable: within a tier the members stay in the order of their memberships.
+    picked.sort_by_key(|(t, _)| *t);
+    picked
+        .into_iter()
+        .take(MAX_HEROES)
+        .map(|(_, m)| Hero {
+            user_id: m.user_id.clone(),
+            name: m.display_name.clone(),
+            avatar: m.avatar_url.clone(),
+        })
+        .collect()
+}
+
 /// Whether lazy loading sends every membership that changed since the last answer, beside
 /// those of the people the timeline is about (MSC4186, rule 3): only on `/v4/sync`, and only
 /// for an answer that goes on from the last one (not `full`: a room sent anew or with more
@@ -962,8 +1081,7 @@ impl Services {
                 .map_or(0, |(_, events)| events.len()),
             "sliding sync answered"
         );
-        self.sliding_sync
-            .store_pending(&key, state, request, &nonce);
+        self.sliding_sync.store_pending(&key, state, request);
         Ok(result)
     }
 
@@ -1618,9 +1736,9 @@ impl Services {
     /// the user rejoins: the room is `initial`) gets its initial receipts: everyone's on the
     /// events of this answer's timeline, and all the user's own. A room that was in scope gets
     /// what changed after its position, which for a room coming back into scope is what changed
-    /// while it was out. A room sent with an expanded timeline also gets the receipts on its
-    /// timeline. Other users' private receipts are never sent. Returns bare `m.receipt`
-    /// contents.
+    /// while it was out; when that is more than `MAX_RECEIPTS_BACKLOG`, the initial receipts
+    /// instead. A room sent with an expanded timeline also gets the receipts on its timeline.
+    /// Other users' private receipts are never sent. Returns bare `m.receipt` contents.
     async fn receipts_v4(
         &self,
         user: &UserId,
@@ -1650,7 +1768,22 @@ impl Services {
                 .and_then(|p| p.get(room_id))
                 .copied()
                 .filter(|_| shown.is_none_or(|r| !r.initial));
-            let receipts: Vec<asaroton_store::Receipt> = match at {
+            // What changed after the room's position, unless that is too much (see
+            // `MAX_RECEIPTS_BACKLOG`): then the room starts over, as if entering scope anew.
+            let backlog = match at {
+                Some(at) => {
+                    let changed: Vec<asaroton_store::Receipt> = self
+                        .store
+                        .receipts_for_room(room_id, at)
+                        .await?
+                        .into_iter()
+                        .filter(|r| r.receipt_type != "m.read.private" || r.user_id == *user)
+                        .collect();
+                    (changed.len() <= MAX_RECEIPTS_BACKLOG).then_some((at, changed))
+                }
+                None => None,
+            };
+            let receipts: Vec<asaroton_store::Receipt> = match backlog {
                 None => self
                     .store
                     .receipts_for_room(room_id, 0)
@@ -1658,8 +1791,7 @@ impl Services {
                     .into_iter()
                     .filter(|r| r.user_id == *user || on_timeline.contains(&*r.event_id))
                     .collect(),
-                Some(at) => {
-                    let mut changed = self.store.receipts_for_room(room_id, at).await?;
+                Some((at, mut changed)) => {
                     if shown.is_some_and(|r| r.expanded_timeline) && !on_timeline.is_empty() {
                         changed.extend(
                             self.store
@@ -2308,28 +2440,19 @@ impl Services {
             .iter()
             .filter(|x| x.membership == MembershipState::Invite)
             .count() as u64;
-        let has_alias = self
-            .store
-            .current_state_event(room_id, &StateEventType::RoomCanonicalAlias, "")
-            .await?
-            .is_some();
-        if out.name.is_none() && !has_alias {
-            out.heroes = members
-                .iter()
-                .filter(|x| {
-                    x.user_id != *user
-                        && matches!(
-                            x.membership,
-                            MembershipState::Join | MembershipState::Invite
-                        )
-                })
-                .take(5)
-                .map(|x| Hero {
-                    user_id: x.user_id.clone(),
-                    name: x.display_name.clone(),
-                    avatar: x.avatar_url.clone(),
-                })
-                .collect();
+        // Heroes for a room without a name. The unstable endpoint leaves them out for a room
+        // with an alias too; MSC4186 only asks whether there is a name.
+        let wants_heroes = out.name.is_none()
+            && match req.dialect {
+                Dialect::V4 => true,
+                Dialect::Unstable => self
+                    .store
+                    .current_state_event(room_id, &StateEventType::RoomCanonicalAlias, "")
+                    .await?
+                    .is_none(),
+            };
+        if wants_heroes {
+            out.heroes = heroes(&members, user, req.dialect);
         }
         // `/v4/sync` sends no notification counts (open question 9 of the v4 plan).
         if req.dialect == Dialect::Unstable {
@@ -2848,6 +2971,132 @@ mod tests {
         }
     }
 
+    fn empty_state(seq: u64) -> ConnState {
+        ConnState {
+            seq,
+            token: SyncToken::default(),
+            rooms: HashMap::new(),
+            list_counts: BTreeMap::new(),
+            profile_users: None,
+            put_out: HashMap::new(),
+            sticky_upto: None,
+            account_data_upto: None,
+            receipts_upto: None,
+            typing_scope: None,
+        }
+    }
+
+    /// Starts connection `conn_id` of `user`'s `device` and returns the `pos` of its first
+    /// answer.
+    fn start(conns: &SlidingSyncConnections, user: &str, device: &str, conn_id: &str) -> String {
+        let key = conn_key(user, device, conn_id);
+        let (_, request, nonce) = conns.resolve(&key, None).unwrap();
+        conns.store_pending(&key, empty_state(1), request);
+        format_pos(&SyncToken::default(), &nonce, 1)
+    }
+
+    fn conn_key(user: &str, device: &str, conn_id: &str) -> ConnKey {
+        ConnKey {
+            dialect: Dialect::V4,
+            user: OwnedUserId::try_from(user).unwrap(),
+            device: Some(device.into()),
+            conn_id: conn_id.to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_device_has_at_most_fifty_connections_the_oldest_goes() {
+        let conns = SlidingSyncConnections::default();
+        let me = "@a:x.test";
+        let pos: Vec<String> = (0..MAX_CONNECTIONS_PER_DEVICE)
+            .map(|n| start(&conns, me, "D", &format!("c{n}")))
+            .collect();
+        let elsewhere = start(&conns, me, "E", "c0");
+        let someone_else = start(&conns, "@b:x.test", "D", "c0");
+        // The first connection is used again, so the second is now the one used longest ago.
+        assert!(
+            conns
+                .resolve(&conn_key(me, "D", "c0"), Some(&pos[0]))
+                .is_ok()
+        );
+        let newest = start(&conns, me, "D", "new");
+        let mine = conns
+            .conns
+            .iter()
+            .filter(|c| {
+                c.key().user == me && c.key().device.as_ref().is_some_and(|d| d.as_str() == "D")
+            })
+            .count();
+        assert_eq!(mine, MAX_CONNECTIONS_PER_DEVICE);
+        assert!(
+            conns
+                .resolve(&conn_key(me, "D", "c1"), Some(&pos[1]))
+                .is_err(),
+            "the connection used longest ago is expired"
+        );
+        assert!(
+            conns
+                .resolve(&conn_key(me, "D", "c0"), Some(&pos[0]))
+                .is_ok()
+        );
+        assert!(
+            conns
+                .resolve(&conn_key(me, "D", "c2"), Some(&pos[2]))
+                .is_ok()
+        );
+        assert!(
+            conns
+                .resolve(&conn_key(me, "D", "new"), Some(&newest))
+                .is_ok()
+        );
+        assert!(
+            conns
+                .resolve(&conn_key(me, "E", "c0"), Some(&elsewhere))
+                .is_ok(),
+            "another device's connections are not touched"
+        );
+        assert!(
+            conns
+                .resolve(&conn_key("@b:x.test", "D", "c0"), Some(&someone_else))
+                .is_ok()
+        );
+        // A position of a connection that is not there makes none.
+        let before = conns.conns.len();
+        assert!(
+            conns
+                .resolve(&conn_key(me, "D", "c1"), Some(&pos[1]))
+                .is_err()
+        );
+        assert_eq!(conns.conns.len(), before);
+        // A request that was still running on the dropped connection does not bring it back.
+        let key = conn_key(me, "D", "c1");
+        conns.store_pending(&key, empty_state(2), 1);
+        assert!(!conns.conns.contains_key(&key));
+    }
+
+    #[test]
+    fn too_many_connections_in_all_drop_the_ones_used_longest_ago() {
+        let conns = SlidingSyncConnections::with_limits(MAX_CONNECTIONS_PER_DEVICE, 10, 8);
+        let pos: Vec<String> = (0..10)
+            .map(|n| start(&conns, &format!("@u{n}:x.test"), "D", "c"))
+            .collect();
+        assert_eq!(conns.conns.len(), 10);
+        // The first is used again; the next two are now the oldest.
+        assert!(
+            conns
+                .resolve(&conn_key("@u0:x.test", "D", "c"), Some(&pos[0]))
+                .is_ok()
+        );
+        start(&conns, "@new:x.test", "D", "c");
+        assert_eq!(conns.conns.len(), 9, "dropped down to 8, then the new one");
+        for (n, p) in pos.iter().enumerate() {
+            let alive = conns
+                .resolve(&conn_key(&format!("@u{n}:x.test"), "D", "c"), Some(p))
+                .is_ok();
+            assert_eq!(alive, !matches!(n, 1 | 2), "connection {n}");
+        }
+    }
+
     #[test]
     fn only_the_newest_request_leaves_its_state_behind() {
         let state = |seq| ConnState {
@@ -2871,17 +3120,17 @@ mod tests {
         };
         let (base, first, nonce) = conns.resolve(&key, None).unwrap();
         assert!(base.is_none());
-        conns.store_pending(&key, state(1), first, &nonce);
+        conns.store_pending(&key, state(1), first);
         let pos = |seq| format_pos(&SyncToken::default(), &nonce, seq);
 
         // A request that waits, and one that the client makes after giving up on it.
         let (_, waiting, _) = conns.resolve(&key, Some(&pos(1))).unwrap();
         let (_, newer, _) = conns.resolve(&key, Some(&pos(1))).unwrap();
-        conns.store_pending(&key, state(2), newer, &nonce);
+        conns.store_pending(&key, state(2), newer);
         // The first one finishes late, with other content under the same number.
         let mut late = state(2);
         late.list_counts.insert("late".to_owned(), 1);
-        conns.store_pending(&key, late, waiting, &nonce);
+        conns.store_pending(&key, late, waiting);
         let (confirmed, _, _) = conns.resolve(&key, Some(&pos(2))).unwrap();
         assert!(
             confirmed.is_some_and(|s| s.list_counts.is_empty()),
@@ -2915,7 +3164,7 @@ mod tests {
             receipts_upto: None,
             typing_scope: None,
         };
-        conns.store_pending(&key, state.clone(), first, &nonce);
+        conns.store_pending(&key, state.clone(), first);
         let pos = format_pos(&token, &nonce, 1);
         assert_eq!(SyncToken::parse(&pos).map(|t| t.events), Some(42));
         assert_eq!(
@@ -2932,8 +3181,58 @@ mod tests {
         );
         let (_, again, _) = conns.resolve(&key, None).unwrap();
         state.seq = 1;
-        conns.store_pending(&key, state, again, &nonce);
+        conns.store_pending(&key, state, again);
         assert!(conns.resolve(&key, Some(&pos)).is_err());
+    }
+
+    #[test]
+    fn v4_heroes_are_joined_then_invited_then_gone() {
+        let me = OwnedUserId::try_from("@me:x.test").unwrap();
+        let m = |user: &str, membership: MembershipState| Membership {
+            room_id: OwnedRoomId::try_from("!r:x.test").unwrap(),
+            user_id: OwnedUserId::try_from(user).unwrap(),
+            membership,
+            event_id: OwnedEventId::try_from("$e").unwrap(),
+            sender: OwnedUserId::try_from(user).unwrap(),
+            display_name: None,
+            avatar_url: None,
+            stream_ordering: 1,
+            forgotten: false,
+        };
+        let members = vec![
+            m("@gone:x.test", MembershipState::Leave),
+            m("@me:x.test", MembershipState::Join),
+            m("@invited:x.test", MembershipState::Invite),
+            m("@a:x.test", MembershipState::Join),
+            m("@banned:x.test", MembershipState::Ban),
+            m("@b:x.test", MembershipState::Join),
+            m("@knocking:x.test", MembershipState::Knock),
+        ];
+        let ids = |dialect| -> Vec<String> {
+            heroes(&members, &me, dialect)
+                .into_iter()
+                .map(|h| h.user_id.to_string())
+                .collect()
+        };
+        assert_eq!(
+            ids(Dialect::V4),
+            [
+                "@a:x.test",
+                "@b:x.test",
+                "@invited:x.test",
+                "@gone:x.test",
+                "@banned:x.test"
+            ]
+        );
+        assert_eq!(
+            ids(Dialect::Unstable),
+            ["@invited:x.test", "@a:x.test", "@b:x.test"],
+            "the unstable endpoint as before"
+        );
+        let crowd: Vec<Membership> = (0..8)
+            .map(|i| m(&format!("@u{i}:x.test"), MembershipState::Join))
+            .collect();
+        assert_eq!(heroes(&crowd, &me, Dialect::V4).len(), MAX_HEROES);
     }
 
     #[test]
