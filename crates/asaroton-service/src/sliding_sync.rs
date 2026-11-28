@@ -107,6 +107,18 @@ pub struct ExtensionsRequest {
     pub sticky: Option<StickyRequest>,
 }
 
+/// The sticky events picked for one response (see `Services::sticky_pick`).
+#[derive(Default)]
+struct StickyPick {
+    events: BTreeMap<OwnedRoomId, Vec<StoredEvent>>,
+    /// The senders of `events`, per room.
+    senders: HashMap<OwnedRoomId, HashSet<OwnedUserId>>,
+    /// Per room, the position up to which its sticky events are handed out.
+    upto: HashMap<OwnedRoomId, i64>,
+    /// Some room had more than its limit.
+    pending: bool,
+}
+
 /// The most sticky events per room that one response of the extension carries.
 const STICKY_LIMIT_MAX: usize = 100;
 
@@ -895,6 +907,16 @@ impl Services {
             }
         }
 
+        // Sticky events first: their senders count for the rooms' lazily loaded members.
+        let sticky = match &req.extensions.sticky {
+            Some(s) => Some(
+                self.sticky_pick(s, &selections, base, now, &ignored)
+                    .await?,
+            ),
+            None => None,
+        };
+        let no_one = HashSet::new();
+
         // Rooms.
         let mut rooms: BTreeMap<OwnedRoomId, RoomResult> = BTreeMap::new();
         let mut tracks: HashMap<OwnedRoomId, RoomTrack> =
@@ -917,6 +939,10 @@ impl Services {
                     direct.contains(room_id),
                     bump,
                     latest.get(room_id).copied(),
+                    sticky
+                        .as_ref()
+                        .and_then(|p| p.senders.get(room_id))
+                        .unwrap_or(&no_one),
                 )
                 .await?;
             let invite = r.invite_state.as_deref().map(invite_fingerprint);
@@ -1162,13 +1188,24 @@ impl Services {
             }
         }
 
-        let sticky_upto = match &req.extensions.sticky {
-            Some(s) => Some(
-                self.sticky_extension(s, &selections, &rooms, base, now, &ignored, &mut ext)
-                    .await?,
-            ),
-            None => None,
-        };
+        // The sticky events picked before the rooms, minus those the room's timeline carries.
+        let sticky_upto = sticky.map(|pick| {
+            for (room_id, events) in pick.events {
+                let shown: HashSet<&ruma::EventId> = rooms
+                    .get(&room_id)
+                    .map(|r| r.timeline.iter().map(StoredEvent::event_id).collect())
+                    .unwrap_or_default();
+                let events: Vec<StoredEvent> = events
+                    .into_iter()
+                    .filter(|e| !shown.contains(e.event_id()))
+                    .collect();
+                if !events.is_empty() {
+                    ext.sticky.insert(room_id, events);
+                }
+            }
+            ext.sticky_pending = pick.pending;
+            pick.upto
+        });
 
         let mut profile_users = None;
         if let Some(p) = &req.extensions.profiles {
@@ -1202,33 +1239,35 @@ impl Services {
         Ok((result, state))
     }
 
-    /// The sticky events extension (MSC4480). For each joined room in scope: a room that
-    /// enters scope (new on the connection or to the extension, the extension just enabled,
-    /// the room `initial` again) gets all its unexpired sticky events, any other the ones since
-    /// its last position; the oldest `limit` of them, the rest in later responses. Minus those
-    /// this response's timeline carries and those of ignored users. Returns the positions to
-    /// remember; rooms that left scope are forgotten, so they get everything when they return.
-    #[allow(clippy::too_many_arguments)]
-    async fn sticky_extension(
+    /// The sticky events extension (MSC4480), picked before the rooms are worked out, so that
+    /// their senders count as people the room's answer is about (lazily loaded members). For
+    /// each joined room in scope: a room that enters scope (new on the connection or to the
+    /// extension, the extension just enabled, the user newly joined) gets all its unexpired
+    /// sticky events, any other the ones since its last position; the oldest `limit` of them,
+    /// the rest in later responses. Those of ignored users are left out. Rooms that left scope
+    /// are forgotten, so they get everything when they return.
+    async fn sticky_pick(
         &self,
         req: &StickyRequest,
         selections: &BTreeMap<OwnedRoomId, RoomSelection>,
-        rooms: &BTreeMap<OwnedRoomId, RoomResult>,
         base: Option<&ConnState>,
         now: SyncToken,
         ignored: &HashSet<OwnedUserId>,
-        ext: &mut ExtensionsResult,
-    ) -> Result<HashMap<OwnedRoomId, i64>> {
+    ) -> Result<StickyPick> {
         let previous = base.and_then(|b| b.sticky_upto.as_ref());
         let limit = req.limit.clamp(1, STICKY_LIMIT_MAX);
         // Events that run out within a second are not handed out (they must have time left).
         let alive_at = asaroton_store::now_ts() + 1000;
-        let mut upto = HashMap::new();
+        let mut pick = StickyPick::default();
         for (room_id, sel) in selections {
             if sel.membership.membership != MembershipState::Join || !req.scope.applies(sel) {
                 continue;
             }
-            let entering = rooms.get(room_id).is_some_and(|r| r.initial);
+            // For a joined room this is `sliding_room`'s `initial`: the connection did not
+            // have the room, or not as joined.
+            let entering = base
+                .and_then(|b| b.rooms.get(room_id))
+                .is_none_or(|t| t.membership != MembershipState::Join);
             let after = match previous.and_then(|p| p.get(room_id)) {
                 Some(&at) if !entering => at,
                 _ => i64::MIN,
@@ -1240,25 +1279,25 @@ impl Services {
             let reached = fetched.len() >= limit;
             let delivered = match fetched.last() {
                 Some(last) if reached => {
-                    ext.sticky_pending = true;
+                    pick.pending = true;
                     last.stream_ordering
                 }
                 _ => now.events,
             };
-            upto.insert(room_id.clone(), delivered);
-            let shown: HashSet<&ruma::EventId> = rooms
-                .get(room_id)
-                .map(|r| r.timeline.iter().map(StoredEvent::event_id).collect())
-                .unwrap_or_default();
+            pick.upto.insert(room_id.clone(), delivered);
             let events: Vec<StoredEvent> = fetched
                 .into_iter()
-                .filter(|e| !shown.contains(e.event_id()) && !ignored.contains(e.pdu.sender()))
+                .filter(|e| !ignored.contains(e.pdu.sender()))
                 .collect();
             if !events.is_empty() {
-                ext.sticky.insert(room_id.clone(), events);
+                pick.senders.insert(
+                    room_id.clone(),
+                    events.iter().map(|e| e.pdu.sender().to_owned()).collect(),
+                );
+                pick.events.insert(room_id.clone(), events);
             }
         }
-        Ok(upto)
+        Ok(pick)
     }
 
     /// The profiles extension (MSC4262). Who: the local members of the joined rooms in scope
@@ -1394,6 +1433,7 @@ impl Services {
         is_dm: bool,
         bump: i64,
         newest: Option<i64>,
+        sticky_senders: &HashSet<OwnedUserId>,
     ) -> Result<RoomResult> {
         let user = &req.user_id;
         let room_id = &sel.room_id;
@@ -1600,7 +1640,9 @@ impl Services {
         let given = track.filter(|_| !initial).map(|t| &t.state_given);
         // Lazily loaded members: the people this timeline is about, and the people the
         // connection was given before, whose changes it gets from then on.
-        let about = timeline_members(&events);
+        // Senders of sticky events count as timeline senders (MSC4480).
+        let mut about = timeline_members(&events);
+        about.extend(sticky_senders.iter().cloned());
         let lazy = loads_members_lazily(&sel.required_state);
         let lazy_member = |u: &UserId| about.contains(u) || given.is_some_and(|g| g.has_member(u));
         // The state group right after the leave, for someone who left as a member. After a

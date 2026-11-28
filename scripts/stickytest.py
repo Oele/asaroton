@@ -29,6 +29,8 @@ sends it, or `sticky_events`; the answer uses the name asked by):
   timeline does not show; later responses those sent since, once each; a repeated `pos` gets
   the same again.
 - `limit` is per room: the oldest come first, the rest in the next responses, which do not wait.
+- With lazily loaded members (`$LAZY`), the senders of the sticky events count as timeline
+  senders: their memberships come in `required_state`, also when they are not in the timeline.
 
 Stage D, federation: when the first user of another server joins a room, that server is sent
 our own sticky events in the room that are still sticky, oldest first, with their marker; not
@@ -303,6 +305,41 @@ def sliding_part(hs, a):
     pos, got, _, r = ss("c3", name="sticky_events")
     check(got == [s1, s2, s3] and "org.matrix.msc4354.sticky_events" not in r.get("extensions", {}),
           f"asked as sticky_events, answered as sticky_events ({got})")
+
+    # Lazily loaded members: a sticky event's sender whose event is not in the timeline gets
+    # their membership sent along, first on a new connection, then for one who joins later.
+    gwen, g = hs.register("gwen")
+    st, r = hs.req("POST", f"/_matrix/client/v3/join/{q(room)}", {}, g)
+    assert st == 200, r
+
+    def lazy(conn, pos=None):
+        body = {"conn_id": conn, "lists": {"all": {"ranges": [[0, 9]], "timeline_limit": 1,
+                                                   "required_state": [["m.room.member", "$LAZY"]]}},
+                "extensions": {"org.matrix.msc4354.sticky_events": {"enabled": True}}}
+        path = "/_matrix/client/unstable/org.matrix.simplified_msc3575/sync?timeout=0" + (f"&pos={pos}" if pos else "")
+        st, r = hs.req("POST", path, body, e)
+        assert st == 200, (st, r)
+        room_r = r.get("rooms", {}).get(room, {})
+        members = [ev.get("state_key") for ev in room_r.get("required_state", []) if ev.get("type") == "m.room.member"]
+        senders = [ev.get("sender") for ev in room_r.get("timeline", [])]
+        sticky = [ev["sender"] for ev in r.get("extensions", {}).get("org.matrix.msc4354.sticky_events", {})
+                  .get("rooms", {}).get(room, {}).get("events", [])]
+        return r["pos"], members, senders, sticky
+
+    st, r = hs.req("PUT", f"/_matrix/client/v3/rooms/{q(room)}/send/m.room.message/{uuid.uuid4().hex}"
+                   "?org.matrix.msc4354.sticky_duration_ms=600000", {"msgtype": "m.text", "body": "gwen's"}, g)
+    send("alice after gwen")
+    pos, members, senders, sticky = lazy("lazy1")
+    check(gwen in sticky and gwen not in senders and gwen in members,
+          f"$LAZY: the sticky sender's membership comes along ({members}, timeline {senders}, sticky {sticky})")
+    hank, h = hs.register("hank")
+    st, r = hs.req("POST", f"/_matrix/client/v3/join/{q(room)}", {}, h)
+    st, r = hs.req("PUT", f"/_matrix/client/v3/rooms/{q(room)}/send/m.room.message/{uuid.uuid4().hex}"
+                   "?org.matrix.msc4354.sticky_duration_ms=600000", {"msgtype": "m.text", "body": "hank's"}, h)
+    send("alice after hank")
+    pos, members, senders, sticky = lazy("lazy1", pos)
+    check(hank in sticky and hank not in senders and hank in members,
+          f"$LAZY, incremental: so does a new sticky sender's ({members}, timeline {senders}, sticky {sticky})")
 
 
 def federation_part(hs, a, mock):
