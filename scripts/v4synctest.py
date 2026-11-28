@@ -20,14 +20,17 @@ Alice syncs over `POST /_matrix/client/v4/sync`; Bob and a few others act. What 
      lazily loaded members are not filtered by `exclude`; an include that names
      `m.room.member` asks for every member; one that names a member always gets them.
   7. Lazy loading's rule 3: every membership change since the last answer comes when the
-     answer has no gap, and not when it has one.
+     answer has no gap, also one that no timeline shows (staged in the table of current
+     state); not when it has one, nor with a timeline limit of 0.
   8. A name or an avatar that is removed comes as `null`; `is_dm` comes as `false` when the
      room stops being a DM.
   9. The filters `tags` / `not_tags` (a favourite moves between lists when tagged) and
      `spaces` (a child with an empty `via` is no child; a space Alice has not joined names no
-     rooms).
+     rooms). A room that moves between lists comes again with its new `lists`, also when the
+     counts stay the same (the favourite moves from one room to another).
  10. State that is gone from a room (a state reset, staged here in the table of current state)
-     comes as a stub, `{type, state_key}` without `content`, once; the unstable endpoint
+     comes as a stub, `{type, state_key}` without `content`, once, also in an answer that
+     sends the room in full because the client asks for more state; the unstable endpoint
      says nothing.
 
 Needs what scripts/fedlab.py needs. Takes a few seconds.
@@ -221,30 +224,59 @@ def run(hs, peers):
     check(kinds(room) == [], f"'*' and '$ME' are just strings on v4 ({kinds(room)})")
 
     print("-- lazy loading, rule 3")
-    lazy = {"conn_id": "lazy", "room_subscriptions": {crowd: {"timeline_limit": 0, "required_state": {"include": [{"type": "m.room.name"}], "lazy_members": True}}}}
-    r = ok(a, lazy)
-    check(members(r["rooms"][crowd]) == [alice], f"a timeline of nothing brings Alice's own membership alone ({members(r['rooms'][crowd])})")
-    st, r2 = hs.req("PUT", f"/_matrix/client/v3/profile/{q(dave)}/displayname", {"displayname": "Dave the quiet"}, d)
-    assert st == 200, r2
-    r = ok(a, lazy, r["pos"])
-    names = {ev["state_key"]: ev["content"].get("displayname") for ev in r.get("rooms", {}).get(crowd, {}).get("required_state", []) if ev["type"] == "m.room.member"}
-    check(names == {dave: "Dave the quiet"}, f"without a gap, a membership change comes although its timeline is not sent ({names})")
-    unstable_lazy = {"conn_id": "lazy", "room_subscriptions": {crowd: {"timeline_limit": 0, "required_state": [["m.room.name", ""], ["m.room.member", "$LAZY"]]}}}
-    st, u = hs.req("POST", UNSTABLE, unstable_lazy, a)
+
+    def member_event(user):
+        st, state = hs.req("GET", f"/_matrix/client/v3/rooms/{q(crowd)}/state", None, a)
+        assert st == 200, state
+        return next(ev["event_id"] for ev in state if ev["type"] == "m.room.member" and ev["state_key"] == user)
+
+    def displayname(token, user, name):
+        st, r = hs.req("PUT", f"/_matrix/client/v3/profile/{q(user)}/displayname", {"displayname": name}, token)
+        assert st == 200, r
+
+    dave_joined = member_event(dave)
+    displayname(d, dave, "Dave the quiet")
+    dave_renamed = member_event(dave)
+    hs.message(b, crowd, "after Dave")
+    v4_lazy = {"include": [{"type": "m.room.name"}], "lazy_members": True}
+    zero = {"conn_id": "lazy0", "room_subscriptions": {crowd: {"timeline_limit": 0, "required_state": v4_lazy}}}
+    one = {"conn_id": "lazy1", "room_subscriptions": {crowd: {"timeline_limit": 1, "required_state": v4_lazy}}}
+    unstable_one = {"conn_id": "lazy1", "room_subscriptions": {crowd: {"timeline_limit": 1, "required_state": [["m.room.name", ""], ["m.room.member", "$LAZY"]]}}}
+    r0, r1 = ok(a, zero), ok(a, one)
+    st, u = hs.req("POST", UNSTABLE, unstable_one, a)
     assert st == 200, u
-    st, r2 = hs.req("PUT", f"/_matrix/client/v3/profile/{q(carol)}/displayname", {"displayname": "Carol the quiet"}, c)
-    assert st == 200, r2
-    st, u = hs.req("POST", f"{UNSTABLE}?timeout=0&pos={q(u['pos'])}", unstable_lazy, a)
-    check(st == 200 and members(u.get("rooms", {}).get(crowd, {})) == [], f"(the unstable endpoint keeps its rule: no change of someone it was not given: {members(u.get('rooms', {}).get(crowd, {}))})")
-    r = ok(a, lazy, r["pos"])
-    check(members(r.get("rooms", {}).get(crowd, {})) == [carol], f"the next v4 answer has Carol's ({members(r.get('rooms', {}).get(crowd, {}))})")
-    lazy["room_subscriptions"][crowd]["timeline_limit"] = 1
-    r = ok(a, lazy, r["pos"])
+
+    def unstable_next():
+        nonlocal u
+        st, u = hs.req("POST", f"{UNSTABLE}?timeout=0&pos={q(u['pos'])}", unstable_one, a)
+        assert st == 200, u
+        return u.get("rooms", {}).get(crowd, {})
+
+    check(members(r0["rooms"][crowd]) == [alice], f"a timeline of nothing brings Alice's own membership alone ({members(r0['rooms'][crowd])})")
+    check(members(r1["rooms"][crowd]) == sorted([alice, bob]), f"a timeline of one brings its sender's ({members(r1['rooms'][crowd])})")
+    displayname(c, carol, "Carol the quiet")
+    r0, r1 = ok(a, zero, r0["pos"]), ok(a, one, r1["pos"])
+    unstable_next()
+    check(carol not in members(r0.get("rooms", {}).get(crowd, {})), f"with a timeline limit of 0, a membership change does not come: such an answer cannot say it has no gap ({members(r0.get('rooms', {}).get(crowd, {}))})")
+    check(members(r1.get("rooms", {}).get(crowd, {})) == [carol], f"with a limit of 1 it comes, as its timeline is about her ({members(r1.get('rooms', {}).get(crowd, {}))})")
+    # A membership that changes outside any timeline, as state resolution can make it: Dave's
+    # goes back to his join, done by hand in the table of current state.
+    changed = query(f"UPDATE current_state_events SET event_id = '{dave_joined}' WHERE room_id = '{crowd}' AND event_type = 'm.room.member' AND state_key = '{dave}' RETURNING 1")
+    assert changed, "Dave's state row was not found"
+    r0, r1 = ok(a, zero, r0["pos"]), ok(a, one, r1["pos"])
+    room = r1.get("rooms", {}).get(crowd, {})
+    held = {ev["state_key"]: ev["event_id"] for ev in room.get("required_state", []) if ev["type"] == "m.room.member"}
+    check(held == {dave: dave_joined} and room.get("timeline", []) == [] and room.get("limited") is False,
+          f"without a gap, every membership change comes, also one no timeline shows ({'his join' if held.get(dave) == dave_joined else held}, limited {room.get('limited')})")
+    check(dave not in members(r0.get("rooms", {}).get(crowd, {})), "not with a timeline limit of 0")
+    check(members(unstable_next()) == [], "and the unstable endpoint keeps its rule: no change of someone it was not given")
+    query(f"UPDATE current_state_events SET event_id = '{dave_renamed}' WHERE room_id = '{crowd}' AND event_type = 'm.room.member' AND state_key = '{dave}' RETURNING 1")
+    r1 = ok(a, one, r1["pos"])
     act(e, crowd, "join")
     hs.message(b, crowd, "one")
     hs.message(b, crowd, "two")
-    r = ok(a, lazy, r["pos"])
-    room = r.get("rooms", {}).get(crowd, {})
+    r1 = ok(a, one, r1["pos"])
+    room = r1.get("rooms", {}).get(crowd, {})
     check(room.get("limited") is True and erin not in members(room), f"with a gap, Erin's join outside the timeline does not come ({members(room)}, limited {room.get('limited')})")
 
     print("-- name, avatar and is_dm")
@@ -288,13 +320,29 @@ def run(hs, peers):
     r = ok(a, tagged, pos, timeout=10000)
     counts = {k: v.get("count") for k, v in r.get("lists", {}).items()}
     check(time.monotonic() - started < 5 and counts["fav"] == 1 and counts["rest"] == total - 1, f"tagging a favourite wakes the connection and moves it between the lists ({counts})")
+    room = r.get("rooms", {}).get(crowd, {})
+    check(room.get("lists") == ["fav"] and room.get("timeline", []) == [], f"the room comes again on the connection, with its new lists and no other news ({room.get('lists')}, timeline {len(room.get('timeline', []))})")
+    pos = r["pos"]
     r = ok(a, {**tagged, "conn_id": "tags2"})
     check(r["rooms"].get(crowd, {}).get("lists") == ["fav"], f"a fresh connection has it in the favourites only ({r['rooms'].get(crowd, {}).get('lists')})")
+    # Between two answers the favourite moves to another room: the counts stay the same.
+    st, r = hs.req("DELETE", f"/_matrix/client/v3/user/{q(alice)}/rooms/{q(crowd)}/tags/m.favourite", None, a)
+    assert st == 200, r
+    st, r = hs.req("PUT", f"/_matrix/client/v3/user/{q(alice)}/rooms/{q(named)}/tags/m.favourite", {}, a)
+    assert st == 200, r
+    r = ok(a, tagged, pos)
+    counts = {k: v.get("count") for k, v in r.get("lists", {}).items()}
+    moved = {"crowd" if rid == crowd else "named": r.get("rooms", {}).get(rid, {}).get("lists") for rid in (crowd, named)}
+    check(counts["fav"] == 1 and counts["rest"] == total - 1, f"the counts stay the same ({counts})")
+    check(moved == {"crowd": ["rest"], "named": ["fav"]}, f"and both rooms come again, with their new lists ({moved})")
+    r = ok(a, tagged, r["pos"])
+    check(r.get("rooms", {}) == {}, f"once ({len(r.get('rooms', {}))} rooms)")
     tagged["lists"]["work"] = {"timeline_limit": 1, "required_state": {}, "filters": {"tags": ["m.favourite", "u.work"], "not_tags": ["u.later"]}}
     st, r = hs.req("PUT", f"/_matrix/client/v3/user/{q(alice)}/rooms/{q(named)}/tags/u.work", {}, a)
     assert st == 200, r
-    st, r = hs.req("PUT", f"/_matrix/client/v3/user/{q(alice)}/rooms/{q(crowd)}/tags/u.later", {}, a)
-    assert st == 200, r
+    for tag in ("u.work", "u.later"):
+        st, r = hs.req("PUT", f"/_matrix/client/v3/user/{q(alice)}/rooms/{q(crowd)}/tags/{tag}", {}, a)
+        assert st == 200, r
     r = ok(a, {**tagged, "conn_id": "tags3"})
     work = sorted(rid for rid, room in r["rooms"].items() if "work" in room.get("lists", []))
     check(work == [named], f"tags is any of them, and not_tags wins ({len(work)} rooms)")
@@ -317,6 +365,21 @@ def run(hs, peers):
     check(reset not in r.get("rooms", {}), "once")
     st, u = hs.req("POST", f"{UNSTABLE}?timeout=0&pos={q(u['pos'])}", unstable_stub, a)
     check(st == 200 and reset not in u.get("rooms", {}), "the unstable endpoint says nothing of it")
+    # The same while the client asks for more state, so that the room is sent in full.
+    again = create(a, {"name": "Reset again", "topic": "to be lost too"})
+    grow = {"conn_id": "stub2", "room_subscriptions": {again: {"timeline_limit": 1, "required_state": {"include": [{"type": "m.room.topic"}]}}}}
+    r = ok(a, grow)
+    check(kinds(r["rooms"][again]) == ["m.room.topic"], f"another room comes with its topic ({kinds(r['rooms'][again])})")
+    gone = query(f"DELETE FROM current_state_events WHERE room_id = '{again}' AND event_type = 'm.room.topic' RETURNING 1")
+    assert gone, "the topic row was not found"
+    grow["room_subscriptions"][again]["required_state"]["include"].append({"type": "m.room.name"})
+    r = ok(a, grow, r["pos"])
+    state = r.get("rooms", {}).get(again, {}).get("required_state", [])
+    stubs = [ev for ev in state if "content" not in ev]
+    events = [ev["type"] for ev in state if "content" in ev]
+    check(stubs == [{"type": "m.room.topic", "state_key": ""}] and events == ["m.room.name"], f"an answer with more state brings the new state and the stub ({events}, {stubs})")
+    r = ok(a, grow, r["pos"])
+    check(again not in r.get("rooms", {}), "once")
 
 
 if __name__ == "__main__":
