@@ -156,36 +156,75 @@ fn scope(lists: Option<&Vec<String>>, rooms: Option<&Vec<ruma::OwnedRoomId>>) ->
     }
 }
 
+/// An extension's configuration: the one under its own key, or when that is not enabled, the
+/// one under the prefixed key the MSC had before it was accepted (`org.matrix.msc4538.to_device`
+/// and the like), which ruma does not read. One that does not parse is not there.
+fn aliased<T: Clone + serde::de::DeserializeOwned>(
+    typed: &T,
+    enabled: bool,
+    raw: Option<&Value>,
+    prefixed: &str,
+) -> T {
+    if enabled {
+        return typed.clone();
+    }
+    raw.and_then(|r| r.get("extensions")?.get(prefixed))
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_else(|| typed.clone())
+}
+
 /// The engine's request for a v4 body. `raw` is the body as JSON, for the extensions ruma's
 /// type does not model here: profiles and sticky events are read from it as on the unstable
 /// endpoint (open question 10 of the v4 plan).
 fn request(sender: &Sender, b: &v4::Request, raw: Option<&Value>) -> Result<SlidingSyncRequest> {
     validate(b)?;
     let x = &b.extensions;
+    let to_device = aliased(
+        &x.to_device,
+        x.to_device.enabled,
+        raw,
+        "org.matrix.msc4538.to_device",
+    );
+    let e2ee = aliased(&x.e2ee, x.e2ee.enabled, raw, "org.matrix.msc4543.e2ee");
+    let account_data = aliased(
+        &x.account_data,
+        x.account_data.enabled,
+        raw,
+        "org.matrix.msc4548.account_data",
+    );
+    let receipts = aliased(
+        &x.receipts,
+        x.receipts.enabled,
+        raw,
+        "org.matrix.msc4551.receipts",
+    );
+    let typing = aliased(
+        &x.typing,
+        x.typing.enabled,
+        raw,
+        "org.matrix.msc4508.typing",
+    );
     // MSC4538: the limit must be positive. (A negative one does not get past ruma.)
-    if x.to_device.enabled && x.to_device.limit.is_some_and(|l| l == ruma::UInt::MIN) {
+    if to_device.enabled && to_device.limit.is_some_and(|l| l == ruma::UInt::MIN) {
         return Err(Error::bad_json(
             "The to-device limit must be a positive integer.",
         ));
     }
     let extensions = ExtensionsRequest {
-        to_device: x.to_device.enabled.then(|| ToDeviceRequest {
-            since: x.to_device.since.clone(),
-            limit: x.to_device.limit.map_or(0, limit),
+        to_device: to_device.enabled.then(|| ToDeviceRequest {
+            since: to_device.since.clone(),
+            limit: to_device.limit.map_or(0, limit),
         }),
-        e2ee: x.e2ee.enabled,
-        account_data: x
-            .account_data
+        e2ee: e2ee.enabled,
+        account_data: account_data
             .enabled
-            .then(|| scope(x.account_data.lists.as_ref(), x.account_data.rooms.as_ref())),
-        receipts: x
-            .receipts
+            .then(|| scope(account_data.lists.as_ref(), account_data.rooms.as_ref())),
+        receipts: receipts
             .enabled
-            .then(|| scope(x.receipts.lists.as_ref(), x.receipts.rooms.as_ref())),
-        typing: x
-            .typing
+            .then(|| scope(receipts.lists.as_ref(), receipts.rooms.as_ref())),
+        typing: typing
             .enabled
-            .then(|| scope(x.typing.lists.as_ref(), x.typing.rooms.as_ref())),
+            .then(|| scope(typing.lists.as_ref(), typing.rooms.as_ref())),
         thread_subscriptions: x
             .thread_subscriptions
             .enabled
@@ -679,6 +718,58 @@ mod tests {
             raw["typing"]["rooms"]["!r:x.test"],
             json!({ "type": "m.typing", "content": { "user_ids": ["@you:x.test"] } })
         );
+    }
+
+    #[test]
+    fn the_prefixed_extension_keys_are_read_too() {
+        let r = mapped(&json!({
+            "extensions": {
+                "org.matrix.msc4538.to_device": { "enabled": true, "since": "3" },
+                "org.matrix.msc4543.e2ee": { "enabled": true },
+                "org.matrix.msc4548.account_data": { "enabled": true, "lists": [] },
+                "org.matrix.msc4551.receipts": { "enabled": true, "rooms": ["!r:x.test"] },
+                "org.matrix.msc4508.typing": { "enabled": true },
+            },
+        }))
+        .unwrap();
+        let x = &r.extensions;
+        assert_eq!(
+            x.to_device.as_ref().and_then(|t| t.since.as_deref()),
+            Some("3")
+        );
+        assert!(x.e2ee && x.typing.is_some());
+        assert_eq!(
+            x.account_data.as_ref().and_then(|a| a.lists.as_deref()),
+            Some(&[][..])
+        );
+        assert!(matches!(
+            x.receipts.as_ref().and_then(|s| s.rooms.as_deref()),
+            Some([ScopeRoom::Subscribed(id)]) if id == "!r:x.test"
+        ));
+        // The key of the accepted MSC wins; a prefixed one that does not parse is not there.
+        let r = mapped(&json!({
+            "extensions": {
+                "typing": { "enabled": true, "lists": ["a"] },
+                "org.matrix.msc4508.typing": { "enabled": true, "lists": ["b"] },
+                "org.matrix.msc4551.receipts": { "enabled": true, "rooms": ["*"] },
+            },
+        }))
+        .unwrap();
+        assert_eq!(
+            r.extensions
+                .typing
+                .as_ref()
+                .and_then(|t| t.lists.as_deref()),
+            Some(&["a".to_owned()][..])
+        );
+        assert!(r.extensions.receipts.is_none());
+        // The prefixed to-device limit is checked as well.
+        assert!(matches!(
+            mapped(
+                &json!({ "extensions": { "org.matrix.msc4538.to_device": { "enabled": true, "limit": 0 } } })
+            ),
+            Err(Error::Matrix(ruma::api::error::ErrorKind::BadJson, _, _))
+        ));
     }
 
     #[test]
