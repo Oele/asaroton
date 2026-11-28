@@ -5,7 +5,7 @@
   false` it says false, and `/media/preview_url` (v1 and the legacy v3) answers 403
   `M_FORBIDDEN`.
 - `/relations` with `dir=f` and no `from` starts at the oldest relation.
-- `unsigned.prev_sender` (with `prev_content`) on a state event that replaced another, also for a
+- `unsigned.prev_sender` (with `prev_content`) and `replaces_state` (v1.19) on a state event that replaced another, also for a
   member who could not see the event it replaced (history visibility `joined`).
 - A PDU with a negative `depth` is refused over federation.
 
@@ -13,7 +13,7 @@ Needs what scripts/fedlab.py needs. Takes about ten seconds.
 
 Usage: scripts/v120test.py [--keep]
 """
-import time, urllib.parse, uuid
+import json, time, urllib.parse, uuid
 
 from fedlab import check, run_lab, signed_event
 
@@ -59,6 +59,7 @@ def run(hs, peers):
     # prev_sender, also for someone who joined after the event it replaced.
     st, r = hs.req("PUT", f"{path}/state/m.room.topic/", {"topic": "alice's topic"}, a)
     assert st == 200, r
+    alices_topic = r["event_id"]
     st, r = hs.req("POST", f"/_matrix/client/v3/join/{q(room)}", {}, c)
     assert st == 200, r
     st, r = hs.req("PUT", f"{path}/state/m.room.topic/", {"topic": "bob's topic"}, b)
@@ -70,6 +71,16 @@ def run(hs, peers):
         u = ev.get("unsigned", {})
         check(u.get("prev_sender") == alice and u.get("prev_content", {}).get("topic") == "alice's topic",
               f"/messages for {who}: unsigned.prev_sender and prev_content ({u})")
+        check(u.get("replaces_state") == alices_topic, f"/messages for {who}: unsigned.replaces_state (v1.19) ({u.get('replaces_state')})")
+    # The same in /sync: with Alice's topic in the window (the one seen before it), and with
+    # only Bob's (the state before the window).
+    for limit, how in ((10, "both topics in the timeline"), (1, "only bob's topic in the timeline")):
+        flt = q(json.dumps({"room": {"timeline": {"limit": limit}, "rooms": [room]}}))
+        st, r = hs.req("GET", f"/_matrix/client/v3/sync?timeout=0&filter={flt}", None, a)
+        tl = r.get("rooms", {}).get("join", {}).get(room, {}).get("timeline", {}).get("events", [])
+        ev = next((e for e in tl if e["event_id"] == bobs_topic), {})
+        check(ev.get("unsigned", {}).get("replaces_state") == alices_topic,
+              f"/sync, {how}: unsigned.replaces_state ({ev.get('unsigned', {}).get('replaces_state')})")
 
     # A PDU with a negative depth is refused.
     mock = peers["mock"]

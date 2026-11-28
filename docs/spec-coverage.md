@@ -3,7 +3,7 @@
 Target: Matrix spec v1.19, default room version 12 (all versions 1–12 supported for joining).
 Of v1.20, unreleased (the spec's changelog fragments as of 2026-11-28), what asks something of a
 server is done: delayed events, sticky events, the `m.preview_url` and `m.delayed_events`
-capabilities, `unsigned.prev_sender`, `/relations` with `dir=f` from the oldest, non-negative
+capabilities, `unsigned.prev_sender` (and v1.19's `unsigned.replaces_state`), `/relations` with `dir=f` from the oldest, non-negative
 depths (scripts/v120test.py). v1.20 goes into `/versions` once it is released.
 The conformance gate is Complement (`scripts/complement.sh`). The tests that fail by decision
 are listed with their reasons in `tests/complement/expected-failures.txt` and skipped, so a

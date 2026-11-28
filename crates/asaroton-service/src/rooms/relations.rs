@@ -49,6 +49,8 @@ pub fn sticky_left(ev: &StoredEvent, now: i64) -> Option<(asaroton_core::sticky:
     (left > 0).then_some((sticky, left))
 }
 
+/// The state event a state event replaced: its content, sender and event ID.
+type PrevState = (Value, ruma::OwnedUserId, ruma::OwnedEventId);
 impl Services {
     /// Events relating to `event_id`, paged by stream token.
     #[allow(clippy::too_many_arguments)]
@@ -294,7 +296,7 @@ impl Services {
                 .all(|w| w[0].pdu.room_id() == w[1].pdu.room_id());
         let mut last_seen: std::collections::HashMap<
             (ruma::events::StateEventType, String),
-            (Value, ruma::OwnedUserId),
+            PrevState,
         > = std::collections::HashMap::new();
         // A contiguous ascending slice gets the first occurrences' previous contents from the
         // state before its first event, in one lookup.
@@ -325,7 +327,7 @@ impl Services {
                     _ => self.previous_state_content(e, &ty, key).await?,
                 },
             };
-            if let Some((prev, sender)) = prev
+            if let Some((prev, sender, prev_id)) = prev
                 && let Some(u) = v
                     .as_object_mut()
                     .and_then(|o| o.get_mut("unsigned"))
@@ -336,9 +338,14 @@ impl Services {
                     .await?;
                 u.insert("prev_content".into(), prev);
                 u.insert("prev_sender".into(), json!(sender));
+                // v1.19: which state event this one replaced.
+                u.insert("replaces_state".into(), json!(prev_id));
             }
             if let Ok(content) = serde_json::from_str::<Value>(e.pdu.content().get()) {
-                last_seen.insert(slot, (content, e.pdu.sender().to_owned()));
+                last_seen.insert(
+                    slot,
+                    (content, e.pdu.sender().to_owned(), e.event_id().to_owned()),
+                );
             }
         }
         if let Some(user) = user {
@@ -366,14 +373,8 @@ impl Services {
         &self,
         events: &[StoredEvent],
         keys: &[(ruma::events::StateEventType, String)],
-    ) -> Result<
-        Option<
-            std::collections::HashMap<
-                (ruma::events::StateEventType, String),
-                (Value, ruma::OwnedUserId),
-            >,
-        >,
-    > {
+    ) -> Result<Option<std::collections::HashMap<(ruma::events::StateEventType, String), PrevState>>>
+    {
         let mut out = std::collections::HashMap::new();
         let (first, last) = (&events[0], &events[events.len() - 1]);
         let room_id = first.pdu.room_id();
@@ -401,19 +402,23 @@ impl Services {
             if let Some(p) = prev.get(&e.event_id)
                 && let Ok(c) = serde_json::from_str::<Value>(p.pdu.content().get())
             {
-                out.insert((e.event_type, e.state_key), (c, p.pdu.sender().to_owned()));
+                out.insert(
+                    (e.event_type, e.state_key),
+                    (c, p.pdu.sender().to_owned(), p.event_id().to_owned()),
+                );
             }
         }
         Ok(Some(out))
     }
 
-    /// Content of the state event `ev` replaced, if any (`unsigned.prev_content`).
+    /// The state event `ev` replaced, if any: its content, sender and event ID
+    /// (`unsigned.prev_content`, `prev_sender`, `replaces_state`).
     async fn previous_state_content(
         &self,
         ev: &StoredEvent,
         ty: &ruma::events::StateEventType,
         key: &str,
-    ) -> Result<Option<(Value, ruma::OwnedUserId)>> {
+    ) -> Result<Option<PrevState>> {
         let Some(group) = self.store.state_group_before(ev.event_id()).await? else {
             return Ok(None);
         };
@@ -430,7 +435,7 @@ impl Services {
         Ok(self.store.get_event(&prev_id).await?.and_then(|p| {
             serde_json::from_str(p.pdu.content().get())
                 .ok()
-                .map(|c| (c, p.pdu.sender().to_owned()))
+                .map(|c| (c, p.pdu.sender().to_owned(), p.event_id().to_owned()))
         }))
     }
 }
