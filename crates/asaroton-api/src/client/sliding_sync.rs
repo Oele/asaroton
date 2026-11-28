@@ -234,6 +234,7 @@ pub async fn sliding_sync(
                             Some(f.room_types.iter().map(room_type_filter).collect())
                         },
                         not_room_types: f.not_room_types.iter().map(room_type_filter).collect(),
+                        ..ListFilters::default()
                     }),
                 },
             )

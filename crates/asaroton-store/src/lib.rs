@@ -558,6 +558,12 @@ pub trait AccountDataStore: Send + Sync {
     ) -> Result<Option<i64>>;
     /// All account data for the user with stream id > `since`.
     async fn account_data_since(&self, user_id: &UserId, since: i64) -> Result<Vec<AccountData>>;
+    /// The user's account data of one type, global and in every room, without deleted entries.
+    async fn account_data_of_type(
+        &self,
+        user_id: &UserId,
+        data_type: &str,
+    ) -> Result<Vec<AccountData>>;
     async fn max_account_data_stream_id(&self) -> Result<i64>;
     async fn create_filter(&self, user_id: &UserId, filter: &serde_json::Value) -> Result<i64>;
     async fn get_filter(

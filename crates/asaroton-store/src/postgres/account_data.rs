@@ -101,6 +101,22 @@ impl AccountDataStore for PostgresStore {
         rows.iter().map(account_data_from_row).collect()
     }
 
+    async fn account_data_of_type(
+        &self,
+        user_id: &UserId,
+        data_type: &str,
+    ) -> Result<Vec<AccountData>> {
+        let rows = sqlx::query(
+            "SELECT room_id, data_type, content, stream_id FROM account_data
+             WHERE user_id = $1 AND data_type = $2 AND content <> '{}'::jsonb",
+        )
+        .bind(user_id.as_str())
+        .bind(data_type)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(account_data_from_row).collect()
+    }
+
     async fn max_account_data_stream_id(&self) -> Result<i64> {
         // Push rules draw from the same sequence but live in their own table.
         let row = sqlx::query(

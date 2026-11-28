@@ -110,6 +110,10 @@ impl RequiredStateSpec {
     }
 
     /// Whether this asks for every membership on its own terms (then nobody's are lazy).
+    ///
+    /// On `/v4/sync` an include that names `m.room.member` without a `state_key` asks for
+    /// every member, also with `lazy_members` (open question 1 of the v4 plan): only an
+    /// include without a type is narrowed by lazy loading, as in MSC4186's `include: [{}]`.
     fn includes_all_members(&self) -> bool {
         self.exclude
             .iter()
@@ -277,6 +281,60 @@ mod tests {
         assert!(!r.matches("m.room.topic", "", &me, |_| false));
         assert!(!r.matches("m.room.member", "@them:x.test", &me, |_| false));
         assert!(r.matches("m.room.member", "@them:x.test", &me, |_| true));
+    }
+
+    #[test]
+    fn v4_an_include_naming_the_member_type_asks_for_every_member() {
+        let me = user();
+        let spec = RequiredStateSpec {
+            include: [
+                StateMatcher {
+                    ty: None,
+                    key: KeyMatch::Any,
+                },
+                StateMatcher {
+                    ty: Some("m.room.member".into()),
+                    key: KeyMatch::Any,
+                },
+            ]
+            .into(),
+            exclude: BTreeSet::new(),
+            lazy_members: true,
+            lazy_narrows_wildcards: true,
+        };
+        let r = RequiredState::of(&spec);
+        assert!(!r.loads_members_lazily());
+        assert!(r.matches("m.room.member", "@them:x.test", &me, |_| false));
+        // One named member beside lazy loading stays lazy, and gets that member.
+        let one = RequiredStateSpec {
+            include: [
+                StateMatcher {
+                    ty: None,
+                    key: KeyMatch::Any,
+                },
+                StateMatcher {
+                    ty: Some("m.room.member".into()),
+                    key: KeyMatch::Exact("@friend:x.test".into()),
+                },
+            ]
+            .into(),
+            ..spec
+        };
+        let r = RequiredState::of(&one);
+        assert!(r.loads_members_lazily());
+        assert!(r.matches("m.room.member", "@friend:x.test", &me, |_| false));
+        assert!(!r.matches("m.room.member", "@them:x.test", &me, |_| false));
+        // A literal `*` or `$ME` is just a string on v4.
+        let literal = RequiredState::of(&RequiredStateSpec {
+            include: [StateMatcher {
+                ty: Some("m.room.member".into()),
+                key: KeyMatch::Exact("$ME".into()),
+            }]
+            .into(),
+            ..RequiredStateSpec::default()
+        });
+        assert!(!literal.matches("m.room.member", "@me:x.test", &me, |_| false));
+        assert!(literal.matches("m.room.member", "$ME", &me, |_| false));
     }
 
     #[test]

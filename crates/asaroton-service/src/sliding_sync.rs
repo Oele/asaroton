@@ -68,6 +68,13 @@ pub struct ListFilters {
     /// `None` entries stand for rooms without a type.
     pub room_types: Option<Vec<Option<String>>>,
     pub not_room_types: Vec<Option<String>>,
+    /// Only the rooms that these spaces name as children (`m.space.child` with a `via`), of
+    /// the spaces the user has joined; empty for no such filter. Only `/v4/sync` sends it.
+    pub spaces: Vec<OwnedRoomId>,
+    /// Only rooms with one of these tags (`m.tag` room account data); empty for no filter.
+    pub tags: Vec<String>,
+    /// No rooms with any of these tags; wins over `tags`.
+    pub not_tags: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -175,10 +182,23 @@ pub struct Hero {
 #[derive(Clone, Debug)]
 pub struct RoomResult {
     pub membership: MembershipState,
+    /// The keys of the lists the room is in (not the subscriptions), each once.
+    pub lists: Vec<String>,
     pub initial: bool,
     pub name: Option<String>,
     pub avatar: Option<String>,
+    /// The connection was given a name, and the room has none any more (`/v4/sync` says so
+    /// with `name: null`; an omitted name means "unchanged").
+    pub name_cleared: bool,
+    /// The same for the avatar.
+    pub avatar_cleared: bool,
     pub is_dm: bool,
+    /// `is_dm` differs from what the connection was given (`/v4/sync` then sends it, also
+    /// when it is false).
+    pub is_dm_changed: bool,
+    /// State the connection has that is gone from the room (a state reset): `(type,
+    /// state_key)`, sent by `/v4/sync` as a `StateStub` in `required_state`.
+    pub stubs: Vec<(String, String)>,
     pub invite_state: Option<Vec<Value>>,
     pub required_state: Vec<StoredEvent>,
     pub timeline: Vec<StoredEvent>,
@@ -202,6 +222,42 @@ pub struct RoomResult {
     /// The stream position up to which the room was read: where the next answer goes on
     /// from. Kept with the connection, not sent.
     pub(crate) read_upto: i64,
+}
+
+impl RoomResult {
+    /// An entry that says nothing yet, for a room where the user's membership is `membership`.
+    #[must_use]
+    pub fn new(membership: MembershipState) -> Self {
+        Self {
+            membership,
+            lists: Vec::new(),
+            initial: false,
+            name: None,
+            avatar: None,
+            name_cleared: false,
+            avatar_cleared: false,
+            is_dm: false,
+            is_dm_changed: false,
+            stubs: Vec::new(),
+            invite_state: None,
+            required_state: Vec::new(),
+            timeline: Vec::new(),
+            prev_batch: None,
+            limited: false,
+            expanded_timeline: false,
+            joined_count: 0,
+            invited_count: 0,
+            num_live: 0,
+            bump_stamp: 0,
+            heroes: Vec::new(),
+            notification_count: 0,
+            highlight_count: 0,
+            txn_ids: HashMap::new(),
+            delay_ids: HashMap::new(),
+            state_given: Arc::default(),
+            read_upto: 0,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -301,6 +357,11 @@ struct RoomTrack {
     membership: MembershipState,
     notification_count: u64,
     highlight_count: u64,
+    /// The name, avatar and DM flag the connection was given, so that `/v4/sync` can say
+    /// when they change or go (`RoomResult::name_cleared` and the others).
+    name: Option<String>,
+    avatar: Option<String>,
+    is_dm: bool,
     /// Fingerprint of the stripped state last sent for an invite, so the invite is sent again
     /// only when it changes. Without this an invited room was part of every response and the
     /// request never long-polled.
@@ -327,6 +388,28 @@ impl StateGiven {
         self.0
             .get("m.room.member")
             .is_some_and(|members| members.contains_key(user.as_str()))
+    }
+
+    /// Whether the connection has an event for `(ty, key)`.
+    fn has_key(&self, ty: &str, key: &str) -> bool {
+        self.0.get(ty).is_some_and(|keys| keys.contains_key(key))
+    }
+
+    /// What the connection has once it was told that these keys are gone.
+    fn without(given: &Arc<Self>, gone: &[(String, String)]) -> Arc<Self> {
+        if gone.is_empty() {
+            return Arc::clone(given);
+        }
+        let mut next = (**given).clone();
+        for (ty, key) in gone {
+            if let Some(keys) = next.0.get_mut(ty) {
+                keys.remove(key);
+                if keys.is_empty() {
+                    next.0.remove(ty);
+                }
+            }
+        }
+        Arc::new(next)
     }
 
     /// Whether the connection has exactly this event for its state key.
@@ -540,9 +623,39 @@ struct RoomFacts {
     room_type: Option<String>,
 }
 
+/// What the `spaces`, `tags` and `not_tags` filters look at, read once per request and only
+/// when some list asks for them.
+#[derive(Default)]
+struct UserFacts {
+    /// The tags of each room the user has tagged.
+    tags: HashMap<OwnedRoomId, HashSet<String>>,
+    /// For each space a list names and the user has joined: the rooms it names as children.
+    space_children: HashMap<OwnedRoomId, HashSet<OwnedRoomId>>,
+}
+
 impl ListFilters {
-    fn matches(&self, m: &Membership, facts: &RoomFacts, is_dm: bool) -> bool {
+    fn matches(&self, m: &Membership, facts: &RoomFacts, is_dm: bool, user: &UserFacts) -> bool {
         if self.is_dm.is_some_and(|v| v != is_dm) {
+            return false;
+        }
+        // A space the user has not joined, or does not know, names no rooms here: a filter
+        // whose spaces are all like that leaves the list empty (open question 7 of the v4
+        // plan: the filter is not dropped).
+        if !self.spaces.is_empty()
+            && !self.spaces.iter().any(|space| {
+                user.space_children
+                    .get(space)
+                    .is_some_and(|children| children.contains(&m.room_id))
+            })
+        {
+            return false;
+        }
+        let tags = user.tags.get(&m.room_id);
+        let tagged = |t: &String| tags.is_some_and(|have| have.contains(t));
+        if self.not_tags.iter().any(tagged) {
+            return false;
+        }
+        if !self.tags.is_empty() && !self.tags.iter().any(tagged) {
             return false;
         }
         if self.is_encrypted.is_some_and(|v| v != facts.encrypted) {
@@ -644,6 +757,18 @@ fn required_state_matches(
         return false;
     };
     wanted.matches(&ty.to_string(), key, user, lazy_member)
+}
+
+/// Whether the room's name and its avatar went since the connection was shown the room
+/// (`shown_before`): it had one, and `out` has none. An avatar with an empty URL is none.
+fn cleared(shown_before: Option<&RoomTrack>, out: &RoomResult) -> (bool, bool) {
+    let set = |v: &Option<String>| v.as_deref().is_some_and(|s| !s.is_empty());
+    shown_before.map_or((false, false), |t| {
+        (
+            set(&t.name) && !set(&out.name),
+            set(&t.avatar) && !set(&out.avatar),
+        )
+    })
 }
 
 /// Whom a timeline is about: whoever sent one of its events, and whoever one of its
@@ -869,6 +994,7 @@ impl Services {
         for m in &candidates {
             facts.insert(m.room_id.clone(), self.room_facts(&m.room_id).await?);
         }
+        let user_facts = self.user_facts(user, req, &memberships).await?;
 
         // Lists, subscriptions, and rooms left since the last position (reported once more so
         // the client can drop them).
@@ -880,7 +1006,12 @@ impl Services {
                 .copied()
                 .filter(|m| {
                     list.filters.as_ref().is_none_or(|f| {
-                        f.matches(m, &facts[&m.room_id], direct.contains(&m.room_id))
+                        f.matches(
+                            m,
+                            &facts[&m.room_id],
+                            direct.contains(&m.room_id),
+                            &user_facts,
+                        )
                     })
                 })
                 .collect();
@@ -916,6 +1047,10 @@ impl Services {
                 );
             }
         }
+        // A room the user left themselves is reported once more, outside the lists, and is
+        // then dropped. MSC4186 keeps such a room in the server's list for the rest of the
+        // connection once it was sent; asaroton keeps its own treatment on both endpoints
+        // (open question 2 of the v4 plan), so on `/v4/sync` it comes without `lists`.
         if let (Some(s), Some(b)) = (since, base) {
             for m in &memberships {
                 if matches!(m.membership, MembershipState::Leave | MembershipState::Ban)
@@ -974,14 +1109,31 @@ impl Services {
                 )
                 .await?;
             let invite = r.invite_state.as_deref().map(invite_fingerprint);
+            // A room whose only news is that it moved into another list, or out of one, is
+            // not sent: `lists` is not compared (open question 3 of the v4 plan). The counts
+            // tell the client that the lists changed.
             let unchanged = track.is_some_and(|t| {
                 !r.initial
                     && r.timeline.is_empty()
                     && r.required_state.is_empty()
                     && t.invite == invite
                     && t.membership == sel.membership.membership
-                    && t.notification_count == r.notification_count
-                    && t.highlight_count == r.highlight_count
+                    && match req.dialect {
+                        Dialect::Unstable => {
+                            t.notification_count == r.notification_count
+                                && t.highlight_count == r.highlight_count
+                        }
+                        // `/v4/sync` has no notification counts (MSC4186; open question 9),
+                        // and says when the name, the avatar or the DM flag change and when
+                        // state is gone. An invite or a knock shows only its stripped state.
+                        Dialect::V4 => {
+                            r.stubs.is_empty()
+                                && (r.invite_state.is_some()
+                                    || (t.name == r.name
+                                        && t.avatar == r.avatar
+                                        && t.is_dm == r.is_dm))
+                        }
+                    }
             });
             tracks.insert(
                 room_id.clone(),
@@ -1009,6 +1161,9 @@ impl Services {
                     membership: sel.membership.membership.clone(),
                     notification_count: r.notification_count,
                     highlight_count: r.highlight_count,
+                    name: r.name.clone(),
+                    avatar: r.avatar.clone(),
+                    is_dm: r.is_dm,
                     invite,
                     state_given: Arc::clone(&r.state_given),
                 },
@@ -1487,30 +1642,30 @@ impl Services {
             })
             && self.left_as_member(room_id, user).await?;
         let initial = initial || back_and_gone;
+        let mut lists: Vec<String> = Vec::with_capacity(sel.lists.len());
+        for name in &sel.lists {
+            if !lists.contains(name) {
+                lists.push(name.clone());
+            }
+        }
         let mut out = RoomResult {
-            membership: m.membership.clone(),
+            lists,
             initial,
-            name: None,
-            avatar: None,
             is_dm,
-            invite_state: None,
-            required_state: Vec::new(),
-            timeline: Vec::new(),
-            prev_batch: None,
-            limited: false,
-            expanded_timeline: false,
-            joined_count: 0,
-            invited_count: 0,
-            num_live: 0,
+            is_dm_changed: !initial && track.is_some_and(|t| t.is_dm != is_dm),
             bump_stamp: u64::try_from(bump).unwrap_or(0),
-            heroes: Vec::new(),
-            notification_count: 0,
-            highlight_count: 0,
-            txn_ids: HashMap::new(),
-            delay_ids: HashMap::new(),
-            state_given: Arc::default(),
             read_upto: now.events,
+            ..RoomResult::new(m.membership.clone())
         };
+        // What the connection was given of the room as a room (not an invite's or a knock's
+        // stripped state), for telling it that the name or the avatar went.
+        let shown_before = track.filter(|t| {
+            !initial
+                && !matches!(
+                    t.membership,
+                    MembershipState::Invite | MembershipState::Knock
+                )
+        });
         // An invite or a pending knock shows the room's stripped state and nothing else: the
         // user is not in the room, so its timeline and state are not theirs to read. (A knock
         // used to fall through to the joined path below, which let anyone who could knock on
@@ -1672,7 +1827,13 @@ impl Services {
         let mut about = timeline_members(&events);
         about.extend(sticky_senders.iter().cloned());
         let lazy = sel.required_state.loads_members_lazily();
-        let lazy_member = |u: &UserId| about.contains(u) || given.is_some_and(|g| g.has_member(u));
+        // `/v4/sync` adds a third kind (MSC4186, rule 3 of lazy loading): every membership
+        // that changed since the last answer, when this answer has no gap. The pool of an
+        // answer that is not full holds only what changed.
+        let every_change = req.dialect == Dialect::V4 && !full && !more;
+        let lazy_member = |u: &UserId| {
+            every_change || about.contains(u) || given.is_some_and(|g| g.has_member(u))
+        };
         // The state group right after the leave, for someone who left as a member. After a
         // declined invite or a withdrawn knock the user was never in the room and there is no
         // state to show.
@@ -1685,6 +1846,8 @@ impl Services {
         } else {
             None
         };
+        // State gone from the room since the last answer, for `/v4/sync`'s stubs.
+        let mut gone: Vec<(StateEventType, String)> = Vec::new();
         let pool: Vec<StoredEvent> = if sel.required_state.is_empty() {
             Vec::new()
         } else if left {
@@ -1713,9 +1876,15 @@ impl Services {
             // in a room with two loose ends the connection may have been given the outcome
             // of one resolution, and a later event tips it back to what the room's newest
             // event already had, so that "then" and "now" look the same.
-            let changed = self
-                .state_changes_and(room_id, l, |e| given.is_some_and(|g| g.has_another(e)))
+            let (changed, removed) = self
+                .state_changes_and_removed(
+                    room_id,
+                    l,
+                    |e| given.is_some_and(|g| g.has_another(e)),
+                    req.dialect == Dialect::V4,
+                )
                 .await?;
+            gone = removed;
             self.state_as_of(room_id, upper, changed).await?
         } else {
             Vec::new()
@@ -1775,7 +1944,25 @@ impl Services {
         if let Some(g) = given {
             state.retain(|e| !g.has(e) || (reported_gone && own(e)));
         }
+        // State that is gone, that the connection has and that the client asks for: a stub
+        // tells the client to drop it (`/v4/sync` only; `gone` is empty otherwise).
+        if let Some(g) = given {
+            out.stubs = gone
+                .into_iter()
+                .map(|(ty, key)| (ty.to_string(), key))
+                .filter(|(ty, key)| {
+                    g.has_key(ty, key)
+                        && sel.required_state.matches(ty, key, user, lazy_member)
+                        && !state.iter().any(|e| {
+                            e.pdu
+                                .state_tuple()
+                                .is_some_and(|(t, k)| t.to_string() == *ty && k == key)
+                        })
+                })
+                .collect();
+        }
         out.state_given = StateGiven::with(given, &state, &about, user);
+        out.state_given = StateGiven::without(&out.state_given, &out.stubs);
         out.required_state = state;
 
         // Name, avatar, counts and heroes. A former member gets the name and avatar as they
@@ -1792,6 +1979,7 @@ impl Services {
                     .await?
                     .and_then(|c| c.get("url").and_then(Value::as_str).map(str::to_owned));
             }
+            (out.name_cleared, out.avatar_cleared) = cleared(shown_before, &out);
             out.timeline = events;
             return Ok(out);
         }
@@ -1804,6 +1992,7 @@ impl Services {
             .state_content(room_id, &StateEventType::RoomAvatar, "")
             .await?
             .and_then(|c| c.get("url").and_then(Value::as_str).map(str::to_owned));
+        (out.name_cleared, out.avatar_cleared) = cleared(shown_before, &out);
         let members = self.store.members(room_id, None).await?;
         out.joined_count = members
             .iter()
@@ -1836,12 +2025,15 @@ impl Services {
                 })
                 .collect();
         }
-        match self.unread_counts(room_id, user, upper).await {
-            Ok(c) => {
-                out.notification_count = c.total.notification_count;
-                out.highlight_count = c.total.highlight_count;
+        // `/v4/sync` sends no notification counts (open question 9 of the v4 plan).
+        if req.dialect == Dialect::Unstable {
+            match self.unread_counts(room_id, user, upper).await {
+                Ok(c) => {
+                    out.notification_count = c.total.notification_count;
+                    out.highlight_count = c.total.highlight_count;
+                }
+                Err(e) => self.unread_counts_failed(room_id, &e),
             }
-            Err(e) => self.unread_counts_failed(room_id, &e),
         }
         out.timeline = events;
         Ok(out)
@@ -1976,13 +2168,29 @@ impl Services {
         since: i64,
         also: impl Fn(&StoredEvent) -> bool,
     ) -> Result<Vec<StoredEvent>> {
+        Ok(self
+            .state_changes_and_removed(room_id, since, also, false)
+            .await?
+            .0)
+    }
+
+    /// [`Services::state_changes_and`], and, when `removed` is asked for, the state keys that
+    /// the state as of `since` had and the current state has not (a state reset can take
+    /// state away).
+    async fn state_changes_and_removed(
+        &self,
+        room_id: &RoomId,
+        since: i64,
+        also: impl Fn(&StoredEvent) -> bool,
+        removed: bool,
+    ) -> Result<(Vec<StoredEvent>, Vec<(StateEventType, String)>)> {
         let at = self
             .store
             .room_events_in_range(room_id, since + 1, None, Direction::Backwards, 1)
             .await?;
         let current = self.store.current_state_pdus(room_id).await?;
         let Some(group) = at.first().and_then(|e| e.state_group) else {
-            return Ok(current);
+            return Ok((current, Vec::new()));
         };
         let before: HashMap<(StateEventType, String), String> = self
             .store
@@ -1991,7 +2199,24 @@ impl Services {
             .into_iter()
             .map(|e| ((e.event_type, e.state_key), e.event_id.to_string()))
             .collect();
-        Ok(current
+        let now: HashSet<(StateEventType, String)> = current
+            .iter()
+            .filter_map(|e| e.pdu.state_tuple().map(|(t, k)| (t, k.to_owned())))
+            .collect();
+        let mut gone = Vec::new();
+        for key in before.keys().filter(|k| removed && !now.contains(*k)) {
+            // Read once more by its key: the events above are joined with the events table,
+            // and an entry missing there is no reason to tell a client the state is gone.
+            if self
+                .store
+                .current_state_event(room_id, &key.0, &key.1)
+                .await?
+                .is_none()
+            {
+                gone.push(key.clone());
+            }
+        }
+        let changed = current
             .into_iter()
             .filter(|e| {
                 also(e)
@@ -2000,7 +2225,8 @@ impl Services {
                             != Some(e.pdu.event_id().as_str())
                     })
             })
-            .collect())
+            .collect();
+        Ok((changed, gone))
     }
 
     /// Rooms marked as direct chats in the user's `m.direct` account data.
@@ -2016,6 +2242,71 @@ impl Services {
                     }
                 }
             }
+        }
+        Ok(out)
+    }
+
+    /// The tags and the space children that the request's list filters look at (see
+    /// [`UserFacts`]); nothing is read for a request whose lists do not filter by them.
+    async fn user_facts(
+        &self,
+        user: &UserId,
+        req: &SlidingSyncRequest,
+        memberships: &[Membership],
+    ) -> Result<UserFacts> {
+        let filters = || req.lists.values().filter_map(|l| l.filters.as_ref());
+        let mut out = UserFacts::default();
+        if filters().any(|f| !f.tags.is_empty() || !f.not_tags.is_empty()) {
+            for ad in self.store.account_data_of_type(user, "m.tag").await? {
+                let Some(room_id) = ad.room_id else {
+                    continue;
+                };
+                let tags: HashSet<String> = ad
+                    .content
+                    .get("tags")
+                    .and_then(Value::as_object)
+                    .map(|t| t.keys().cloned().collect())
+                    .unwrap_or_default();
+                if !tags.is_empty() {
+                    out.tags.insert(room_id, tags);
+                }
+            }
+        }
+        let spaces: BTreeSet<&OwnedRoomId> = filters().flat_map(|f| &f.spaces).collect();
+        for space in spaces {
+            // Only spaces the user has joined count (MSC4186); their children are the rooms
+            // named by `m.space.child` with a `via`, and not the children of subspaces.
+            if !memberships
+                .iter()
+                .any(|m| m.room_id == *space && m.membership == MembershipState::Join)
+            {
+                continue;
+            }
+            let keys: Vec<(StateEventType, String)> = self
+                .store
+                .current_state(space)
+                .await?
+                .into_iter()
+                .filter(|e| e.event_type == StateEventType::SpaceChild)
+                .map(|e| (e.event_type, e.state_key))
+                .collect();
+            let children: HashSet<OwnedRoomId> = if keys.is_empty() {
+                HashSet::new()
+            } else {
+                self.store
+                    .current_state_pdus_for(space, &keys)
+                    .await?
+                    .into_iter()
+                    .filter(|e| {
+                        serde_json::from_str::<Value>(e.pdu.content().get())
+                            .ok()
+                            .and_then(|c| c.get("via")?.as_array().map(|v| !v.is_empty()))
+                            .unwrap_or(false)
+                    })
+                    .filter_map(|e| OwnedRoomId::try_from(e.pdu.state_key()?).ok())
+                    .collect()
+            };
+            out.space_children.insert(space.clone(), children);
         }
         Ok(out)
     }
@@ -2160,6 +2451,42 @@ mod tests {
     }
 
     #[test]
+    fn a_name_or_avatar_that_went_is_cleared() {
+        let track = |name: Option<&str>, avatar: Option<&str>| RoomTrack {
+            timeline_upto: 0,
+            membership_at: 0,
+            required_state: RequiredState::default(),
+            timeline_limit: 1,
+            membership: MembershipState::Join,
+            notification_count: 0,
+            highlight_count: 0,
+            name: name.map(str::to_owned),
+            avatar: avatar.map(str::to_owned),
+            is_dm: false,
+            invite: None,
+            state_given: Arc::default(),
+        };
+        let now = |name: Option<&str>, avatar: Option<&str>| {
+            let mut r = RoomResult::new(MembershipState::Join);
+            r.name = name.map(str::to_owned);
+            r.avatar = avatar.map(str::to_owned);
+            r
+        };
+        let had = track(Some("Room"), Some("mxc://x.test/a"));
+        assert_eq!(cleared(Some(&had), &now(None, None)), (true, true));
+        assert_eq!(cleared(Some(&had), &now(None, Some(""))), (true, true));
+        assert_eq!(
+            cleared(Some(&had), &now(Some("Other"), Some("mxc://x.test/b"))),
+            (false, false)
+        );
+        assert_eq!(
+            cleared(Some(&track(None, None)), &now(None, None)),
+            (false, false)
+        );
+        assert_eq!(cleared(None, &now(None, None)), (false, false));
+    }
+
+    #[test]
     fn only_the_newest_request_leaves_its_state_behind() {
         let state = |seq| ConnState {
             seq,
@@ -2239,6 +2566,77 @@ mod tests {
         state.seq = 1;
         conns.store_pending(&key, state, again, &nonce);
         assert!(conns.resolve(&key, Some(&pos)).is_err());
+    }
+
+    #[test]
+    fn list_filters_by_space_and_by_tag() {
+        let room = |id: &str| OwnedRoomId::try_from(id).unwrap();
+        let member = |id: &str| Membership {
+            room_id: room(id),
+            user_id: OwnedUserId::try_from("@a:x.test").unwrap(),
+            membership: MembershipState::Join,
+            event_id: OwnedEventId::try_from("$e").unwrap(),
+            sender: OwnedUserId::try_from("@a:x.test").unwrap(),
+            display_name: None,
+            avatar_url: None,
+            stream_ordering: 1,
+            forgotten: false,
+        };
+        let facts = RoomFacts {
+            encrypted: false,
+            room_type: None,
+        };
+        let (child, other) = (member("!child:x.test"), member("!other:x.test"));
+        let mut user = UserFacts::default();
+        user.space_children
+            .insert(room("!space:x.test"), [room("!child:x.test")].into());
+        user.tags.insert(
+            room("!child:x.test"),
+            ["m.favourite".to_owned(), "u.work".to_owned()].into(),
+        );
+        user.tags
+            .insert(room("!other:x.test"), ["m.favourite".to_owned()].into());
+
+        let spaces = |s: &[&str]| ListFilters {
+            spaces: s.iter().map(|id| room(id)).collect(),
+            ..ListFilters::default()
+        };
+        assert!(spaces(&["!space:x.test"]).matches(&child, &facts, false, &user));
+        assert!(!spaces(&["!space:x.test"]).matches(&other, &facts, false, &user));
+        // A space the user has not joined (it has no entry) names no rooms: the list is
+        // empty rather than unfiltered.
+        assert!(!spaces(&["!unjoined:x.test"]).matches(&child, &facts, false, &user));
+
+        let tags = |t: &[&str], not: &[&str]| ListFilters {
+            tags: t.iter().map(|s| (*s).to_owned()).collect(),
+            not_tags: not.iter().map(|s| (*s).to_owned()).collect(),
+            ..ListFilters::default()
+        };
+        assert!(tags(&["m.favourite"], &[]).matches(&other, &facts, false, &user));
+        assert!(tags(&["m.lowpriority", "u.work"], &[]).matches(&child, &facts, false, &user));
+        assert!(!tags(&["u.work"], &[]).matches(&other, &facts, false, &user));
+        // `not_tags` wins over `tags`.
+        assert!(!tags(&["m.favourite"], &["u.work"]).matches(&child, &facts, false, &user));
+        assert!(tags(&[], &["u.work"]).matches(&other, &facts, false, &user));
+        let untagged = member("!plain:x.test");
+        assert!(tags(&[], &["m.favourite"]).matches(&untagged, &facts, false, &user));
+        assert!(!tags(&["m.favourite"], &[]).matches(&untagged, &facts, false, &user));
+    }
+
+    #[test]
+    fn a_connection_forgets_state_it_was_told_is_gone() {
+        let user = OwnedUserId::try_from("@a:x.test").unwrap();
+        let topic = state_event("m.room.topic", "", 1);
+        let name = state_event("m.room.name", "", 2);
+        let given = StateGiven::with(None, &[topic.clone(), name.clone()], &HashSet::new(), &user);
+        assert!(given.has_key("m.room.topic", "") && given.has_key("m.room.name", ""));
+        let after = StateGiven::without(&given, &[("m.room.topic".to_owned(), String::new())]);
+        assert!(!after.has_key("m.room.topic", "") && !after.has(&topic));
+        assert!(after.has(&name));
+        assert!(
+            !after.0.contains_key("m.room.topic"),
+            "no empty type is left behind"
+        );
     }
 
     #[test]
