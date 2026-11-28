@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use ruma::{OwnedRoomId, OwnedServerName, OwnedUserId, RoomAliasId, RoomId, ServerName, UserId};
 use serde_json::Value;
 
-use crate::{Error, Result, Services};
+use crate::{Error, Result, Services, rooms::policy::PolicyRefusal};
 
 /// One page of another server's public room directory (federation `/publicRooms`).
 #[derive(Debug, Default)]
@@ -63,6 +63,13 @@ pub trait FederationHooks: Send + Sync {
         via: &[OwnedServerName],
         reason: Option<&str>,
     ) -> Result<()>;
+    /// Ask a room's policy server to sign an event (`POST /_matrix/policy/v1/sign`, Matrix
+    /// v1.18). Returns the `ed25519:policy_server` signature it gives, not checked yet.
+    async fn policy_sign(
+        &self,
+        via: &ServerName,
+        pdu: &Pdu,
+    ) -> std::result::Result<String, PolicyRefusal>;
     /// Resolve an alias on its server.
     async fn resolve_alias(
         &self,
@@ -179,6 +186,15 @@ impl FederationHooks for NoFederation {
         _: Option<&str>,
     ) -> Result<()> {
         Err(disabled())
+    }
+    async fn policy_sign(
+        &self,
+        _: &ServerName,
+        _: &Pdu,
+    ) -> std::result::Result<String, PolicyRefusal> {
+        Err(PolicyRefusal::Unavailable(
+            "federation is disabled on this server".into(),
+        ))
     }
     async fn resolve_alias(&self, _: &RoomAliasId) -> Result<(OwnedRoomId, Vec<OwnedServerName>)> {
         Err(disabled())

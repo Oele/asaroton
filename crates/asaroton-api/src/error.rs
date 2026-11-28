@@ -96,7 +96,7 @@ impl Error {
 fn service_status(e: &asaroton_service::Error) -> StatusCode {
     use asaroton_service::Error as S;
     match e {
-        S::Matrix { status, .. } | S::Custom { status, .. } => *status,
+        S::Matrix { status, .. } | S::Custom { status, .. } | S::Relayed { status, .. } => *status,
         S::InviteIgnored => StatusCode::FORBIDDEN,
         S::Auth(
             asaroton_auth::AuthError::UnknownToken { .. } | asaroton_auth::AuthError::Expired,
@@ -158,6 +158,9 @@ impl Error {
                     status,
                     ErrorBody::Json(serde_json::json!({ "errcode": errcode, "error": message })),
                 ));
+            }
+            Self::Service(S::Relayed { status, body }) => {
+                return Ok(MatrixError::new(status, ErrorBody::Json(body)));
             }
             Self::Service(S::InviteIgnored) => (
                 ErrorKind::Forbidden,

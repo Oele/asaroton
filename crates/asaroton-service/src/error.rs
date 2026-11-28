@@ -32,6 +32,13 @@ pub enum Error {
     /// An invite the invitee's filter drops silently (MSC4155); callers report success.
     #[error("invite ignored by the invitee")]
     InviteIgnored,
+    /// A Matrix error another server gave, passed on to the client as it came: status and
+    /// the whole body (a room's policy server refusing an event, Matrix v1.18).
+    #[error("{status}: {body}")]
+    Relayed {
+        status: http::StatusCode,
+        body: serde_json::Value,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -49,6 +56,7 @@ impl Error {
             } => {
                 serde_json::json!({ "errcode": errcode, "error": message })
             }
+            Error::Relayed { body, .. } => body.clone(),
             _ => serde_json::json!({ "errcode": "M_UNKNOWN", "error": "Internal server error" }),
         }
     }

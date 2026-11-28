@@ -284,7 +284,7 @@ impl FederationClient {
         })
     }
 
-    async fn send_with_timeout<R>(
+    pub(crate) async fn send_with_timeout<R>(
         &self,
         destination: &ServerName,
         request: R,

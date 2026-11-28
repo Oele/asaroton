@@ -21,6 +21,7 @@ pub mod inbound;
 pub mod join;
 pub mod keys;
 pub mod outbound;
+mod policy;
 pub mod push;
 pub mod receive;
 mod recheck;
@@ -101,6 +102,8 @@ pub struct Federation {
     foreign_room_events: dashmap::DashMap<ruma::OwnedRoomId, (u64, ruma::OwnedServerName)>,
     /// Signing keys that could not be obtained, and when that was last tried.
     key_misses: dashmap::DashMap<(ruma::OwnedServerName, String), std::time::Instant>,
+    /// Policy servers that could not be reached, and when (see `policy`).
+    policy_down: dashmap::DashMap<ruma::OwnedServerName, std::time::Instant>,
     /// Rooms of version 1 whose state was resolved by approximation since the start: each
     /// is reported once (see `resolve_states`).
     approximated_rooms: dashmap::DashSet<ruma::OwnedRoomId>,
@@ -155,6 +158,7 @@ impl Federation {
             auth_misses: dashmap::DashMap::new(),
             foreign_room_events: dashmap::DashMap::new(),
             key_misses: dashmap::DashMap::new(),
+            policy_down: dashmap::DashMap::new(),
             approximated_rooms: dashmap::DashSet::new(),
             weak_self: std::sync::OnceLock::new(),
         });
@@ -180,6 +184,9 @@ impl Federation {
                 cache_owner
                     .auth_misses
                     .retain(|_, at| at.elapsed() < receive::AUTH_MISS_TTL);
+                cache_owner
+                    .policy_down
+                    .retain(|_, at| at.elapsed() < std::time::Duration::from_mins(5));
             }
         });
         Ok(fed)

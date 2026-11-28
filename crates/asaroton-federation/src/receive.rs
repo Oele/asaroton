@@ -8,7 +8,9 @@
 //! 4. compute the state before the event (state resolution across prev events);
 //! 5. authorise against the auth events, then against that state; soft-fail against the
 //!    current state;
-//! 6. persist with its state group, update forward extremities and the current state.
+//! 6. in a room that uses a policy server (v1.18): soft-fail without its valid signature,
+//!    asking it once for one that is missing (spec step 7);
+//! 7. persist with its state group, update forward extremities and the current state.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -440,7 +442,9 @@ impl Federation {
         let mut keys = ruma::signatures::PublicKeyMap::new();
         for server in servers {
             // The keys this event names for the server. Servers change keys; an event from
-            // before the change can only be checked with the key of its day.
+            // before the change can only be checked with the key of its day. A policy
+            // server's signature is no server key and is not looked for (it is checked
+            // against the room's `m.room.policy` key in step 7); its server may be this one.
             let key_ids: Vec<ruma::OwnedServerSigningKeyId> = match pdu
                 .raw()
                 .get("signatures")
@@ -450,6 +454,7 @@ impl Federation {
             {
                 Some(by_key) => by_key
                     .keys()
+                    .filter(|id| id.as_str() != asaroton_core::policy::KEY_ID)
                     .filter_map(|id| id.as_str().try_into().ok())
                     .collect(),
                 None => Vec::new(),
@@ -689,9 +694,31 @@ impl Federation {
         // Soft fail: passes its own history but not the current state.
         let current = self.current_state_pdus(&room_id).await?;
         // Old history fetched by backfill is not judged against today's state.
-        let soft_failed = !backfilled && auth::check_against_state(&pdu, rules, &current).is_err();
+        let mut soft_failed =
+            !backfilled && auth::check_against_state(&pdu, rules, &current).is_err();
 
-        // 6. persist with state group
+        // 7. The room's policy server (v1.18): in a room that uses one, an event needs its
+        // valid signature, asked for once when missing or invalid; without one it is
+        // soft-failed. A signature given now is kept with the event.
+        let mut pdu = pdu;
+        if !soft_failed
+            && !backfilled
+            && let Some(policy) = asaroton_core::policy::in_use(&current)
+        {
+            match self
+                .services
+                .policy_signed(Some(&policy), pdu.clone(), rules)
+                .await
+            {
+                Ok(signed) => pdu = signed,
+                Err(refusal) => {
+                    tracing::info!(event_id = %pdu.event_id(), %room_id, via = %policy.via(), %refusal, "soft-failing an event without a valid policy server signature");
+                    soft_failed = true;
+                }
+            }
+        }
+
+        // persist with state group
         let state = match pdu.state_tuple() {
             Some((ty, key)) => EventState::New {
                 prev: before_group,
@@ -800,8 +827,17 @@ impl Federation {
                 return;
             }
         };
+        // In a room with a policy server an event also needs its signature. Not asked for
+        // here: what was soft-failed for want of it stays so.
+        let policy = asaroton_core::policy::in_use(&current);
         for ev in candidates {
             if auth::check_against_state(&ev.pdu, &rules, &current).is_err() {
+                continue;
+            }
+            if let Some(policy) = &policy
+                && asaroton_core::policy::needs_signature(ev.pdu.event_type(), ev.pdu.state_key())
+                && !policy.signed(ev.pdu.raw(), &rules)
+            {
                 continue;
             }
             match store.accept_soft_failed_sticky(&ev).await {

@@ -378,11 +378,16 @@ impl Services {
 
     /// Persist an already-built event (from [`Services::build_local_event_locked`] or signed
     /// by a remote server), update the context and fan out.
+    ///
+    /// In a room that uses a policy server (Matrix v1.18), the event first gets its
+    /// signature; when the policy server does not give one, the event goes no further and
+    /// the caller gets the policy server's error (see [`Services::policy_sign_local`]).
     pub async fn persist_built_event_locked(
         &self,
         ctx: &mut RoomContext,
         pdu: Pdu,
     ) -> Result<StoredEvent> {
+        let pdu = self.policy_sign_local(ctx, pdu).await?;
         // state bookkeeping
         let (state, delta) = match pdu.state_tuple() {
             Some((ty, key)) => {

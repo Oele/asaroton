@@ -282,6 +282,14 @@ impl FederationHooks for Hooks {
         serde_json::to_value(resp.data).map_err(Into::into)
     }
 
+    async fn policy_sign(
+        &self,
+        via: &ruma::ServerName,
+        pdu: &Pdu,
+    ) -> std::result::Result<String, asaroton_service::rooms::policy::PolicyRefusal> {
+        self.0.ask_policy_server(via, pdu).await
+    }
+
     async fn remote_livekit_token(
         &self,
         server: &ruma::ServerName,

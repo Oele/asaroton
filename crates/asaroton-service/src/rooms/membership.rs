@@ -371,7 +371,9 @@ impl Services {
             return self.send_local_event_locked(ctx, ev).await;
         }
         // Remote invitee: build the event, have their server sign it, then persist that copy.
+        // The room's policy server, if it has one, signs before the invitee's server sees it.
         let built = self.build_local_event_locked(ctx, ev)?;
+        let built = self.policy_sign_local(ctx, built).await?;
         let stripped = Self::stripped_state_for_invite(ctx);
         let signed = self
             .federation()

@@ -869,6 +869,9 @@ impl Federation {
         {
             return Err(Error::Rejected("not a knock event".into()));
         }
+        let pdu = self
+            .policy_sign_for_resident_endpoint(room_id, pdu, &rules)
+            .await?;
         if let (_, crate::receive::Outcome::Rejected(reason)) = self
             .handle_incoming_pdu(
                 origin,
@@ -1049,6 +1052,9 @@ impl Federation {
         {
             return Err(Error::Rejected("not a valid join event".into()));
         }
+        let pdu = self
+            .policy_sign_for_resident_endpoint(room_id, pdu, &rules)
+            .await?;
 
         if let (_, crate::receive::Outcome::Rejected(reason)) = self
             .handle_incoming_pdu(
@@ -1157,6 +1163,9 @@ impl Federation {
         {
             return Err(Error::Rejected("not a valid leave event".into()));
         }
+        let pdu = self
+            .policy_sign_for_resident_endpoint(room_id, pdu, &rules)
+            .await?;
         if let (_, crate::receive::Outcome::Rejected(reason)) = self
             .handle_incoming_pdu(
                 origin,

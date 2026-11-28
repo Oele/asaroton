@@ -4,6 +4,7 @@ pub mod create;
 pub mod making;
 pub mod membership;
 pub mod pipeline;
+pub mod policy;
 pub mod power;
 pub mod relations;
 pub mod search;
