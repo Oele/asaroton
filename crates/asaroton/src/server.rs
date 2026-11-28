@@ -215,6 +215,7 @@ fn service_config(config: &Config) -> anyhow::Result<asaroton_service::Config> {
             }),
         software_version: env!("CARGO_PKG_VERSION").to_owned(),
         media_dir: config.data_dir.join("media"),
+        url_previews: config.media.url_previews,
         appservices: load_appservices(config)?,
         server_notices: config.server_notices.enabled.then(|| {
             asaroton_service::config::ServerNotices {

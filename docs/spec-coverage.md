@@ -1,6 +1,10 @@
 # Spec coverage
 
 Target: Matrix spec v1.19, default room version 12 (all versions 1–12 supported for joining).
+Of v1.20, unreleased (the spec's changelog fragments as of 2026-11-28), what asks something of a
+server is done: delayed events, sticky events, the `m.preview_url` and `m.delayed_events`
+capabilities, `unsigned.prev_sender`, `/relations` with `dir=f` from the oldest, non-negative
+depths (scripts/v120test.py). v1.20 goes into `/versions` once it is released.
 The conformance gate is Complement (`scripts/complement.sh`). The tests that fail by decision
 are listed with their reasons in `tests/complement/expected-failures.txt` and skipped, so a
 clean run exits 0 and every failure it reports is a real one; `COMPLEMENT_ALL=1` runs
@@ -16,7 +20,7 @@ implemented, 2 deliberate deviations (see the end of this page).
 | Client-Server: relations / threads / search / spaces | done (`/relations` with recursion, `/threads`, bundled aggregations, Postgres full-text search, `/hierarchy` incl. remote children) |
 | Client-Server: /sync (classic) | done: timelines filtered by history visibility, left rooms frozen at the leave (no state at all after a declined invite or withdrawn knock), rooms, state (and `state_after` with `use_state_after`), account data, receipts (threaded), typing, presence, to-device, device lists, unread and per-thread notification counts, ignored users, lazy loading, topological initial timelines |
 | Client-Server: Simplified Sliding Sync (MSC4186) | done: invites and knocks as stripped state only, left rooms frozen at the leave, timelines filtered by history visibility, lists with ranges and filters, room subscriptions, per-connection deltas with position retry, `required_state` wildcards (`*`, `$ME`, `$LAZY`), to-device, e2ee, account data, receipts and typing extensions, the profiles extension (MSC4262 under `org.matrix.msc4262.profiles`: profile fields of the local users one shares a room with, all set fields first and then changes, `null` when no room is shared any more, `fields`/`lists`/`rooms` filters), the sticky events extension (MSC4480 under `org.matrix.msc4354.sticky_events` or `sticky_events`, see the sticky events row) |
-| Client-Server: media | done: authenticated and legacy download/thumbnail, uploads (sync and async), URL previews, remote media over federation |
+| Client-Server: media | done: authenticated and legacy download/thumbnail, uploads (sync and async), URL previews (`[media] url_previews = false` switches them off: 403 `M_FORBIDDEN`, and the v1.20 `m.preview_url` capability says so, MSC4452), remote media over federation |
 | Client-Server: E2EE | done: device keys, one-time/fallback keys, cross-signing, signatures, to-device, key backups |
 | Client-Server: push | done: rules served and evaluated for unread counts, room-specific rules follow room upgrades, HTTP pushers receive notifications (full and `event_id_only`, rejected pushkeys removed) |
 | Server-Server: keys / signing | done (server keys, notary, key fetch/cache, X-Matrix) |

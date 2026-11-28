@@ -73,6 +73,9 @@ proxy; asaroton answers them with an error when delegation is on. Clients discov
 - A signature on an event counts only while its key was valid: in room versions 5 and later
   an event dated after the validity its server states for the signing key is refused, as
   the specification requires.
+- URL previews can be switched off with `[media] url_previews = false`: `/media/preview_url`
+  then answers 403 `M_FORBIDDEN`, and the `m.preview_url` capability tells clients (Matrix
+  v1.20) so that they stop asking.
 - URLs that somebody else chose only lead to the public internet: URL previews (the page,
   its redirects and its image), the gateways of users' pushers, and media that another
   homeserver redirects to. Loopback, private, link-local and similar addresses are refused,

@@ -1717,11 +1717,26 @@ async fn add_txn_ids(
 
 // ---------------------------------------------------------------- URL previews
 
+/// Link previews switched off (`[media] url_previews = false`): 403 `M_FORBIDDEN`, as the
+/// `m.preview_url` capability announces (v1.20, MSC4452).
+fn previews_allowed(services: &AppState) -> Result<()> {
+    if services.config.url_previews {
+        Ok(())
+    } else {
+        Err(Error::matrix(
+            ruma::api::error::ErrorKind::Forbidden,
+            http::StatusCode::FORBIDDEN,
+            "URL previews are disabled on this server.",
+        ))
+    }
+}
+
 pub async fn preview_url(
     services: AppState,
     req: Ruma<ruma::api::client::authenticated_media::get_media_preview::v1::Request>,
 ) -> Result<ruma::api::client::authenticated_media::get_media_preview::v1::Response> {
     let _ = req.sender()?;
+    previews_allowed(&services)?;
     let data = services.federation().preview_url(&req.body.url).await?;
     let mut resp = ruma::api::client::authenticated_media::get_media_preview::v1::Response::new();
     resp.data =
@@ -1735,6 +1750,7 @@ pub async fn preview_url_legacy(
     req: Ruma<ruma::api::client::media::get_media_preview::v3::Request>,
 ) -> Result<ruma::api::client::media::get_media_preview::v3::Response> {
     let _ = req.sender()?;
+    previews_allowed(&services)?;
     let data = services.federation().preview_url(&req.body.url).await?;
     let mut resp = ruma::api::client::media::get_media_preview::v3::Response::new();
     resp.data =

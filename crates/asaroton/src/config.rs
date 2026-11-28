@@ -57,6 +57,9 @@ pub struct Config {
     /// Message search.
     #[serde(default)]
     pub search: SearchConfig,
+    /// Media: whether link previews are offered.
+    #[serde(default)]
+    pub media: MediaConfig,
     /// Voice and video calls (`MatrixRTC` over `LiveKit`).
     #[serde(default)]
     pub rtc: RtcConfig,
@@ -246,6 +249,26 @@ impl Default for RateLimitingConfig {
             invites: default_rate_invites(),
         }
     }
+}
+
+/// `[media]`.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MediaConfig {
+    /// Whether users may ask for link previews (`/media/preview_url`). Off, the endpoint
+    /// answers 403 and the `m.preview_url` capability says so (Matrix v1.20, MSC4452).
+    #[serde(default = "yes")]
+    pub url_previews: bool,
+}
+
+impl Default for MediaConfig {
+    fn default() -> Self {
+        Self { url_previews: true }
+    }
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Deserialize)]

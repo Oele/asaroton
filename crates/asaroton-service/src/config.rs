@@ -24,6 +24,8 @@ pub struct Config {
     pub software_version: String,
     /// Directory for media files.
     pub media_dir: std::path::PathBuf,
+    /// Whether link previews are offered (MSC4452).
+    pub url_previews: bool,
     /// Server notices, when enabled.
     pub server_notices: Option<ServerNotices>,
     /// Application service registrations.

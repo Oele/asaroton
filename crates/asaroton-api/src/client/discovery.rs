@@ -98,6 +98,8 @@ pub fn capabilities(
             "m.get_login_token": { "enabled": false },
             "m.forget_forced_upon_leave": { "enabled": false },
             "m.profile_fields": { "enabled": true },
+            // Whether link previews are offered (v1.20, MSC4452).
+            "m.preview_url": { "enabled": services.config.url_previews },
         }
     });
     let mut resp = axum::Json(body).into_response();

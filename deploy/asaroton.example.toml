@@ -51,6 +51,10 @@ enabled = true
 mode = "word"
 # substring_min_length = 3
 
+[media]
+# url_previews = false   # no link previews: /media/preview_url answers 403, and the
+#                        # m.preview_url capability tells clients so
+
 # Voice and video calls: the LiveKit SFU this server offers (MSC4195). asaroton signs the SFU
 # tokens itself, relays the SFU's signalling and writes its livekit.yaml with
 # `asaroton livekit-config`; see docs/deployment.md.
