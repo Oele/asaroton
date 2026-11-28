@@ -670,7 +670,9 @@ impl Services {
 
     /// Keep only the events `user` may see: those the room's history visibility allows, and
     /// none sent by a user `user` ignores (state events aside, see `sent_by_ignored`). Sync,
-    /// sliding sync, `/messages` and `/context` all come through here.
+    /// sliding sync, `/messages` and `/context` all come through here. The events of erased
+    /// accounts are kept as they are: they become redacted copies where events are rendered
+    /// for the client (`client_events`, see [`crate::erasure`]), which every path shares.
     pub async fn filter_visible(
         &self,
         room_id: &RoomId,

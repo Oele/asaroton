@@ -914,7 +914,7 @@ impl Services {
                 _ => i64::MIN,
             };
             room.sticky = self
-                .sticky_for_sync(room_id, after, upper, &room.timeline, ignored)
+                .sticky_for_sync(room_id, user, after, upper, &room.timeline, ignored)
                 .await?;
         }
 
@@ -1114,12 +1114,14 @@ impl Services {
         Ok(Some(room))
     }
 
-    /// The room's sticky events in `(after, upto]` for a sync, minus the ones `timeline` shows
-    /// and those of ignored users. One that runs out within a second is left out, so every
-    /// event handed out still has time left when the client reads it.
+    /// The room's sticky events in `(after, upto]` for a sync, minus the ones `timeline` shows,
+    /// those of ignored users and those of erased accounts that `user` would get redacted. One
+    /// that runs out within a second is left out, so every event handed out still has time
+    /// left when the client reads it.
     async fn sticky_for_sync(
         &self,
         room_id: &RoomId,
+        user: &UserId,
         after: i64,
         upto: i64,
         timeline: &[StoredEvent],
@@ -1137,7 +1139,7 @@ impl Services {
             .await?;
         let shown: HashSet<&ruma::EventId> = timeline.iter().map(StoredEvent::event_id).collect();
         events.retain(|e| !shown.contains(e.event_id()) && !ignored.contains(e.pdu.sender()));
-        Ok(events)
+        self.without_erased_for(user, events).await
     }
 
     /// Presence events for the sync: everyone sharing a room (initial / newly joined rooms),

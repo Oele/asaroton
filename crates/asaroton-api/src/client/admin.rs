@@ -296,8 +296,7 @@ pub async fn deactivate(
             services.deactivate(&id).await?;
             let erase = body.get("erase").and_then(Value::as_bool).unwrap_or(false);
             if erase {
-                services.set_display_name(&id, None).await?;
-                services.set_avatar_url(&id, None).await?;
+                services.erase_account(&id).await?;
             }
             for m in services.store.memberships_for_user(&id).await? {
                 if matches!(

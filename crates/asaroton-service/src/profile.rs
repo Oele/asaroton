@@ -31,6 +31,30 @@ impl Services {
         Ok(())
     }
 
+    /// Clear a user's whole profile (account erasure): the display name and avatar, taken out
+    /// of their joined rooms with one membership event per room, and every custom field.
+    pub async fn clear_profile(&self, user_id: &UserId) -> Result<()> {
+        let Some(user) = self.store.get_user(user_id).await? else {
+            return Ok(());
+        };
+        if user.display_name.is_some() || user.avatar_url.is_some() {
+            self.store
+                .set_profile(user_id, Some(None), Some(None))
+                .await?;
+            if user.display_name.is_some() {
+                self.profile_changed(user_id, "displayname").await;
+            }
+            if user.avatar_url.is_some() {
+                self.profile_changed(user_id, "avatar_url").await;
+            }
+            self.propagate_profile(user_id).await;
+        }
+        for key in user.profile_fields.keys() {
+            self.set_profile_field(user_id, key, None).await?;
+        }
+        Ok(())
+    }
+
     /// Record a change to a profile field and wake the syncs that follow profile updates
     /// (MSC4429). A failure to record it must not fail the change itself.
     async fn profile_changed(&self, user_id: &UserId, field: &str) {

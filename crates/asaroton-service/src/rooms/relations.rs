@@ -5,7 +5,10 @@ use ruma::{EventId, OwnedEventId, RoomId, UserId};
 use serde_json::{Value, json};
 
 use super::timeline::StreamToken;
-use crate::{Error, Result, Services};
+use crate::{
+    Error, Result, Services,
+    erasure::{ErasureCheck, Viewer},
+};
 
 /// A page of related events.
 #[derive(Debug)]
@@ -136,29 +139,34 @@ impl Services {
         Ok((threads, next))
     }
 
-    /// The `unsigned.m.relations` bundle for an event, if it has any relations.
-    pub async fn bundled_aggregations(
+    /// The `unsigned.m.relations` bundle for an event, if it has any relations, as `erasure`'s
+    /// viewer is to get it.
+    async fn bundled_aggregations(
         &self,
         ev: &StoredEvent,
         user: Option<&UserId>,
+        erasure: &mut ErasureCheck<'_>,
     ) -> Result<Option<Value>> {
         let rows = self.store.relation_summary(ev.event_id()).await?;
-        self.aggregations_from_rows(ev, rows, user).await
+        self.aggregations_from_rows(ev, rows, user, erasure).await
     }
 
     /// `bundled_aggregations` from relation rows already fetched.
-    pub async fn aggregations_from_rows(
+    async fn aggregations_from_rows(
         &self,
         ev: &StoredEvent,
         rows: Vec<RelationRow>,
         user: Option<&UserId>,
+        erasure: &mut ErasureCheck<'_>,
     ) -> Result<Option<Value>> {
         if rows.is_empty() {
             return Ok(None);
         }
         let mut out = serde_json::Map::new();
 
-        // m.replace: the latest edit by the original sender, of the same type.
+        // m.replace: the latest edit by the original sender, of the same type. Not for a
+        // redacted event, whose edits would show what the redaction took away (also a copy
+        // redacted for an erased account: the edits are that account's too).
         let mut edits: Vec<&RelationRow> = rows
             .iter()
             .filter(|r| {
@@ -172,7 +180,8 @@ impl Services {
                 .cmp(&b.origin_server_ts)
                 .then_with(|| a.event_id.cmp(&b.event_id))
         });
-        if let Some(latest) = edits.last()
+        if !ev.redacted
+            && let Some(latest) = edits.last()
             && let Some(edit) = self.store.get_event(&latest.event_id).await?
         {
             out.insert("m.replace".into(), self.client_event_plain(&edit));
@@ -183,6 +192,10 @@ impl Services {
         if let Some(latest) = thread.iter().max_by_key(|r| r.stream_ordering)
             && let Some(latest_ev) = self.store.get_event(&latest.event_id).await?
         {
+            let latest_ev = match erasure.copy_of(self, &latest_ev).await? {
+                Some(copy) => copy,
+                None => latest_ev,
+            };
             let participated =
                 user.is_some_and(|u| u == ev.pdu.sender() || thread.iter().any(|r| r.sender == u));
             out.insert(
@@ -218,10 +231,14 @@ impl Services {
         client_json(ev, asaroton_store::now_ts())
     }
 
-    /// Client-format JSON with `unsigned.age` and bundled aggregations.
+    /// Client-format JSON with `unsigned.age` and bundled aggregations, as `user` is to get it
+    /// (an erased account's event may be a redacted copy, see [`crate::erasure`]).
     pub async fn client_event(&self, ev: &StoredEvent, user: Option<&UserId>) -> Result<Value> {
+        let mut erasure = self.erasure_check(user.map(Viewer::User)).await?;
+        let copy = erasure.copy_of(self, ev).await?;
+        let ev = copy.as_ref().unwrap_or(ev);
         let mut v = self.client_event_plain(ev);
-        if let Some(agg) = self.bundled_aggregations(ev, user).await?
+        if let Some(agg) = self.bundled_aggregations(ev, user, &mut erasure).await?
             && let Some(u) = v
                 .as_object_mut()
                 .and_then(|o| o.get_mut("unsigned"))
@@ -232,12 +249,20 @@ impl Services {
         Ok(v)
     }
 
-    /// `client_event` for a batch.
+    /// `client_event` for a batch, with `unsigned.prev_content` and `unsigned.membership`.
     pub async fn client_events(
         &self,
         events: &[StoredEvent],
         user: Option<&UserId>,
     ) -> Result<Vec<Value>> {
+        let mut erasure = self.erasure_check(user.map(Viewer::User)).await?;
+        let copies;
+        let events = if erasure.concerns(events) {
+            copies = erasure.copies(self, events.to_vec()).await?;
+            &copies[..]
+        } else {
+            events
+        };
         let mut out = Vec::with_capacity(events.len());
         // One relations query for the whole batch.
         let ids: Vec<ruma::OwnedEventId> = events.iter().map(|e| e.event_id().to_owned()).collect();
@@ -245,7 +270,9 @@ impl Services {
         for e in events {
             let mut v = self.client_event_plain(e);
             let rows = summaries.remove(e.event_id()).unwrap_or_default();
-            if let Some(agg) = self.aggregations_from_rows(e, rows, user).await?
+            if let Some(agg) = self
+                .aggregations_from_rows(e, rows, user, &mut erasure)
+                .await?
                 && let Some(u) = v
                     .as_object_mut()
                     .and_then(|o| o.get_mut("unsigned"))
@@ -304,6 +331,9 @@ impl Services {
                     .and_then(|o| o.get_mut("unsigned"))
                     .and_then(Value::as_object_mut)
             {
+                let prev = erasure
+                    .prev_content(self, e.pdu.room_id(), &ty, &sender, prev)
+                    .await?;
                 u.insert("prev_content".into(), prev);
                 u.insert("prev_sender".into(), json!(sender));
             }

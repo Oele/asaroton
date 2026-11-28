@@ -69,6 +69,12 @@ impl Services {
             .iter()
             .map(ToString::to_string)
             .collect();
+        filter.erased = self
+            .erased_out_of_search(user, &rooms)
+            .await?
+            .into_iter()
+            .map(|(room, sender)| (room.to_string(), sender.to_string()))
+            .collect();
         let (hits, count) = self
             .store
             .search_events(

@@ -16,6 +16,7 @@ pub mod delayed_events;
 pub mod directory;
 pub mod e2ee;
 pub mod email;
+pub mod erasure;
 mod error;
 pub mod federation_hooks;
 pub mod invite_filter;
@@ -120,6 +121,8 @@ pub struct Services {
     pub(crate) txn_turns: txn::Turns,
     /// What a room directory search matches on, kept up to date (see [`directory`]).
     pub(crate) directory_text: directory::DirectoryText,
+    /// The erased accounts (see [`erasure`]).
+    pub(crate) erased: erasure::ErasedCache,
 }
 
 impl std::fmt::Debug for Services {
@@ -188,6 +191,7 @@ impl Services {
             rooms_in_the_making: rooms::making::RoomsInTheMaking::default(),
             txn_turns: txn::Turns::default(),
             directory_text: directory::DirectoryText::default(),
+            erased: erasure::ErasedCache::default(),
         }))
     }
 

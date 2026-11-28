@@ -465,6 +465,7 @@ pub async fn change_password(
 /// nothing to unbind, and the spec says the answer must then be `success` (tracker #102).
 /// (`/account/3pid/delete` and `/account/3pid/unbind` keep `no-support`: their spec has no
 /// such rule, and "not able to determine an identity server to unbind from" is the case.)
+/// With `erase`, the account is erased too (Matrix v1.10, see `asaroton_service::erasure`).
 pub async fn deactivate(
     services: AppState,
     req: Ruma<deactivate::v3::Request>,
@@ -472,6 +473,9 @@ pub async fn deactivate(
     let sender = req.sender()?;
     uia_for_sender(&services, sender, req.body.auth.as_ref()).await?;
     services.deactivate(&sender.user_id).await?;
+    if req.body.erase {
+        services.erase_account(&sender.user_id).await?;
+    }
     Ok(deactivate::v3::Response::new(
         ruma::api::client::account::ThirdPartyIdRemovalStatus::Success,
     ))

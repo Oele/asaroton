@@ -190,8 +190,7 @@ pub async fn delete_user(
             let erase = body.get("erase").and_then(Value::as_bool).unwrap_or(false);
             services.deactivate(&u.user_id).await?;
             if erase {
-                services.set_display_name(&u.user_id, None).await?;
-                services.set_avatar_url(&u.user_id, None).await?;
+                services.erase_account(&u.user_id).await?;
             }
             Ok((StatusCode::OK, json!({})))
         }

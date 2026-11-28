@@ -1285,7 +1285,7 @@ impl Services {
         // Sticky events first: their senders count for the rooms' lazily loaded members.
         let sticky = match &req.extensions.sticky {
             Some(s) => Some(
-                self.sticky_pick(s, &selections, base, now, &ignored)
+                self.sticky_pick(user, s, &selections, base, now, &ignored)
                     .await?,
             ),
             None => None,
@@ -1886,10 +1886,12 @@ impl Services {
     /// each joined room in scope: a room that enters scope (new on the connection or to the
     /// extension, the extension just enabled, the user newly joined) gets all its unexpired
     /// sticky events, any other the ones since its last position; the oldest `limit` of them,
-    /// the rest in later responses. Those of ignored users are left out. Rooms that left scope
-    /// are forgotten, so they get everything when they return.
+    /// the rest in later responses. Those of ignored users are left out, and those of erased
+    /// accounts that `user` would get redacted. Rooms that left scope are forgotten, so they
+    /// get everything when they return.
     async fn sticky_pick(
         &self,
+        user: &UserId,
         req: &StickyRequest,
         selections: &BTreeMap<OwnedRoomId, RoomSelection>,
         base: Option<&ConnState>,
@@ -1931,6 +1933,7 @@ impl Services {
                 .into_iter()
                 .filter(|e| !ignored.contains(e.pdu.sender()))
                 .collect();
+            let events = self.without_erased_for(user, events).await?;
             if !events.is_empty() {
                 pick.senders.insert(
                     room_id.clone(),
