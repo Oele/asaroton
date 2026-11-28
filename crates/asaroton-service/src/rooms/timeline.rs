@@ -22,7 +22,7 @@ impl StreamToken {
     /// hand `prev_batch`/`next_batch` from `/sync` to `/messages`.
     pub fn parse(s: &str) -> Option<Self> {
         let n = s.strip_prefix('s')?;
-        let n = n.split('_').next()?;
+        let n = n.split(['_', '~']).next()?;
         n.parse().ok().map(Self)
     }
 }

@@ -39,6 +39,8 @@ pub struct SyncToken {
 
 impl SyncToken {
     pub fn parse(s: &str) -> Option<Self> {
+        // A sliding sync `pos` starts with a sync token (`<token>~<nonce>~<n>`).
+        let s = s.split('~').next()?;
         let rest = s.strip_prefix('s')?;
         // Tokens have at most nine parts (eight before profile updates were added); longer
         // ones come from another implementation (Synapse's have ten) and must not be read

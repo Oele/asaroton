@@ -47,12 +47,15 @@ const MAX_STATE_REMEMBERED: usize = 1000;
 /// are still worth remembering.
 const MAX_STATE_PER_TYPE: usize = 100;
 
+mod required_state;
+pub use required_state::{KeyMatch, RequiredState, RequiredStateSpec, StateMatcher};
+
 // ------------------------------------------------------------------ requests
 
 #[derive(Clone, Debug, Default)]
 pub struct ListRequest {
     pub ranges: Vec<(u64, u64)>,
-    pub required_state: Vec<(String, String)>,
+    pub required_state: RequiredStateSpec,
     pub timeline_limit: usize,
     pub filters: Option<ListFilters>,
 }
@@ -69,7 +72,7 @@ pub struct ListFilters {
 
 #[derive(Clone, Debug, Default)]
 pub struct RoomSubscriptionRequest {
-    pub required_state: Vec<(String, String)>,
+    pub required_state: RequiredStateSpec,
     pub timeline_limit: usize,
 }
 
@@ -147,6 +150,8 @@ pub struct ProfileDelta {
 
 #[derive(Clone, Debug)]
 pub struct SlidingSyncRequest {
+    /// Which endpoint the request came to.
+    pub dialect: Dialect,
     pub user_id: OwnedUserId,
     pub device_id: Option<OwnedDeviceId>,
     pub conn_id: Option<String>,
@@ -266,8 +271,20 @@ pub struct SlidingSyncResult {
 
 // ------------------------------------------------------------------ connections
 
+/// The two sliding sync endpoints: the unstable one (MSC4186 as first implemented,
+/// `org.matrix.simplified_msc3575`) and `/v4/sync` (MSC4186 accepted, with its extension
+/// MSCs). One engine serves both; the dialect decides the few places where they differ, and
+/// connections of one are never taken up by the other.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Dialect {
+    #[default]
+    Unstable,
+    V4,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct ConnKey {
+    dialect: Dialect,
     user: OwnedUserId,
     device: Option<OwnedDeviceId>,
     conn_id: String,
@@ -279,7 +296,7 @@ struct RoomTrack {
     timeline_upto: i64,
     /// The position of the user's membership event that the connection was told about.
     membership_at: i64,
-    required_state: BTreeSet<(String, String)>,
+    required_state: RequiredState,
     timeline_limit: usize,
     membership: MembershipState,
     notification_count: u64,
@@ -407,9 +424,30 @@ struct ConnState {
 struct Connection {
     confirmed: Option<ConnState>,
     pending: Option<ConnState>,
+    /// Chosen afresh whenever the connection starts over; every `pos` carries it, so that a
+    /// position from before (or from another device's connection) is not taken for one of
+    /// this connection's.
+    nonce: String,
     /// How many requests were made on this connection. Only the newest may leave its state
     /// behind as `pending` (see `SlidingSyncConnections::store_pending`).
     requests: u64,
+}
+
+/// A connection's position as clients see it: `<sync token>~<nonce>~<number>`. The sync token
+/// is the stream positions the answer covered, so the `pos` also serves where a `/sync` token
+/// does (`/messages`, `/keys/changes`: their parsers stop at the `~`); the nonce ties it to the
+/// connection as it was started; the number is the answer's on the connection.
+fn format_pos(token: &SyncToken, nonce: &str, seq: u64) -> String {
+    format!("{token}~{nonce}~{seq}")
+}
+
+/// The nonce and the number of a `pos` (see [`format_pos`]).
+fn parse_pos(pos: &str) -> Option<(&str, u64)> {
+    let mut parts = pos.rsplitn(3, '~');
+    let seq = parts.next()?.parse().ok()?;
+    let nonce = parts.next()?;
+    parts.next()?;
+    Some((nonce, seq))
 }
 
 /// Per-connection state of every sliding sync client.
@@ -419,9 +457,14 @@ pub struct SlidingSyncConnections {
 }
 
 impl SlidingSyncConnections {
-    /// The state a request with position `pos` starts from, and the request's number on its
-    /// connection, to be handed back to `store_pending`.
-    fn resolve(&self, key: &ConnKey, pos: Option<&str>) -> Result<(Option<ConnState>, u64)> {
+    /// The state a request with position `pos` starts from, the request's number on its
+    /// connection (to be handed back to `store_pending`) and the connection's nonce (for the
+    /// answer's `pos`, see [`format_pos`]).
+    fn resolve(
+        &self,
+        key: &ConnKey,
+        pos: Option<&str>,
+    ) -> Result<(Option<ConnState>, u64, String)> {
         let mut entry = self.conns.entry(key.clone()).or_default();
         let conn = &mut *entry;
         conn.requests += 1;
@@ -430,10 +473,17 @@ impl SlidingSyncConnections {
             None => {
                 conn.confirmed = None;
                 conn.pending = None;
-                Ok((None, request))
+                conn.nonce = asaroton_auth::generate_session_id()
+                    .chars()
+                    .take(8)
+                    .collect();
+                Ok((None, request, conn.nonce.clone()))
             }
             Some(p) => {
-                let seq: u64 = p.parse().map_err(|_| unknown_pos())?;
+                let (nonce, seq) = parse_pos(p).ok_or_else(unknown_pos)?;
+                if conn.nonce.is_empty() || nonce != conn.nonce {
+                    return Err(unknown_pos());
+                }
                 if conn.pending.as_ref().is_some_and(|s| s.seq == seq) {
                     conn.confirmed = conn.pending.take();
                 } else if conn.confirmed.as_ref().is_some_and(|s| s.seq == seq) {
@@ -441,7 +491,7 @@ impl SlidingSyncConnections {
                 } else {
                     return Err(unknown_pos());
                 }
-                Ok((conn.confirmed.clone(), request))
+                Ok((conn.confirmed.clone(), request, conn.nonce.clone()))
             }
         }
     }
@@ -452,7 +502,7 @@ impl SlidingSyncConnections {
     /// be running here (behind a reverse proxy it is not dropped), and when it finishes its
     /// answer goes nowhere. Were its state kept, the client's next position would confirm
     /// events and state that it was never sent.
-    fn store_pending(&self, key: &ConnKey, state: ConnState, request: u64) {
+    fn store_pending(&self, key: &ConnKey, state: ConnState, request: u64, nonce: &str) {
         if self.conns.len() > 10_000 {
             self.conns.clear();
         }
@@ -468,6 +518,7 @@ impl SlidingSyncConnections {
                     confirmed: None,
                     pending: Some(state),
                     requests: request,
+                    nonce: nonce.to_owned(),
                 });
             }
         }
@@ -516,7 +567,7 @@ impl ListFilters {
 struct RoomSelection {
     room_id: OwnedRoomId,
     membership: Membership,
-    required_state: BTreeSet<(String, String)>,
+    required_state: RequiredState,
     timeline_limit: usize,
     lists: Vec<String>,
     subscribed: bool,
@@ -558,7 +609,7 @@ impl ExtensionScope {
 fn select(
     selections: &mut BTreeMap<OwnedRoomId, RoomSelection>,
     m: &Membership,
-    required_state: &[(String, String)],
+    required_state: &RequiredState,
     timeline_limit: usize,
     list: Option<&str>,
     subscribed: bool,
@@ -568,12 +619,12 @@ fn select(
         .or_insert_with(|| RoomSelection {
             room_id: m.room_id.clone(),
             membership: m.clone(),
-            required_state: BTreeSet::new(),
+            required_state: RequiredState::default(),
             timeline_limit: 0,
             lists: Vec::new(),
             subscribed: false,
         });
-    e.required_state.extend(required_state.iter().cloned());
+    e.required_state.extend(required_state);
     e.timeline_limit = e.timeline_limit.max(timeline_limit);
     if let Some(l) = list {
         e.lists.push(l.to_owned());
@@ -581,11 +632,10 @@ fn select(
     e.subscribed |= subscribed;
 }
 
-/// Whether a state event is wanted by a `required_state` list (`*`, `$ME` and `$LAZY`
-/// wildcards included). `lazy_member` says whose membership `$LAZY` stands for, beside the
-/// user's own.
+/// Whether a state event is wanted by a room's `required_state`. `lazy_member` says whose
+/// membership lazy loading wants, beside the user's own.
 fn required_state_matches(
-    patterns: &BTreeSet<(String, String)>,
+    wanted: &RequiredState,
     ev: &StoredEvent,
     user: &UserId,
     lazy_member: impl Fn(&UserId) -> bool,
@@ -593,32 +643,7 @@ fn required_state_matches(
     let Some((ty, key)) = ev.pdu.state_tuple() else {
         return false;
     };
-    let ty = ty.to_string();
-    patterns.iter().any(|(pt, pk)| {
-        (pt == "*" || *pt == ty)
-            && match pk.as_str() {
-                "*" => true,
-                "$ME" => key == user.as_str(),
-                "$LAZY" => {
-                    ty == "m.room.member"
-                        && (key == user.as_str()
-                            || <&UserId>::try_from(key).is_ok_and(&lazy_member))
-                }
-                other => other == key,
-            }
-    })
-}
-
-/// Whether a `required_state` list asks for members to be loaded lazily: `$LAZY` for
-/// memberships, and no pattern that asks for every membership anyway.
-fn loads_members_lazily(patterns: &BTreeSet<(String, String)>) -> bool {
-    let about_members = |pt: &str| pt == "*" || pt == "m.room.member";
-    patterns
-        .iter()
-        .any(|(pt, pk)| about_members(pt) && pk == "$LAZY")
-        && !patterns
-            .iter()
-            .any(|(pt, pk)| about_members(pt) && pk == "*")
+    wanted.matches(&ty.to_string(), key, user, lazy_member)
 }
 
 /// Whom a timeline is about: whoever sent one of its events, and whoever one of its
@@ -657,12 +682,13 @@ impl Services {
         }
 
         let key = ConnKey {
+            dialect: req.dialect,
             user: req.user_id.clone(),
             device: req.device_id.clone(),
             conn_id: req.conn_id.clone().unwrap_or_default(),
         };
         let began = std::time::Instant::now();
-        let (base, request) = self.sliding_sync.resolve(&key, req.pos.as_deref())?;
+        let (base, request, nonce) = self.sliding_sync.resolve(&key, req.pos.as_deref())?;
         let mut rx = self.notifier.subscribe();
         let (mut result, mut state) = self.compute_sliding_sync(&req, base.as_ref()).await?;
         if base.is_some() && result.quiet && !req.timeout.is_zero() {
@@ -708,10 +734,12 @@ impl Services {
                 }
             }
         }
+        result.pos = format_pos(&state.token, &nonce, state.seq);
         // What each answer carried, by count: when a client reports that something did not
         // reach it, this says whether the server sent it (the bodies are logged nowhere).
         tracing::debug!(
             user = %req.user_id,
+            dialect = ?req.dialect,
             conn = %key.conn_id,
             from = req.pos.as_deref().unwrap_or("-"),
             pos = %result.pos,
@@ -737,7 +765,8 @@ impl Services {
                 .map_or(0, |(_, events)| events.len()),
             "sliding sync answered"
         );
-        self.sliding_sync.store_pending(&key, state, request);
+        self.sliding_sync
+            .store_pending(&key, state, request, &nonce);
         Ok(result)
     }
 
@@ -867,7 +896,7 @@ impl Services {
                     select(
                         &mut selections,
                         m,
-                        &list.required_state,
+                        &RequiredState::of(&list.required_state),
                         list.timeline_limit,
                         Some(name),
                         false,
@@ -880,7 +909,7 @@ impl Services {
                 select(
                     &mut selections,
                     m,
-                    &sub.required_state,
+                    &RequiredState::of(&sub.required_state),
                     sub.timeline_limit,
                     None,
                     true,
@@ -894,11 +923,10 @@ impl Services {
                     && !selections.contains_key(&m.room_id)
                     && let Some(t) = b.rooms.get(&m.room_id)
                 {
-                    let rs: Vec<(String, String)> = t.required_state.iter().cloned().collect();
                     select(
                         &mut selections,
                         m,
-                        &rs,
+                        &t.required_state,
                         t.timeline_limit.max(1),
                         None,
                         false,
@@ -1633,7 +1661,7 @@ impl Services {
         // the timeline also carries are included either way, as Synapse does: the Rust SDK
         // reads room state from `required_state` only and ignores state events in the
         // timeline.
-        let expanded = track.is_some_and(|t| !sel.required_state.is_subset(&t.required_state));
+        let expanded = track.is_some_and(|t| sel.required_state.expands(&t.required_state));
         let full = initial || expanded;
         // What the connection has of the room's state. A room that starts over starts with
         // nothing.
@@ -1643,7 +1671,7 @@ impl Services {
         // Senders of sticky events count as timeline senders (MSC4480).
         let mut about = timeline_members(&events);
         about.extend(sticky_senders.iter().cloned());
-        let lazy = loads_members_lazily(&sel.required_state);
+        let lazy = sel.required_state.loads_members_lazily();
         let lazy_member = |u: &UserId| about.contains(u) || given.is_some_and(|g| g.has_member(u));
         // The state group right after the leave, for someone who left as a member. After a
         // declined invite or a withdrawn knock the user was never in the room and there is no
@@ -2144,27 +2172,73 @@ mod tests {
         };
         let conns = SlidingSyncConnections::default();
         let key = ConnKey {
+            dialect: Dialect::Unstable,
             user: OwnedUserId::try_from("@a:x.test").unwrap(),
             device: None,
             conn_id: "c".to_owned(),
         };
-        let (base, first) = conns.resolve(&key, None).unwrap();
+        let (base, first, nonce) = conns.resolve(&key, None).unwrap();
         assert!(base.is_none());
-        conns.store_pending(&key, state(1), first);
+        conns.store_pending(&key, state(1), first, &nonce);
+        let pos = |seq| format_pos(&SyncToken::default(), &nonce, seq);
 
         // A request that waits, and one that the client makes after giving up on it.
-        let (_, waiting) = conns.resolve(&key, Some("1")).unwrap();
-        let (_, newer) = conns.resolve(&key, Some("1")).unwrap();
-        conns.store_pending(&key, state(2), newer);
+        let (_, waiting, _) = conns.resolve(&key, Some(&pos(1))).unwrap();
+        let (_, newer, _) = conns.resolve(&key, Some(&pos(1))).unwrap();
+        conns.store_pending(&key, state(2), newer, &nonce);
         // The first one finishes late, with other content under the same number.
         let mut late = state(2);
         late.list_counts.insert("late".to_owned(), 1);
-        conns.store_pending(&key, late, waiting);
-        let (confirmed, _) = conns.resolve(&key, Some("2")).unwrap();
+        conns.store_pending(&key, late, waiting, &nonce);
+        let (confirmed, _, _) = conns.resolve(&key, Some(&pos(2))).unwrap();
         assert!(
             confirmed.is_some_and(|s| s.list_counts.is_empty()),
             "the client confirms what the newer request told it"
         );
+    }
+
+    #[test]
+    fn a_pos_is_tied_to_its_connection_and_reads_as_a_sync_token() {
+        let conns = SlidingSyncConnections::default();
+        let key = ConnKey {
+            dialect: Dialect::Unstable,
+            user: OwnedUserId::try_from("@a:x.test").unwrap(),
+            device: None,
+            conn_id: "c".to_owned(),
+        };
+        let token = SyncToken {
+            events: 42,
+            ..SyncToken::default()
+        };
+        let (_, first, nonce) = conns.resolve(&key, None).unwrap();
+        let mut state = ConnState {
+            seq: 1,
+            token,
+            rooms: HashMap::new(),
+            list_counts: BTreeMap::new(),
+            profile_users: None,
+            put_out: HashMap::new(),
+            sticky_upto: None,
+        };
+        conns.store_pending(&key, state.clone(), first, &nonce);
+        let pos = format_pos(&token, &nonce, 1);
+        assert_eq!(SyncToken::parse(&pos).map(|t| t.events), Some(42));
+        assert_eq!(
+            crate::rooms::timeline::StreamToken::parse(&pos).map(|t| t.0),
+            Some(42)
+        );
+        assert!(conns.resolve(&key, Some(&pos)).is_ok());
+        // A bare number, another nonce, or the position of a connection since started over.
+        assert!(conns.resolve(&key, Some("1")).is_err());
+        assert!(
+            conns
+                .resolve(&key, Some(&format_pos(&token, "other", 1)))
+                .is_err()
+        );
+        let (_, again, _) = conns.resolve(&key, None).unwrap();
+        state.seq = 1;
+        conns.store_pending(&key, state, again, &nonce);
+        assert!(conns.resolve(&key, Some(&pos)).is_err());
     }
 
     #[test]

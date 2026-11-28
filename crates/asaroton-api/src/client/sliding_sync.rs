@@ -4,8 +4,9 @@
 use std::time::Duration;
 
 use asaroton_service::sliding_sync::{
-    ExtensionScope, ExtensionsRequest, ListFilters, ListRequest, ProfilesRequest, RoomResult,
-    RoomSubscriptionRequest, ScopeRoom, SlidingSyncRequest, StickyRequest, ToDeviceRequest,
+    Dialect, ExtensionScope, ExtensionsRequest, ListFilters, ListRequest, ProfilesRequest,
+    RequiredStateSpec, RoomResult, RoomSubscriptionRequest, ScopeRoom, SlidingSyncRequest,
+    StickyRequest, ToDeviceRequest,
 };
 use axum::{Json, response::IntoResponse};
 use ruma::api::client::sync::sync_events::msc4186;
@@ -24,8 +25,10 @@ fn room_type_filter(f: &ruma::directory::RoomTypeFilter) -> Option<String> {
     }
 }
 
-fn required_state(v: &[(ruma::events::StateEventType, String)]) -> Vec<(String, String)> {
-    v.iter().map(|(t, k)| (t.to_string(), k.clone())).collect()
+/// The unstable endpoint's `[type, state_key]` pairs as the service's spec.
+fn required_state(v: &[(ruma::events::StateEventType, String)]) -> RequiredStateSpec {
+    let pairs: Vec<(String, &str)> = v.iter().map(|(t, k)| (t.to_string(), k.as_str())).collect();
+    RequiredStateSpec::from_unstable(pairs.iter().map(|(t, k)| (t.as_str(), *k)))
 }
 
 fn limit(v: ruma::UInt) -> usize {
@@ -272,6 +275,7 @@ pub async fn sliding_sync(
     };
     let result = services
         .sliding_sync(SlidingSyncRequest {
+            dialect: Dialect::Unstable,
             user_id: sender.user_id.clone(),
             device_id: sender.device_id.clone(),
             conn_id: b.conn_id.clone(),
