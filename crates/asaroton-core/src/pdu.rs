@@ -198,6 +198,36 @@ impl Pdu {
         Self::from_canonical(canonical::from_json_value(value)?, rules)
     }
 
+    /// A copy of this PDU with one more signature: `server`'s under `key_id`, replacing one it
+    /// had under that ID. The other signatures stay. Signatures take no part in the event ID
+    /// or the hashes, so the event stays the same event (a policy server's signature is added
+    /// this way).
+    #[must_use]
+    pub fn with_signature(&self, server: &str, key_id: &str, signature: String) -> Self {
+        let mut inner = self.inner.as_ref().clone_fields();
+        let signatures = inner
+            .raw
+            .entry("signatures".to_owned())
+            .or_insert_with(|| CanonicalJsonValue::Object(CanonicalJsonObject::new()));
+        if !matches!(signatures, CanonicalJsonValue::Object(_)) {
+            *signatures = CanonicalJsonValue::Object(CanonicalJsonObject::new());
+        }
+        if let CanonicalJsonValue::Object(by_server) = signatures {
+            let keys = by_server
+                .entry(server.to_owned())
+                .or_insert_with(|| CanonicalJsonValue::Object(CanonicalJsonObject::new()));
+            if !matches!(keys, CanonicalJsonValue::Object(_)) {
+                *keys = CanonicalJsonValue::Object(CanonicalJsonObject::new());
+            }
+            if let CanonicalJsonValue::Object(keys) = keys {
+                keys.insert(key_id.to_owned(), CanonicalJsonValue::String(signature));
+            }
+        }
+        Self {
+            inner: Arc::new(inner),
+        }
+    }
+
     /// Return a copy of this PDU marked as rejected (failed auth on receipt).
     ///
     /// Rejected events are stored so they can be referenced, but never contribute to state.

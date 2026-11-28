@@ -11,6 +11,7 @@ pub mod builder;
 pub mod canonical;
 mod error;
 pub mod pdu;
+pub mod policy;
 pub mod redaction;
 pub mod room_version;
 pub mod signing;
