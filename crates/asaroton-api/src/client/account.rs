@@ -53,6 +53,19 @@ async fn uia_for_sender(
     }
 }
 
+/// UIA for deleting devices, which an application service acting for a user in its namespace
+/// skips (v1.17, MSC4190): it has no password to give, and manages its users' devices itself.
+async fn uia_unless_appservice(
+    services: &Services,
+    sender: &Sender,
+    auth: Option<&AuthData>,
+) -> Result<()> {
+    if sender.appservice_id.is_some() {
+        return Ok(());
+    }
+    uia_for_sender(services, sender, auth).await
+}
+
 /// Validate one UIA stage.
 pub(super) async fn check_stage(
     services: &Services,
@@ -514,10 +527,13 @@ pub async fn get_device(
     Ok(get_device::v3::Response::new(to_api_device(d)))
 }
 
+/// `PUT /devices/{deviceId}`: renames a device, or, for an application service, creates it
+/// (v1.17, MSC4190), answered with 201.
 pub async fn update_device(
     services: AppState,
     req: Ruma<update_device::v3::Request>,
-) -> Result<update_device::v3::Response> {
+) -> Result<axum::response::Response> {
+    use axum::response::IntoResponse as _;
     let user_id = &req.sender()?.user_id;
     match services
         .store
@@ -533,7 +549,7 @@ pub async fn update_device(
             services
                 .notify_device_list_change(user_id, Some(&req.body.device_id))
                 .await?;
-            Ok(update_device::v3::Response::new())
+            Ok(axum::Json(serde_json::json!({})).into_response())
         }
         // Application services create devices for their users this way (v1.17).
         Err(asaroton_store::Error::NotFound(_)) if req.sender()?.appservice_id.is_some() => {
@@ -548,7 +564,7 @@ pub async fn update_device(
             services
                 .notify_device_list_change(user_id, Some(&req.body.device_id))
                 .await?;
-            Ok(update_device::v3::Response::new())
+            Ok((http::StatusCode::CREATED, axum::Json(serde_json::json!({}))).into_response())
         }
         Err(asaroton_store::Error::NotFound(_)) => Err(Error::not_found("Device not found.")),
         Err(e) => Err(e.into()),
@@ -560,7 +576,7 @@ pub async fn delete_device(
     req: Ruma<delete_device::v3::Request>,
 ) -> Result<delete_device::v3::Response> {
     let sender = req.sender()?;
-    uia_for_sender(&services, sender, req.body.auth.as_ref()).await?;
+    uia_unless_appservice(&services, sender, req.body.auth.as_ref()).await?;
     services
         .delete_device_fully(&sender.user_id, &req.body.device_id)
         .await?;
@@ -572,7 +588,7 @@ pub async fn delete_devices(
     req: Ruma<delete_devices::v3::Request>,
 ) -> Result<delete_devices::v3::Response> {
     let sender = req.sender()?;
-    uia_for_sender(&services, sender, req.body.auth.as_ref()).await?;
+    uia_unless_appservice(&services, sender, req.body.auth.as_ref()).await?;
     for d in &req.body.devices {
         services.delete_device_fully(&sender.user_id, d).await?;
     }

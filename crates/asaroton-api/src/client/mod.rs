@@ -73,7 +73,11 @@ pub fn routes(router: Router<AppState>) -> Router<AppState> {
     // devices
     let r = route::<c::device::get_devices::v3::Request, _, _>(r, account::get_devices);
     let r = route::<c::device::get_device::v3::Request, _, _>(r, account::get_device);
-    let r = route::<c::device::update_device::v3::Request, _, _>(r, account::update_device);
+    let r = crate::router::route_raw::<c::device::update_device::v3::Request, _, _>(
+        r,
+        &[],
+        account::update_device,
+    );
     let r = route::<c::device::delete_device::v3::Request, _, _>(r, account::delete_device);
     let r = route::<c::device::delete_devices::v3::Request, _, _>(r, account::delete_devices);
     // profile

@@ -90,3 +90,4 @@ They need `cargo build`, the development database role from `.env.example`, and 
 | `scripts/compare-synapse.py SYNAPSE_DSN ASAROTON_DSN` | After `asaroton import-synapse`: runs the same counts on both databases and prints the differences |
 | `scripts/leave-unrecorded.py LIST` | After a migration that left rooms out: makes this server's accounts leave rooms that other servers still count them in |
 | `scripts/emulab/` | Element X in an Android emulator and a headless Element Web against a test server; see its README |
+- `appservicedevicetest.py`: an application service registers a user, creates devices for it (201), acts as one, and deletes them without UIA (v1.17, MSC4190/MSC4326); a normal user still needs UIA.
