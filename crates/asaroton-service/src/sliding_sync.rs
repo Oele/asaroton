@@ -87,7 +87,11 @@ pub struct RoomSubscriptionRequest {
 #[derive(Clone, Debug)]
 pub enum ScopeRoom {
     AllSubscribed,
+    /// This room, whether or not it is among the subscriptions (the unstable endpoint).
     Room(OwnedRoomId),
+    /// This room when it is among the request's subscriptions: `/v4/sync`'s `rooms` names
+    /// subscriptions only (MSC4508).
+    Subscribed(OwnedRoomId),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -280,6 +284,7 @@ pub struct ExtensionsResult {
     pub to_device: Option<(String, Vec<Value>)>,
     pub e2ee: Option<E2eeResult>,
     pub account_data: Option<AccountDataResult>,
+    /// Per room, the content of an `m.receipt` event (the unstable endpoint wraps it in one).
     pub receipts: BTreeMap<OwnedRoomId, Value>,
     pub typing: BTreeMap<OwnedRoomId, Vec<OwnedUserId>>,
     pub thread_subscriptions: Option<crate::thread_subscriptions::ThreadSubscriptionChanges>,
@@ -521,7 +526,22 @@ struct ConnState {
     /// For each room in scope of the sticky events extension, the stream position up to which
     /// its sticky events were handed out (MSC4480); `None` while the extension is off.
     sticky_upto: Option<HashMap<OwnedRoomId, i64>>,
+    /// `/v4/sync`: what the account data, receipts and typing extensions have handed out, so
+    /// that a room entering their scope, for the first time or again, gets what MSC4548,
+    /// MSC4551 and MSC4508 say (see [`ScopeTrack`]). `None` while the extension is off, and
+    /// always on the unstable endpoint, which keeps its own rules.
+    account_data_upto: Option<ScopeTrack>,
+    receipts_upto: Option<ScopeTrack>,
+    /// The rooms in scope of the typing extension at this answer.
+    typing_scope: Option<HashSet<OwnedRoomId>>,
 }
+
+/// For each room that has been in scope of an extension on a connection: the stream position up
+/// to which the room's data was handed out. A room in scope gets what changed after its
+/// position; a room without an entry is entering scope for the first time and gets its initial
+/// data; a room that drops out of scope keeps its entry as it was, so that when it comes back it
+/// gets exactly what changed while it was out. The map grows at most to the user's rooms.
+type ScopeTrack = HashMap<OwnedRoomId, i64>;
 
 /// The last state the client acknowledged, and the one produced by the latest response (which
 /// the client may still fail to receive, in which case it retries with the older position).
@@ -630,6 +650,20 @@ impl SlidingSyncConnections {
     }
 }
 
+/// A to-device `since` on `/v4/sync` (MSC4538): a position this server could have handed out
+/// as `next_batch`, else `M_INVALID_PARAM`. None given: nothing delivered yet.
+fn to_device_since(since: Option<&str>, now: i64) -> Result<i64> {
+    let Some(s) = since else {
+        return Ok(0);
+    };
+    s.parse::<i64>()
+        .ok()
+        .filter(|n| (0..=now).contains(n))
+        .ok_or_else(|| {
+            Error::invalid_param("The to-device since is not a position this server gave out.")
+        })
+}
+
 fn unknown_pos() -> Error {
     Error::matrix(
         ruma::api::error::ErrorKind::UnknownPos,
@@ -733,6 +767,7 @@ impl ExtensionScope {
                 match e {
                     ScopeRoom::AllSubscribed if subscribed => return true,
                     ScopeRoom::Room(id) if id == room_id => return true,
+                    ScopeRoom::Subscribed(id) if subscribed && id == room_id => return true,
                     _ => {}
                 }
             }
@@ -1224,11 +1259,15 @@ impl Services {
             })
             .unwrap_or_default();
         if let (Some(td), Some(device_id)) = (&req.extensions.to_device, &req.device_id) {
-            let since_td: i64 = td
-                .since
-                .as_deref()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(0);
+            let since_td: i64 = match req.dialect {
+                // The unstable endpoint reads a `since` it cannot use as nothing delivered.
+                Dialect::Unstable => td
+                    .since
+                    .as_deref()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0),
+                Dialect::V4 => to_device_since(td.since.as_deref(), now.to_device)?,
+            };
             if since_td > 0 {
                 self.store
                     .delete_to_device_messages_up_to(user, device_id, since_td)
@@ -1286,7 +1325,23 @@ impl Services {
                     .await?,
             });
         }
-        if let Some(scope) = &req.extensions.account_data {
+        let mut account_data_upto = None;
+        if let Some(scope) = &req.extensions.account_data
+            && req.dialect == Dialect::V4
+        {
+            let (result, upto) = self
+                .account_data_v4(
+                    user,
+                    scope,
+                    &selections,
+                    base.and_then(|b| b.account_data_upto.as_ref()),
+                    since,
+                    now,
+                )
+                .await?;
+            ext.account_data = Some(result);
+            account_data_upto = Some(upto);
+        } else if let Some(scope) = &req.extensions.account_data {
             let ad_since = since.map_or(0, |s| s.account_data);
             let mut global = Vec::new();
             let mut per_room: BTreeMap<OwnedRoomId, Vec<Value>> = BTreeMap::new();
@@ -1350,7 +1405,23 @@ impl Services {
                 .await?;
             ext.thread_subscriptions = Some(changes);
         }
-        if let Some(scope) = &req.extensions.receipts {
+        let mut receipts_upto = None;
+        if let Some(scope) = &req.extensions.receipts
+            && req.dialect == Dialect::V4
+        {
+            let (receipts, upto) = self
+                .receipts_v4(
+                    user,
+                    scope,
+                    &selections,
+                    &rooms,
+                    base.and_then(|b| b.receipts_upto.as_ref()),
+                    now,
+                )
+                .await?;
+            ext.receipts = receipts;
+            receipts_upto = Some(upto);
+        } else if let Some(scope) = &req.extensions.receipts {
             for (room_id, sel) in &selections {
                 if sel.membership.membership != MembershipState::Join || !scope.applies(sel) {
                     continue;
@@ -1381,14 +1452,24 @@ impl Services {
                 };
                 let content = receipts_content(receipts, user);
                 if !content.is_empty() {
-                    ext.receipts.insert(
-                        room_id.clone(),
-                        json!({ "type": "m.receipt", "room_id": room_id, "content": content }),
-                    );
+                    ext.receipts.insert(room_id.clone(), Value::Object(content));
                 }
             }
         }
-        if let Some(scope) = &req.extensions.typing {
+        let mut typing_scope = None;
+        if let Some(scope) = &req.extensions.typing
+            && req.dialect == Dialect::V4
+        {
+            let (typing, in_scope) = self.typing_v4(
+                scope,
+                &selections,
+                &rooms,
+                base.and_then(|b| b.typing_scope.as_ref()),
+                since,
+            );
+            ext.typing = typing;
+            typing_scope = Some(in_scope);
+        } else if let Some(scope) = &req.extensions.typing {
             for (room_id, sel) in &selections {
                 if sel.membership.membership != MembershipState::Join || !scope.applies(sel) {
                     continue;
@@ -1455,8 +1536,186 @@ impl Services {
             profile_users,
             put_out,
             sticky_upto,
+            account_data_upto,
+            receipts_upto,
+            typing_scope,
         };
         Ok((result, state))
+    }
+
+    /// The account data extension on `/v4/sync` (MSC4548). `previous` is what the connection
+    /// was given (`None`: the extension is enabled for the first time, or again, or the request
+    /// has no `pos`). Global account data: all of it the first time, afterwards what changed
+    /// after `pos`. A room in scope: all its account data when it enters scope for the first
+    /// time, afterwards what changed after its position (for a room coming back into scope,
+    /// what changed while it was out); any membership counts. One entry per type.
+    async fn account_data_v4(
+        &self,
+        user: &UserId,
+        scope: &ExtensionScope,
+        selections: &BTreeMap<OwnedRoomId, RoomSelection>,
+        previous: Option<&ScopeTrack>,
+        since: Option<SyncToken>,
+        now: SyncToken,
+    ) -> Result<(AccountDataResult, ScopeTrack)> {
+        let global_from = match previous {
+            Some(_) => since.map_or(0, |s| s.account_data),
+            None => 0,
+        };
+        let from: HashMap<&OwnedRoomId, i64> = selections
+            .iter()
+            .filter(|(_, sel)| scope.applies(sel))
+            .map(|(room_id, _)| {
+                let at = previous.and_then(|p| p.get(room_id)).copied().unwrap_or(0);
+                (room_id, at)
+            })
+            .collect();
+        let lowest = from.values().copied().fold(global_from, i64::min);
+        let mut global: Vec<Value> = Vec::new();
+        let mut rooms: BTreeMap<OwnedRoomId, Vec<Value>> = BTreeMap::new();
+        let pr_stream = self.push_rules_stream_id(user).await?;
+        if global_from == 0 || (pr_stream > global_from && pr_stream <= now.account_data) {
+            global.push(
+                json!({ "type": "m.push_rules", "content": self.push_rules_account_data(user).await? }),
+            );
+        }
+        for ad in self.store.account_data_since(user, lowest).await? {
+            if ad.stream_id > now.account_data {
+                continue;
+            }
+            let after = match &ad.room_id {
+                None => global_from,
+                Some(r) => match from.get(r) {
+                    Some(at) => *at,
+                    None => continue,
+                },
+            };
+            // A deletion (MSC3391) is only news to a connection that saw the data. The push
+            // rules come from their own table, above.
+            if ad.stream_id <= after
+                || (after == 0 && ad.is_deleted())
+                || (ad.room_id.is_none() && ad.data_type == "m.push_rules")
+            {
+                continue;
+            }
+            let list = match ad.room_id {
+                None => &mut global,
+                Some(r) => rooms.entry(r).or_default(),
+            };
+            // One entry per type (MSC4548); the rows come oldest first.
+            list.retain(|e| e.get("type").and_then(Value::as_str) != Some(ad.data_type.as_str()));
+            list.push(json!({ "type": ad.data_type, "content": ad.content }));
+        }
+        let mut upto = previous.cloned().unwrap_or_default();
+        for room_id in from.keys() {
+            upto.insert((*room_id).clone(), now.account_data);
+        }
+        Ok((AccountDataResult { global, rooms }, upto))
+    }
+
+    /// The receipts extension on `/v4/sync` (MSC4551). Only joined rooms are in scope. A room
+    /// entering scope for the first time (also when the extension is first enabled, and when
+    /// the user rejoins: the room is `initial`) gets its initial receipts: everyone's on the
+    /// events of this answer's timeline, and all the user's own. A room that was in scope gets
+    /// what changed after its position, which for a room coming back into scope is what changed
+    /// while it was out. A room sent with an expanded timeline also gets the receipts on its
+    /// timeline. Other users' private receipts are never sent. Returns bare `m.receipt`
+    /// contents.
+    async fn receipts_v4(
+        &self,
+        user: &UserId,
+        scope: &ExtensionScope,
+        selections: &BTreeMap<OwnedRoomId, RoomSelection>,
+        rooms: &BTreeMap<OwnedRoomId, RoomResult>,
+        previous: Option<&ScopeTrack>,
+        now: SyncToken,
+    ) -> Result<(BTreeMap<OwnedRoomId, Value>, ScopeTrack)> {
+        let mut upto = previous.cloned().unwrap_or_default();
+        let mut out = BTreeMap::new();
+        for (room_id, sel) in selections {
+            if sel.membership.membership != MembershipState::Join {
+                // Out of scope; forgotten, so that a return to the room counts as a first
+                // entry.
+                upto.remove(room_id);
+                continue;
+            }
+            if !scope.applies(sel) {
+                continue;
+            }
+            let shown = rooms.get(room_id);
+            let on_timeline: HashSet<&ruma::EventId> = shown
+                .map(|r| r.timeline.iter().map(StoredEvent::event_id).collect())
+                .unwrap_or_default();
+            let at = previous
+                .and_then(|p| p.get(room_id))
+                .copied()
+                .filter(|_| shown.is_none_or(|r| !r.initial));
+            let receipts: Vec<asaroton_store::Receipt> = match at {
+                None => self
+                    .store
+                    .receipts_for_room(room_id, 0)
+                    .await?
+                    .into_iter()
+                    .filter(|r| r.user_id == *user || on_timeline.contains(&*r.event_id))
+                    .collect(),
+                Some(at) => {
+                    let mut changed = self.store.receipts_for_room(room_id, at).await?;
+                    if shown.is_some_and(|r| r.expanded_timeline) && !on_timeline.is_empty() {
+                        changed.extend(
+                            self.store
+                                .receipts_for_room(room_id, 0)
+                                .await?
+                                .into_iter()
+                                .filter(|r| r.stream_id <= at)
+                                .filter(|r| on_timeline.contains(&*r.event_id)),
+                        );
+                    }
+                    changed
+                }
+            };
+            let content = receipts_content(receipts, user);
+            if !content.is_empty() {
+                out.insert(room_id.clone(), Value::Object(content));
+            }
+            upto.insert(room_id.clone(), now.receipts);
+        }
+        Ok((out, upto))
+    }
+
+    /// The typing extension on `/v4/sync` (MSC4508). Only joined rooms are in scope. A room
+    /// entering scope (for the first time or again) gets its current typing state, left out
+    /// when nobody types; a room that stays gets it when it changed after `pos`. Returns the
+    /// rooms in scope as well.
+    fn typing_v4(
+        &self,
+        scope: &ExtensionScope,
+        selections: &BTreeMap<OwnedRoomId, RoomSelection>,
+        rooms: &BTreeMap<OwnedRoomId, RoomResult>,
+        previous: Option<&HashSet<OwnedRoomId>>,
+        since: Option<SyncToken>,
+    ) -> (
+        BTreeMap<OwnedRoomId, Vec<OwnedUserId>>,
+        HashSet<OwnedRoomId>,
+    ) {
+        let mut out = BTreeMap::new();
+        let mut in_scope = HashSet::new();
+        for (room_id, sel) in selections {
+            if sel.membership.membership != MembershipState::Join || !scope.applies(sel) {
+                continue;
+            }
+            in_scope.insert(room_id.clone());
+            let entering = previous.is_none_or(|p| !p.contains(room_id))
+                || rooms.get(room_id).is_some_and(|r| r.initial);
+            if entering {
+                let users = self.typing.typing_users(room_id);
+                if !users.is_empty() {
+                    out.insert(room_id.clone(), users);
+                }
+            } else if since.is_some_and(|s| self.typing.changed_since(room_id, s.typing)) {
+                out.insert(room_id.clone(), self.typing.typing_users(room_id));
+            }
+        }
+        (out, in_scope)
     }
 
     /// The sticky events extension (MSC4480), picked before the rooms are worked out, so that
@@ -2423,6 +2682,37 @@ mod tests {
         );
     }
 
+    #[test]
+    fn v4_rooms_name_subscriptions_only() {
+        let room = OwnedRoomId::try_from("!r:x.test").unwrap();
+        let in_list = ["all_rooms".to_owned()];
+        let scope = ExtensionScope {
+            lists: Some(Vec::new()),
+            rooms: Some(vec![ScopeRoom::Subscribed(room.clone())]),
+        };
+        assert!(scope.applies_to(&room, &[], true), "subscribed");
+        assert!(
+            !scope.applies_to(&room, &in_list, false),
+            "in a list but not subscribed: no (MSC4508)"
+        );
+        // The unstable endpoint's `Room` counts either way.
+        let unstable = ExtensionScope {
+            lists: Some(Vec::new()),
+            rooms: Some(vec![ScopeRoom::Room(room.clone())]),
+        };
+        assert!(unstable.applies_to(&room, &in_list, false));
+    }
+
+    #[test]
+    fn a_v4_to_device_since_is_one_the_server_gave_out() {
+        assert_eq!(to_device_since(None, 5).ok(), Some(0));
+        assert_eq!(to_device_since(Some("0"), 5).ok(), Some(0));
+        assert_eq!(to_device_since(Some("5"), 5).ok(), Some(5));
+        for bad in ["6", "-1", "abc", "", "1.5"] {
+            assert!(to_device_since(Some(bad), 5).is_err(), "{bad:?}");
+        }
+    }
+
     /// A state event for these tests: only its type, state key and ID matter.
     fn state_event(ty: &str, key: &str, n: u32) -> StoredEvent {
         let rules = asaroton_core::room_version::rules(&ruma::RoomVersionId::V11).unwrap();
@@ -2568,6 +2858,9 @@ mod tests {
             profile_users: None,
             put_out: HashMap::new(),
             sticky_upto: None,
+            account_data_upto: None,
+            receipts_upto: None,
+            typing_scope: None,
         };
         let conns = SlidingSyncConnections::default();
         let key = ConnKey {
@@ -2618,6 +2911,9 @@ mod tests {
             profile_users: None,
             put_out: HashMap::new(),
             sticky_upto: None,
+            account_data_upto: None,
+            receipts_upto: None,
+            typing_scope: None,
         };
         conns.store_pending(&key, state.clone(), first, &nonce);
         let pos = format_pos(&token, &nonce, 1);

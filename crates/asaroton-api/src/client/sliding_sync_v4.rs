@@ -5,8 +5,9 @@
 //! (ruma's own conversion to the unstable request loses `exclude`, the new filters and the
 //! meaning of `include: [{}]` with lazy members), checks what MSC4186 says the server must
 //! refuse, and renders the answer in v4's shape, by hand like the unstable one. The extensions
-//! are still the unstable endpoint's, in request and answer; their v4 rules (MSC4508 and the
-//! others) are a later stage.
+//! follow their MSCs: the common scope rules of MSC4508, to-device (MSC4538), e2ee (MSC4543),
+//! account data (MSC4548), receipts (MSC4551) and typing (MSC4508). Thread subscriptions,
+//! profiles and sticky events keep their unstable keys and rules.
 
 use std::time::Duration;
 
@@ -145,10 +146,13 @@ fn list(l: &v4::request::List) -> ListRequest {
     }
 }
 
+/// A per-room extension's `lists` and `rooms` (MSC4508). Either left out means all of them,
+/// and `[]` none. `rooms` names room subscriptions only, and there are no wildcards: a `*`
+/// among the lists names no list (it cannot be a list key), so it is dropped.
 fn scope(lists: Option<&Vec<String>>, rooms: Option<&Vec<ruma::OwnedRoomId>>) -> ExtensionScope {
     ExtensionScope {
-        lists: lists.cloned(),
-        rooms: rooms.map(|r| r.iter().cloned().map(ScopeRoom::Room).collect()),
+        lists: lists.map(|l| l.iter().filter(|k| *k != "*").cloned().collect()),
+        rooms: rooms.map(|r| r.iter().cloned().map(ScopeRoom::Subscribed).collect()),
     }
 }
 
@@ -158,6 +162,12 @@ fn scope(lists: Option<&Vec<String>>, rooms: Option<&Vec<ruma::OwnedRoomId>>) ->
 fn request(sender: &Sender, b: &v4::Request, raw: Option<&Value>) -> Result<SlidingSyncRequest> {
     validate(b)?;
     let x = &b.extensions;
+    // MSC4538: the limit must be positive. (A negative one does not get past ruma.)
+    if x.to_device.enabled && x.to_device.limit.is_some_and(|l| l == ruma::UInt::MIN) {
+        return Err(Error::bad_json(
+            "The to-device limit must be a positive integer.",
+        ));
+    }
     let extensions = ExtensionsRequest {
         to_device: x.to_device.enabled.then(|| ToDeviceRequest {
             since: x.to_device.since.clone(),
@@ -291,7 +301,7 @@ fn body(result: &SlidingSyncResult, rooms: &Map<String, Value>, sticky: Option<&
         "pos": result.pos,
         "lists": lists_json(result),
         "rooms": rooms,
-        "extensions": extensions_json(&result.extensions, sticky),
+        "extensions": extensions_json(&result.extensions, sticky, Dialect::V4),
     })
 }
 
@@ -322,11 +332,14 @@ pub async fn sliding_sync(
 
 #[cfg(test)]
 mod tests {
-    use asaroton_service::sliding_sync::Hero;
+    use asaroton_service::{
+        sliding_sync::{AccountDataResult, E2eeResult, ExtensionsResult, Hero},
+        thread_subscriptions::ThreadSubscriptionChanges,
+    };
     use ruma::{
         api::client::sync::sync_events::v4::response::{RequiredStateEntry, RoomData},
         events::room::member::MembershipState,
-        owned_room_id, owned_user_id,
+        owned_event_id, owned_room_id, owned_user_id,
     };
 
     use super::*;
@@ -532,7 +545,6 @@ mod tests {
         #[serde(default)]
         rooms: std::collections::BTreeMap<ruma::OwnedRoomId, v4::response::Room>,
         #[serde(default)]
-        #[allow(dead_code)]
         extensions: v4::response::Extensions,
     }
 
@@ -547,6 +559,162 @@ mod tests {
         let body = body(&result, &rooms, None);
         let parsed: Oracle = serde_json::from_value(body.clone()).expect("ruma reads the answer");
         (body, parsed)
+    }
+
+    fn some_extensions(changed: bool) -> ExtensionsResult {
+        let room = owned_room_id!("!r:x.test");
+        ExtensionsResult {
+            to_device: Some((
+                "5".into(),
+                vec![json!({
+                    "type": "m.room_key_request", "sender": "@you:x.test",
+                    "content": { "action": "request_cancellation", "request_id": "1", "requesting_device_id": "D" },
+                })],
+            )),
+            e2ee: Some(E2eeResult {
+                changed: if changed {
+                    vec![owned_user_id!("@you:x.test")]
+                } else {
+                    Vec::new()
+                },
+                left: Vec::new(),
+                one_time_key_counts: [("signed_curve25519".to_owned(), 50)].into(),
+                unused_fallback_key_types: vec!["signed_curve25519".to_owned()],
+            }),
+            account_data: Some(AccountDataResult {
+                global: vec![json!({ "type": "m.direct", "content": { "@you:x.test": ["!r:x.test"] } })],
+                rooms: [(
+                    room.clone(),
+                    vec![json!({ "type": "m.tag", "content": { "tags": { "m.favourite": { "order": 0.5 } } } })],
+                )]
+                .into(),
+            }),
+            receipts: [(
+                room.clone(),
+                json!({ "$e:x.test": { "m.read": { "@you:x.test": { "ts": 1 } } } }),
+            )]
+            .into(),
+            typing: [(room.clone(), vec![owned_user_id!("@you:x.test")])].into(),
+            thread_subscriptions: Some(ThreadSubscriptionChanges {
+                subscribed: [(room, [(owned_event_id!("$t:x.test"), (true, 3))].into())].into(),
+                unsubscribed: std::collections::BTreeMap::new(),
+                prev_batch: None,
+            }),
+            ..ExtensionsResult::default()
+        }
+    }
+
+    #[test]
+    fn the_extensions_read_as_ruma_has_them() {
+        let room = owned_room_id!("!r:x.test");
+        let result = SlidingSyncResult {
+            pos: "p".into(),
+            extensions: some_extensions(true),
+            ..SlidingSyncResult::default()
+        };
+        let answer = body(&result, &Map::new(), None);
+        let raw = &answer["extensions"];
+        let x = serde_json::from_value::<Oracle>(answer.clone())
+            .expect("ruma reads the answer")
+            .extensions;
+        let to_device = x.to_device.expect("to_device");
+        assert_eq!(to_device.next_batch, "5");
+        assert_eq!(to_device.messages.len(), 1, "MSC4538 calls them messages");
+        assert!(raw["to_device"].get("events").is_none());
+        let e2ee = x.e2ee.expect("e2ee");
+        assert_eq!(e2ee.device_lists.changed, [owned_user_id!("@you:x.test")]);
+        assert_eq!(
+            e2ee.device_one_time_keys_count
+                .values()
+                .map(|n| u64::from(*n))
+                .collect::<Vec<_>>(),
+            [50]
+        );
+        assert_eq!(e2ee.device_unused_fallback_key_types.len(), 1);
+        assert_eq!(x.account_data.global.len(), 1);
+        assert_eq!(x.account_data.rooms[&room].len(), 1);
+        let receipts = x.receipts.rooms[&room]
+            .deserialize()
+            .expect("bare m.receipt content");
+        assert!(receipts.contains_key(&owned_event_id!("$e:x.test")));
+        assert!(raw["receipts"]["rooms"]["!r:x.test"].get("type").is_none());
+        assert_eq!(
+            x.typing.rooms[&room].user_ids,
+            [owned_user_id!("@you:x.test")]
+        );
+        assert!(raw["typing"]["rooms"]["!r:x.test"].get("content").is_none());
+        assert_eq!(x.thread_subscriptions.subscribed[&room].len(), 1);
+
+        // Nothing changed in the device lists: no `device_lists` (MSC4543).
+        let quiet = SlidingSyncResult {
+            pos: "p".into(),
+            extensions: some_extensions(false),
+            ..SlidingSyncResult::default()
+        };
+        let answer = body(&quiet, &Map::new(), None);
+        assert!(answer["extensions"]["e2ee"].get("device_lists").is_none());
+        let x = serde_json::from_value::<Oracle>(answer)
+            .expect("ruma reads the answer")
+            .extensions;
+        assert!(x.e2ee.is_some_and(|e| e.device_lists.is_empty()));
+    }
+
+    #[test]
+    fn the_unstable_endpoint_keeps_its_extension_shapes() {
+        let raw = extensions_json(&some_extensions(false), None, Dialect::Unstable);
+        assert_eq!(raw["to_device"]["events"].as_array().map(Vec::len), Some(1));
+        assert!(raw["to_device"].get("messages").is_none());
+        assert_eq!(
+            raw["e2ee"]["device_lists"],
+            json!({ "changed": [], "left": [] })
+        );
+        assert_eq!(
+            raw["receipts"]["rooms"]["!r:x.test"],
+            json!({
+                "type": "m.receipt", "room_id": "!r:x.test",
+                "content": { "$e:x.test": { "m.read": { "@you:x.test": { "ts": 1 } } } },
+            })
+        );
+        assert_eq!(
+            raw["typing"]["rooms"]["!r:x.test"],
+            json!({ "type": "m.typing", "content": { "user_ids": ["@you:x.test"] } })
+        );
+    }
+
+    #[test]
+    fn v4_extensions_map_with_the_msc_rules() {
+        let r = mapped(&json!({
+            "extensions": {
+                "to_device": { "enabled": true, "limit": 50, "since": "7" },
+                "e2ee": { "enabled": true },
+                "receipts": { "enabled": true, "lists": ["all", "*"], "rooms": ["!r:x.test"] },
+                "typing": { "enabled": true },
+                "account_data": { "enabled": false },
+                "org.example.unknown": { "enabled": true },
+            },
+        }))
+        .unwrap();
+        let x = &r.extensions;
+        let td = x.to_device.as_ref().unwrap();
+        assert_eq!((td.limit, td.since.as_deref()), (50, Some("7")));
+        assert!(x.e2ee && x.account_data.is_none());
+        let receipts = x.receipts.as_ref().unwrap();
+        assert_eq!(receipts.lists.as_deref(), Some(&["all".to_owned()][..]));
+        assert!(matches!(
+            receipts.rooms.as_deref(),
+            Some([ScopeRoom::Subscribed(id)]) if id == "!r:x.test"
+        ));
+        let typing = x.typing.as_ref().unwrap();
+        assert!(typing.lists.is_none() && typing.rooms.is_none());
+        // A limit of 0 is refused (MSC4538).
+        assert!(matches!(
+            mapped(&json!({ "extensions": { "to_device": { "enabled": true, "limit": 0 } } })),
+            Err(Error::Matrix(ruma::api::error::ErrorKind::BadJson, _, _))
+        ));
+        assert!(
+            mapped(&json!({ "extensions": { "to_device": { "enabled": false, "limit": 0 } } }))
+                .is_ok()
+        );
     }
 
     #[test]

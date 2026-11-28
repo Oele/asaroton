@@ -322,7 +322,11 @@ pub async fn sliding_sync(
         "pos": result.pos,
         "lists": lists_json(&result),
         "rooms": rooms,
-        "extensions": extensions_json(&result.extensions, sticky.as_ref().map(|(_, name)| *name)),
+        "extensions": extensions_json(
+            &result.extensions,
+            sticky.as_ref().map(|(_, name)| *name),
+            Dialect::Unstable,
+        ),
     });
     if let Some(txn) = &b.txn_id {
         body["txn_id"] = json!(txn);
@@ -342,23 +346,39 @@ pub(crate) fn lists_json(result: &SlidingSyncResult) -> Map<String, Value> {
 }
 
 /// The answer's `extensions`. `sticky` is the name the sticky events extension was asked by.
-pub(crate) fn extensions_json(ext: &ExtensionsResult, sticky: Option<&str>) -> Map<String, Value> {
+///
+/// `/v4/sync` has the shapes of the extension MSCs: to-device `messages` (MSC4538, not
+/// `events`), no `device_lists` when nothing changed (MSC4543), receipts as the bare content of
+/// an `m.receipt` event (MSC4551) and typing as bare `user_ids` (MSC4508). The unstable
+/// endpoint keeps the shapes its clients read: the wrapped events.
+pub(crate) fn extensions_json(
+    ext: &ExtensionsResult,
+    sticky: Option<&str>,
+    dialect: Dialect,
+) -> Map<String, Value> {
+    let v4 = dialect == Dialect::V4;
     let mut extensions = Map::new();
     if let Some((next_batch, events)) = &ext.to_device {
+        let key = if v4 { "messages" } else { "events" };
         extensions.insert(
             "to_device".into(),
-            json!({ "next_batch": next_batch, "events": events }),
+            json!({ "next_batch": next_batch, key: events }),
         );
     }
     if let Some(e) = &ext.e2ee {
-        extensions.insert(
-            "e2ee".into(),
-            json!({
-                "device_lists": { "changed": e.changed, "left": e.left },
-                "device_one_time_keys_count": e.one_time_key_counts,
-                "device_unused_fallback_key_types": e.unused_fallback_key_types,
-            }),
-        );
+        let mut section = json!({
+            "device_lists": { "changed": e.changed, "left": e.left },
+            "device_one_time_keys_count": e.one_time_key_counts,
+            "device_unused_fallback_key_types": e.unused_fallback_key_types,
+        });
+        if v4
+            && e.changed.is_empty()
+            && e.left.is_empty()
+            && let Some(o) = section.as_object_mut()
+        {
+            o.remove("device_lists");
+        }
+        extensions.insert("e2ee".into(), section);
     }
     if let Some(a) = &ext.account_data {
         extensions.insert(
@@ -367,17 +387,31 @@ pub(crate) fn extensions_json(ext: &ExtensionsResult, sticky: Option<&str>) -> M
         );
     }
     if !ext.receipts.is_empty() {
-        extensions.insert("receipts".into(), json!({ "rooms": ext.receipts }));
+        let receipts: Map<String, Value> = ext
+            .receipts
+            .iter()
+            .map(|(room, content)| {
+                let entry = if v4 {
+                    content.clone()
+                } else {
+                    json!({ "type": "m.receipt", "room_id": room, "content": content })
+                };
+                (room.to_string(), entry)
+            })
+            .collect();
+        extensions.insert("receipts".into(), json!({ "rooms": receipts }));
     }
     if !ext.typing.is_empty() {
         let typing: Map<String, Value> = ext
             .typing
             .iter()
             .map(|(room, users)| {
-                (
-                    room.to_string(),
-                    json!({ "type": "m.typing", "content": { "user_ids": users } }),
-                )
+                let entry = if v4 {
+                    json!({ "user_ids": users })
+                } else {
+                    json!({ "type": "m.typing", "content": { "user_ids": users } })
+                };
+                (room.to_string(), entry)
             })
             .collect();
         extensions.insert("typing".into(), json!({ "rooms": typing }));
