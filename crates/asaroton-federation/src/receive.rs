@@ -855,6 +855,15 @@ impl Federation {
         if !first_of_its_server {
             return;
         }
+        // Not those of erased accounts: "servers SHOULD NOT send it to other homeservers as
+        // part of catching up" (the server-server spec on sticky events).
+        let erased = match self.services.erased_users().await {
+            Ok(erased) => erased,
+            Err(e) => {
+                tracing::warn!(error = %e, "sticky events for a joining server: erased accounts unknown");
+                return;
+            }
+        };
         let ours: Vec<OwnedEventId> = match store
             .sticky_events(
                 room_id,
@@ -867,7 +876,10 @@ impl Federation {
         {
             Ok(events) => events
                 .into_iter()
-                .filter(|e| e.pdu.sender().server_name() == self.services.config.server_name)
+                .filter(|e| {
+                    e.pdu.sender().server_name() == self.services.config.server_name
+                        && !erased.contains_key(e.pdu.sender())
+                })
                 .map(|e| e.event_id().to_owned())
                 .collect(),
             Err(e) => {

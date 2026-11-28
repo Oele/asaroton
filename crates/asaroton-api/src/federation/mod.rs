@@ -963,7 +963,9 @@ fn _versions(_: RoomVersionId) {}
 
 /// History-visibility filtering for events served to another server: an event the origin's
 /// members could not see at that point is served in redacted form (as Synapse does), so the
-/// receiver still gets a complete DAG.
+/// receiver still gets a complete DAG. So is an event of an erased account when no user of the
+/// origin had joined or been invited before the erasure (Matrix v1.10, see
+/// `asaroton_service::erasure`).
 async fn filter_visible_to_server(
     app: &AppState,
     origin: &ruma::ServerName,
@@ -971,6 +973,9 @@ async fn filter_visible_to_server(
     rules: &RoomVersionRules,
 ) -> Result<Vec<asaroton_core::Pdu>> {
     use ruma::events::StateEventType;
+    let events = app
+        .erasure_copies(asaroton_service::erasure::Viewer::Server(origin), events)
+        .await?;
     let suffix = format!(":{origin}");
     let mut out = Vec::with_capacity(events.len());
     for ev in events {
