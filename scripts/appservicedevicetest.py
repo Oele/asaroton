@@ -5,7 +5,8 @@ A bridge registers users in its namespace without UIA, creates devices for them 
 `PUT /devices/{deviceId}`, acts as a given device with `?user_id=&device_id=`, and deletes
 devices with `DELETE /devices/{deviceId}` and `POST /delete_devices` without
 User-Interactive Authentication (it has no password to give). A normal user still needs UIA
-to delete a device.
+to delete a device, and the access token of a user the bridge registered gives no appservice
+powers (before 2026-11-28 it could act as any user in the namespace).
 
     ASAROTON_BIN=target/debug/asaroton python3 scripts/appservicedevicetest.py
 """
@@ -61,6 +62,20 @@ def run(hs, peers):
     st, r = hs.req("GET", f"/_matrix/client/v3/devices?{as_user}", None, AS_TOKEN)
     left = sorted(d["device_id"] for d in r.get("devices", []))
     check(not ({"BRIDGEDEV1", "BRIDGEDEV2", "BRIDGEDEV3"} & set(left)), f"they are gone ({left})")
+
+    print("-- a user's own token gives no appservice powers")
+    st, r = hs.req("POST", "/_matrix/client/v3/register", {"type": "m.login.application_service", "username": "bridge_bob"}, AS_TOKEN)
+    check(st == 200, f"the bridge registers a second user ({st})")
+    st, r = hs.req("POST", "/_matrix/client/v3/login", {"type": "m.login.application_service",
+                                                       "identifier": {"type": "m.id.user", "user": "bridge_alice"}}, AS_TOKEN)
+    check(st == 200 and r.get("access_token"), f"the bridge logs in as its user ({st})")
+    alice_token, alice_dev = r.get("access_token"), r.get("device_id")
+    st, r = hs.req("GET", f"/_matrix/client/v3/account/whoami?user_id={q('@bridge_bob:' + SERVER_NAME)}", None, alice_token)
+    check(st == 200 and r.get("user_id") == user, f"with that user's token, ?user_id= does not act as another user ({st}, {r.get('user_id')})")
+    st, r = hs.req("DELETE", f"/_matrix/client/v3/devices/{q(alice_dev)}", {}, alice_token)
+    check(st == 401 and r.get("flows"), f"and deleting a device asks for UIA ({st}, {sorted(r)})")
+    st, r = hs.req("POST", "/_matrix/client/v3/register", {"type": "m.login.application_service", "username": "bridge_carl"}, alice_token)
+    check(st != 200, f"and it cannot register users as the appservice ({st}, {r.get('errcode')})")
 
     print("-- a normal user still needs UIA")
     carol, c = hs.register("carol")
