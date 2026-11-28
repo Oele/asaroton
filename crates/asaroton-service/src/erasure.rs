@@ -35,6 +35,33 @@ use serde_json::Value;
 
 use crate::{Error, Result, Services};
 
+/// What a redacted copy shows clients as its `unsigned.redacted_because`. Clients tell a
+/// redacted event by that field (ruma, so matrix-rust-sdk, and matrix-js-sdk alike); without
+/// it a message with empty content fails to parse instead of showing as deleted. No such event
+/// exists, is stored or is sent: it says that the sender removed the event, with the event's
+/// own time (not the time of the erasure) and an event ID derived from the target's, so that
+/// every copy of one event shows the same.
+fn erasure_redaction(pdu: &asaroton_core::Pdu) -> Value {
+    use base64::Engine as _;
+    use sha2::Digest as _;
+    let target = pdu.event_id().as_str();
+    let hash = sha2::Sha256::digest(format!("asaroton erasure {target}").as_bytes());
+    let id = format!(
+        "${}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hash)
+    );
+    serde_json::json!({
+        "type": "m.room.redaction",
+        "event_id": id,
+        "sender": pdu.sender(),
+        "room_id": pdu.room_id(),
+        "origin_server_ts": pdu.origin_server_ts(),
+        "redacts": target,
+        "content": { "redacts": target },
+        "unsigned": {},
+    })
+}
+
 /// The erased accounts, each with the events stream position of its erasure.
 pub type ErasedUsers = HashMap<OwnedUserId, StreamOrdering>;
 
@@ -188,8 +215,15 @@ impl ErasureCheck<'_> {
         {
             return Ok(None);
         }
+        // Clients get the redaction to tell the copy by; servers redact by the algorithm.
+        let because = match self.viewer {
+            Some(Viewer::User(_)) => Some(asaroton_core::canonical::from_json_value(
+                erasure_redaction(&ev.pdu),
+            )?),
+            _ => None,
+        };
         let rules = self.rules(services, room_id).await?;
-        let pdu = asaroton_core::redaction::redact_pdu(&ev.pdu, rules, None)?;
+        let pdu = asaroton_core::redaction::redact_pdu_because(&ev.pdu, rules, because)?;
         Ok(Some(StoredEvent {
             pdu,
             redacted: true,

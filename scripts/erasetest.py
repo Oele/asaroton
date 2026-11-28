@@ -190,6 +190,13 @@ def run(hs, peers):
 
     ev = event(c, room, second)
     check(ev.get("event_id") == second and ev.get("content") == {}, f"/event: redacted ({ev.get('content')})")
+    # Clients (ruma, so matrix-rust-sdk, and matrix-js-sdk) tell a redacted event by
+    # unsigned.redacted_because; without it an empty message fails to parse.
+    because = ev.get("unsigned", {}).get("redacted_because", {})
+    check(because.get("type") == "m.room.redaction" and because.get("sender") == alice
+          and because.get("redacts") == second and because.get("content", {}).get("redacts") == second
+          and str(because.get("event_id", "")).startswith("$") and because.get("event_id") != second,
+          f"/event: the copy carries a redacted_because from Alice for it ({because})")
     st, r = hs.req("GET", f"/_matrix/client/v3/rooms/{q(room)}/context/{q(second)}?limit=10", None, c)
     around = {e["event_id"]: e for e in r.get("events_before", []) + r.get("events_after", [])}
     check(st == 200 and r.get("event", {}).get("content") == {} and around.get(first, {}).get("content") == {},
@@ -198,6 +205,8 @@ def run(hs, peers):
     joined = r.get("rooms", {}).get("join", {}).get(room, {})
     timeline = {e["event_id"]: e for e in joined.get("timeline", {}).get("events", [])}
     check(second in timeline and timeline[second].get("content") == {}, f"/sync: redacted ({timeline.get(second, {}).get('content')})")
+    check(timeline.get(second, {}).get("unsigned", {}).get("redacted_because", {}).get("event_id") == because.get("event_id"),
+          "/sync: the same redacted_because as /event")
     check(body_of(timeline.get(last_before, {})) == "bob after alice", "with Bob's messages as they are")
     sticky = [e["event_id"] for e in joined.get("msc4354_sticky", {}).get("events", []) + joined.get("timeline", {}).get("events", [])
               if e.get("event_id") in (alice_sticky, bob_sticky) and body_of(e)]
@@ -229,6 +238,8 @@ def run(hs, peers):
     st, pdu = fed_event(mock, second)
     check(st == 200 and pdu.get("content") == {} and pdu.get("sender") == alice,
           f"/event: a server that joined after gets the redacted copy ({st}, {pdu.get('content')})")
+    check("redacted_because" not in pdu.get("unsigned", {}),
+          "over federation the copy carries no redacted_because (servers redact by the algorithm)")
     st, pdu = fed_event(early, second)
     check(st == 200 and body_of(pdu) == "alice secret two", f"one that was there before, the original ({st}, {pdu.get('content')})")
     st, r = mock.fed(hs.fed, "GET", f"/_matrix/federation/v1/backfill/{q(room)}?v={q(last_before)}&limit=50")
