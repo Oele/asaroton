@@ -128,6 +128,20 @@ impl AccountDataStore for PostgresStore {
         Ok(row.get::<i64, _>(0))
     }
 
+    async fn erase_account_data(&self, user_id: &UserId) -> Result<()> {
+        let mut tx = self.begin().await?;
+        for table in ["account_data", "push_rules", "filters"] {
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "DELETE FROM {table} WHERE user_id = $1"
+            )))
+            .bind(user_id.as_str())
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
     async fn create_filter(&self, user_id: &UserId, filter: &serde_json::Value) -> Result<i64> {
         let row = sqlx::query(
             "INSERT INTO filters (user_id, filter_id, filter_json)

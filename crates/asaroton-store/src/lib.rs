@@ -59,6 +59,12 @@ pub trait UserStore: Send + Sync {
         fields: Option<&[String]>,
     ) -> Result<Vec<(OwnedUserId, String)>>;
     async fn set_deactivated(&self, user_id: &UserId, deactivated: bool) -> Result<()>;
+    /// Marks an account as erased (`erase: true` on `/account/deactivate`) at the current end
+    /// of the events stream, and returns that position. An account erased before keeps the
+    /// position of its first erasure.
+    async fn mark_erased(&self, user_id: &UserId, erased_ts: Ts) -> Result<StreamOrdering>;
+    /// Every erased account with the events stream position of its erasure.
+    async fn erased_users(&self) -> Result<Vec<(OwnedUserId, StreamOrdering)>>;
     async fn set_admin(&self, user_id: &UserId, admin: bool) -> Result<()>;
     /// A page of users (admin listing) and the total matching count.
     async fn list_users(&self, query: &UserListQuery) -> Result<(Vec<User>, i64)>;
@@ -170,6 +176,19 @@ pub trait RoomStore: Send + Sync {
     async fn users_sharing_rooms_with(&self, user_id: &UserId) -> Result<Vec<OwnedUserId>>;
     /// All memberships of a user (any state), for sync.
     async fn memberships_for_user(&self, user_id: &UserId) -> Result<Vec<Membership>>;
+    /// For each of `room_ids` where `user_id` was ever joined or invited: the stream position
+    /// of the first such membership event (account erasure: who was there before it).
+    async fn first_member_positions(
+        &self,
+        user_id: &UserId,
+        room_ids: &[OwnedRoomId],
+    ) -> Result<std::collections::HashMap<OwnedRoomId, StreamOrdering>>;
+    /// The stream position of the first join or invite of any user of `server` in the room.
+    async fn first_server_member_position(
+        &self,
+        room_id: &RoomId,
+        server: &ServerName,
+    ) -> Result<Option<StreamOrdering>>;
     /// Memberships of a user whose current membership event is newer than `since`.
     async fn memberships_changed_since(
         &self,
@@ -571,6 +590,10 @@ pub trait AccountDataStore: Send + Sync {
         data_type: &str,
     ) -> Result<Vec<AccountData>>;
     async fn max_account_data_stream_id(&self) -> Result<i64>;
+    /// Removes all of a user's account data, global and per room, their push rules and their
+    /// filters, for good (account erasure; nobody syncs as the user any more, so nothing is
+    /// left behind to report the deletion).
+    async fn erase_account_data(&self, user_id: &UserId) -> Result<()>;
     async fn create_filter(&self, user_id: &UserId, filter: &serde_json::Value) -> Result<i64>;
     async fn get_filter(
         &self,

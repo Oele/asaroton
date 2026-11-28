@@ -5,8 +5,8 @@ use sqlx::Row;
 use super::PostgresStore;
 use crate::SyncStream as Stream;
 use crate::{
-    AccessToken, Device, Error, NewUser, RefreshToken, Result, User, UserListQuery, UserStore,
-    now_ts,
+    AccessToken, Device, Error, NewUser, RefreshToken, Result, StreamOrdering, Ts, User,
+    UserListQuery, UserStore, now_ts,
 };
 
 #[derive(sqlx::FromRow)]
@@ -329,6 +329,36 @@ impl UserStore for PostgresStore {
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+
+    async fn mark_erased(&self, user_id: &UserId, erased_ts: Ts) -> Result<StreamOrdering> {
+        // A second erasure changes nothing: the row comes back as it was.
+        let row = sqlx::query(
+            "INSERT INTO erased_users (user_id, erased_at, erased_ts)
+             VALUES ($1, (SELECT COALESCE(MAX(stream_ordering), 0) FROM events), $2)
+             ON CONFLICT (user_id) DO UPDATE SET user_id = erased_users.user_id
+             RETURNING erased_at",
+        )
+        .bind(user_id.as_str())
+        .bind(erased_ts)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.get::<i64, _>(0))
+    }
+
+    async fn erased_users(&self) -> Result<Vec<(OwnedUserId, StreamOrdering)>> {
+        let rows = sqlx::query("SELECT user_id, erased_at FROM erased_users")
+            .fetch_all(&self.pool)
+            .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for r in rows {
+            let user: String = r.get(0);
+            match OwnedUserId::try_from(user) {
+                Ok(u) => out.push((u, r.get::<i64, _>(1))),
+                Err(e) => tracing::warn!(error = %e, "skipping corrupt user ID in erased_users"),
+            }
+        }
+        Ok(out)
     }
 
     async fn set_admin(&self, user_id: &UserId, admin: bool) -> Result<()> {

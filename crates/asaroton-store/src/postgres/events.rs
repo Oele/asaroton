@@ -1252,6 +1252,15 @@ impl EventStore for PostgresStore {
                 args.texts(filter.ignored.clone())
             ));
         }
+        if !filter.erased.is_empty() {
+            let (rooms, senders): (Vec<String>, Vec<String>) =
+                filter.erased.iter().cloned().unzip();
+            conds.push(format!(
+                "NOT ((e.room_id, e.sender) IN (SELECT * FROM unnest({}::text[], {}::text[])))",
+                args.texts(rooms),
+                args.texts(senders)
+            ));
+        }
         if let Some(types) = &filter.types {
             conds.push(format!("e.event_type = ANY({})", args.texts(types.clone())));
         }

@@ -1941,3 +1941,123 @@ async fn sticky_events_are_noted_capped_per_sender_and_forgotten_once_expired(po
     assert_eq!(store.prune_expired_sticky(now + 600_001).await.unwrap(), 52);
     assert_eq!(store.prune_expired_sticky(now + 600_001).await.unwrap(), 0);
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn erased_accounts_and_first_memberships(pool: PgPool) {
+    use asaroton_store::E2eeStore;
+    let store = PostgresStore::from_pool(pool);
+    let mut d = build_room(&store, &RoomVersionId::V11).await;
+    let room = d.room_id.clone().unwrap();
+    let alice = user_id!("@alice:example.org");
+    let bob = user_id!("@bob:example.org");
+    let carol = user_id!("@carol:other.org");
+    let position = |m: Option<asaroton_store::Membership>| m.unwrap().stream_ordering;
+    let alice_join = position(store.get_membership(&room, alice).await.unwrap());
+    let bob_join = position(store.get_membership(&room, bob).await.unwrap());
+    let elsewhere: OwnedRoomId = "!elsewhere:example.org".try_into().unwrap();
+
+    // The first join counts; leaving and joining again does not move it.
+    let first = store
+        .first_member_positions(bob, &[room.clone(), elsewhere.clone()])
+        .await
+        .unwrap();
+    assert_eq!(first, HashMap::from([(room.clone(), bob_join)]));
+    d.send(
+        bob,
+        TimelineEventType::RoomMember,
+        Some(bob.as_str()),
+        json!({ "membership": "leave" }),
+    )
+    .await;
+    d.send(
+        bob,
+        TimelineEventType::RoomMember,
+        Some(bob.as_str()),
+        json!({ "membership": "join" }),
+    )
+    .await;
+    let first = store
+        .first_member_positions(bob, std::slice::from_ref(&room))
+        .await
+        .unwrap();
+    assert_eq!(first.get(&room), Some(&bob_join));
+
+    // An invite counts too, for the user and for their server.
+    let invite = d
+        .send(
+            alice,
+            TimelineEventType::RoomMember,
+            Some(carol.as_str()),
+            json!({ "membership": "invite" }),
+        )
+        .await;
+    let invited_at = store
+        .get_event(invite.event_id())
+        .await
+        .unwrap()
+        .unwrap()
+        .stream_ordering;
+    let first = store
+        .first_member_positions(carol, std::slice::from_ref(&room))
+        .await
+        .unwrap();
+    assert_eq!(first.get(&room), Some(&invited_at));
+    // A server whose name ends another's ("ther.org") is not that server.
+    for (name, want) in [
+        ("other.org", Some(invited_at)),
+        ("example.org", Some(alice_join)),
+        ("ther.org", None),
+    ] {
+        let server = asaroton_core::ruma::ServerName::parse(name).unwrap();
+        assert_eq!(
+            store
+                .first_server_member_position(&room, &server)
+                .await
+                .unwrap(),
+            want,
+            "{name}"
+        );
+    }
+
+    // Marking: at the end of the events stream, and only once.
+    assert!(store.erased_users().await.unwrap().is_empty());
+    let end = store.max_stream_ordering().await.unwrap();
+    let erased_at = store.mark_erased(alice, 1000).await.unwrap();
+    assert_eq!(erased_at, end);
+    d.send(
+        bob,
+        TimelineEventType::RoomMessage,
+        None,
+        json!({ "msgtype": "m.text", "body": "later" }),
+    )
+    .await;
+    assert_eq!(store.mark_erased(alice, 2000).await.unwrap(), erased_at);
+    assert_eq!(
+        store.erased_users().await.unwrap(),
+        vec![(alice.to_owned(), erased_at)]
+    );
+
+    // Account data, push rules and filters go; somebody else's stay.
+    for user in [alice, bob] {
+        store
+            .set_account_data(user, None, "m.direct", &json!({ "x": 1 }))
+            .await
+            .unwrap();
+        store
+            .set_account_data(user, Some(&room), "m.tag", &json!({ "tags": {} }))
+            .await
+            .unwrap();
+        store
+            .set_push_rules(user, &json!({ "n": 1 }))
+            .await
+            .unwrap();
+        store.create_filter(user, &json!({})).await.unwrap();
+    }
+    store.erase_account_data(alice).await.unwrap();
+    assert!(store.account_data_since(alice, 0).await.unwrap().is_empty());
+    assert!(store.get_push_rules(alice).await.unwrap().is_none());
+    assert!(store.get_filter(alice, 1).await.unwrap().is_none());
+    assert_eq!(store.account_data_since(bob, 0).await.unwrap().len(), 2);
+    assert!(store.get_push_rules(bob).await.unwrap().is_some());
+    assert!(store.get_filter(bob, 1).await.unwrap().is_some());
+}

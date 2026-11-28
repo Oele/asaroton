@@ -73,6 +73,12 @@ impl TryFrom<MembershipRow> for Membership {
 }
 
 const ROOM_COLUMNS: &str = "room_id, room_version, creator, is_public, created_ts";
+
+/// An accepted membership event (`e`) that makes its subject joined or invited. jsonb refuses
+/// the escape `\u0000`, which a remote member event may carry in a display name (tracker issue
+/// 67); `�` takes its place.
+const MEMBER_OR_INVITED: &str = "NOT e.rejected AND NOT e.soft_failed
+    AND (replace(e.json, '\\u0000', '\\ufffd')::jsonb -> 'content' ->> 'membership') IN ('join', 'invite')";
 pub(crate) const MEMBERSHIP_COLUMNS: &str = "room_id, user_id, membership, event_id, sender, display_name, avatar_url, stream_ordering, forgotten";
 
 #[async_trait]
@@ -432,6 +438,51 @@ impl RoomStore for PostgresStore {
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter().map(Membership::try_from).collect()
+    }
+
+    async fn first_member_positions(
+        &self,
+        user_id: &UserId,
+        room_ids: &[OwnedRoomId],
+    ) -> Result<std::collections::HashMap<OwnedRoomId, StreamOrdering>> {
+        if room_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT e.room_id, MIN(e.stream_ordering) FROM events e
+             WHERE e.room_id = ANY($1) AND e.event_type = 'm.room.member' AND e.state_key = $2
+               AND {MEMBER_OR_INVITED}
+             GROUP BY e.room_id"
+        )))
+        .bind(super::strings(room_ids))
+        .bind(user_id.as_str())
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = std::collections::HashMap::with_capacity(rows.len());
+        for r in rows {
+            let room = OwnedRoomId::try_from(r.get::<String, _>(0))
+                .map_err(|e| Error::Corrupt(format!("events.room_id: {e}")))?;
+            out.insert(room, r.get::<i64, _>(1));
+        }
+        Ok(out)
+    }
+
+    async fn first_server_member_position(
+        &self,
+        room_id: &RoomId,
+        server: &ruma::ServerName,
+    ) -> Result<Option<StreamOrdering>> {
+        let row = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT MIN(e.stream_ordering) FROM events e
+             WHERE e.room_id = $1 AND e.event_type = 'm.room.member'
+               AND right(e.state_key, length($2) + 1) = ':' || $2
+               AND {MEMBER_OR_INVITED}"
+        )))
+        .bind(room_id.as_str())
+        .bind(server.as_str())
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.get::<Option<i64>, _>(0))
     }
 
     async fn memberships_changed_since(

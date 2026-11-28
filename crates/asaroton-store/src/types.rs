@@ -581,6 +581,9 @@ pub struct SearchFilter {
     pub not_types: Vec<String>,
     /// Non-state events from these senders are left out (the searcher's ignored users).
     pub ignored: Vec<String>,
+    /// `(room, sender)`: events of these senders in these rooms are left out (accounts erased
+    /// before the searcher joined the room).
+    pub erased: Vec<(String, String)>,
     /// `contains_url`: `true` only events whose content has a `url`, `false` only those without.
     pub contains_url: Option<bool>,
     /// Only events with `origin_server_ts >= after` (milliseconds).
