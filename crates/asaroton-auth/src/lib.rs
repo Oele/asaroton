@@ -36,6 +36,12 @@ pub struct Sender {
     pub token: String,
     /// Server administrator (user flag, or an admin scope from the authentication service).
     pub is_admin: bool,
+    /// The account is locked (Matrix v1.12). [`Authenticator::authenticate`] refuses such a
+    /// sender; only [`Authenticator::authenticate_allowing_locked`] hands it out, for a logout.
+    pub locked: bool,
+    /// The account is suspended (Matrix v1.13): what it may still do is decided per request
+    /// (asaroton-api's `suspension` module).
+    pub suspended: bool,
 }
 
 /// Why a token was rejected.
@@ -47,6 +53,10 @@ pub enum AuthError {
     Expired,
     #[error("user is deactivated")]
     Deactivated,
+    /// The account is locked by a server admin (`M_USER_LOCKED`, a soft logout: the token
+    /// stays good for when the lock is lifted).
+    #[error("account is locked")]
+    Locked,
     #[error("storage error: {0}")]
     Store(#[from] asaroton_store::Error),
     /// The authentication service could not be reached.
@@ -138,8 +148,20 @@ impl Authenticator {
         self
     }
 
-    /// Look up a bearer token.
+    /// Look up a bearer token. A locked account's token is refused with
+    /// [`AuthError::Locked`] (Matrix v1.12: every request but a logout).
     pub async fn authenticate(&self, token: &str) -> Result<Sender, AuthError> {
+        let sender = self.authenticate_allowing_locked(token).await?;
+        if sender.locked {
+            return Err(AuthError::Locked);
+        }
+        Ok(sender)
+    }
+
+    /// Look up a bearer token, also when its account is locked: for `POST /logout` and
+    /// `POST /logout/all`, the requests a locked account may still make. Everything else goes
+    /// through [`Self::authenticate`].
+    pub async fn authenticate_allowing_locked(&self, token: &str) -> Result<Sender, AuthError> {
         if let Some(a) = self.appservices.iter().find(|a| a.token == token) {
             return Ok(Sender {
                 user_id: a.user_id.clone(),
@@ -148,6 +170,8 @@ impl Authenticator {
                 appservice_id: Some(a.id.clone()),
                 token: token.to_owned(),
                 is_admin: false,
+                locked: false,
+                suspended: false,
             });
         }
         let now = Instant::now();
@@ -205,6 +229,8 @@ impl Authenticator {
                     appservice_id: user.appservice_id,
                     token: token.to_owned(),
                     is_admin: id.admin || user.is_admin,
+                    locked: user.is_locked,
+                    suspended: user.is_suspended,
                 },
                 far,
             ));
@@ -226,14 +252,16 @@ impl Authenticator {
             .clone()
             .unwrap_or_else(|| t.user_id.clone());
         let user = self.store.get_user(&user_id).await?;
-        let (is_guest, appservice_id, deactivated, is_admin) = match &user {
+        let (is_guest, appservice_id, deactivated, is_admin, locked, suspended) = match &user {
             Some(u) => (
                 u.is_guest,
                 u.appservice_id.clone(),
                 u.is_deactivated,
                 u.is_admin,
+                u.is_locked,
+                u.is_suspended,
             ),
-            None => (false, None, false, false),
+            None => (false, None, false, false, false, false),
         };
         if deactivated {
             return Err(AuthError::Deactivated);
@@ -265,6 +293,8 @@ impl Authenticator {
                 appservice_id,
                 token: token.to_owned(),
                 is_admin,
+                locked,
+                suspended,
             },
             valid_until,
         ))
@@ -277,4 +307,73 @@ pub struct AppserviceToken {
     pub token: String,
     pub id: String,
     pub user_id: OwnedUserId,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use asaroton_store::{AccessToken, DynStore, NewUser, PostgresStore, UserStore, now_ts};
+    use ruma::{device_id, user_id};
+
+    use super::{AuthError, Authenticator};
+
+    #[sqlx::test(migrator = "asaroton_store::postgres::MIGRATOR")]
+    async fn a_lock_or_suspension_shows_once_the_user_is_forgotten(pool: sqlx::PgPool) {
+        let store = Arc::new(PostgresStore::from_pool(pool));
+        let alice = user_id!("@alice:example.org");
+        store
+            .create_user(NewUser {
+                user_id: alice.to_owned(),
+                password_hash: None,
+                display_name: None,
+                is_admin: false,
+                is_guest: false,
+                appservice_id: None,
+            })
+            .await
+            .unwrap();
+        store
+            .create_device(alice, device_id!("DEV"), None)
+            .await
+            .unwrap();
+        store
+            .create_access_token(AccessToken {
+                token: "tok".into(),
+                user_id: alice.to_owned(),
+                device_id: Some(device_id!("DEV").to_owned()),
+                created_ts: now_ts(),
+                expires_ts: None,
+                refresh_token: None,
+                puppets_user_id: None,
+            })
+            .await
+            .unwrap();
+        let dyn_store: DynStore = store.clone();
+        let auth = Authenticator::new(dyn_store);
+        let sender = auth.authenticate("tok").await.unwrap();
+        assert!(!sender.locked && !sender.suspended);
+
+        // The sender is cached: a flag changed in the store shows once the user's entries are
+        // dropped, which is what the service does with every change.
+        store.set_locked(alice, true).await.unwrap();
+        assert!(auth.authenticate("tok").await.is_ok(), "the cached sender");
+        auth.forget_user(alice);
+        assert!(matches!(
+            auth.authenticate("tok").await,
+            Err(AuthError::Locked)
+        ));
+        let sender = auth.authenticate_allowing_locked("tok").await.unwrap();
+        assert!(sender.locked, "a logout still gets the sender");
+        assert!(
+            store.get_access_token("tok").await.unwrap().is_some(),
+            "a lock leaves the token in place"
+        );
+
+        store.set_locked(alice, false).await.unwrap();
+        store.set_suspended(alice, true).await.unwrap();
+        auth.forget_user(alice);
+        let sender = auth.authenticate("tok").await.unwrap();
+        assert!(!sender.locked && sender.suspended);
+    }
 }

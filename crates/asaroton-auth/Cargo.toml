@@ -26,3 +26,7 @@ tokio.workspace = true
 async-trait.workspace = true
 dashmap.workspace = true
 reqwest.workspace = true
+
+[dev-dependencies]
+# Tests against a real store: `#[sqlx::test]` databases from `DATABASE_URL`.
+sqlx.workspace = true

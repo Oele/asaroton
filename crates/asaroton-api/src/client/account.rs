@@ -722,6 +722,11 @@ async fn set_profile_field_inner(
     body: &[u8],
 ) -> Result<()> {
     let sender = authenticate_headers(services, headers).await?;
+    // Not through the extractor, so not through its suspension check: a suspended account
+    // changes no profile field (v1.13).
+    if sender.suspended {
+        return Err(Error::suspended());
+    }
     let user = ruma::OwnedUserId::try_from(user_id)
         .map_err(|_| Error::invalid_param("Invalid user ID."))?;
     if sender.user_id != user {

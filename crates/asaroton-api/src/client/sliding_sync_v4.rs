@@ -391,6 +391,8 @@ mod tests {
             appservice_id: None,
             token: String::new(),
             is_admin: false,
+            locked: false,
+            suspended: false,
         }
     }
 

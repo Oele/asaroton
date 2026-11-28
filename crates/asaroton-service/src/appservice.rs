@@ -194,12 +194,13 @@ impl Services {
         Ok(false)
     }
 
-    /// Make sure a user an appservice acts as exists (created on first use, no password).
+    /// Make sure a user an appservice acts as exists (created on first use, no password), and
+    /// return the account.
     pub async fn ensure_appservice_user(
         &self,
         appservice: &Appservice,
         user: &UserId,
-    ) -> Result<()> {
+    ) -> Result<asaroton_store::User> {
         if !self.is_local(user) {
             return Err(Error::forbidden("User is not on this server."));
         }
@@ -210,19 +211,20 @@ impl Services {
                 "User is not in the appservice's namespace.",
             ));
         }
-        if self.store.get_user(user).await?.is_none() {
-            self.store
-                .create_user(asaroton_store::NewUser {
-                    user_id: user.to_owned(),
-                    password_hash: None,
-                    display_name: None,
-                    is_admin: false,
-                    is_guest: false,
-                    appservice_id: Some(appservice.id.clone()),
-                })
-                .await?;
+        if let Some(account) = self.store.get_user(user).await? {
+            return Ok(account);
         }
-        Ok(())
+        Ok(self
+            .store
+            .create_user(asaroton_store::NewUser {
+                user_id: user.to_owned(),
+                password_hash: None,
+                display_name: None,
+                is_admin: false,
+                is_guest: false,
+                appservice_id: Some(appservice.id.clone()),
+            })
+            .await?)
     }
 
     /// Ask the appservices owning `user`'s namespace whether the user exists; the appservice

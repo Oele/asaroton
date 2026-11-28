@@ -349,6 +349,22 @@ impl Services {
     }
 
     async fn fire_delayed(&self, ev: DelayedEvent) -> Result<OwnedEventId> {
+        // An account suspended after it scheduled this (Matrix v1.13) sends only what ends
+        // something: an emptied event (how a call's membership ends) or its own leave. Anything
+        // else would reach the room as if the suspension were not there.
+        if self
+            .store
+            .get_user(&ev.user_id)
+            .await?
+            .is_some_and(|u| u.is_suspended)
+            && !ends_something(&ev)
+        {
+            return Err(Error::matrix(
+                ruma::api::error::ErrorKind::UserSuspended,
+                http::StatusCode::FORBIDDEN,
+                "You cannot perform this action while suspended.",
+            ));
+        }
         match ev.state_key {
             Some(key) => {
                 self.send_state(
@@ -376,6 +392,20 @@ impl Services {
             }
         }
     }
+}
+
+/// Whether a delayed event only ends something: empty content (a call membership's delayed
+/// leave) or its sender's own membership set to `leave`. The one kind a suspended account
+/// still sends.
+fn ends_something(ev: &DelayedEvent) -> bool {
+    let empty = ev
+        .content
+        .as_object()
+        .is_some_and(serde_json::Map::is_empty);
+    let own_leave = ev.event_type == "m.room.member"
+        && ev.state_key.as_deref() == Some(ev.user_id.as_str())
+        && ev.content.get("membership").and_then(Value::as_str) == Some("leave");
+    empty || own_leave
 }
 
 /// Starts the worker that sends delayed events when their timeout passes, and prunes the
@@ -420,4 +450,68 @@ pub fn start_worker(services: Arc<Services>) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use asaroton_store::DelayedEvent;
+    use ruma::{owned_room_id, owned_user_id};
+    use serde_json::json;
+
+    fn delayed(
+        event_type: &str,
+        state_key: Option<&str>,
+        content: serde_json::Value,
+    ) -> DelayedEvent {
+        DelayedEvent {
+            delay_id: "d".into(),
+            user_id: owned_user_id!("@alice:example.org"),
+            device_id: None,
+            room_id: owned_room_id!("!room:example.org"),
+            event_type: event_type.into(),
+            state_key: state_key.map(str::to_owned),
+            content,
+            delay_ms: 1000,
+            running_since: 0,
+            txn_id: None,
+            finalised: None,
+            sticky: None,
+        }
+    }
+
+    #[test]
+    fn a_suspended_account_still_ends_its_call_and_leaves() {
+        let ends = |ev: &DelayedEvent| super::ends_something(ev);
+        assert!(ends(&delayed(
+            "org.matrix.msc3401.call.member",
+            Some("_@alice:example.org_DEV"),
+            json!({})
+        )));
+        assert!(ends(&delayed("m.rtc.member", None, json!({}))));
+        assert!(ends(&delayed(
+            "m.room.member",
+            Some("@alice:example.org"),
+            json!({"membership": "leave"})
+        )));
+        assert!(!ends(&delayed(
+            "m.room.message",
+            None,
+            json!({"msgtype": "m.text", "body": "hi"})
+        )));
+        assert!(!ends(&delayed(
+            "m.room.topic",
+            Some(""),
+            json!({"topic": "spam"})
+        )));
+        assert!(!ends(&delayed(
+            "m.room.member",
+            Some("@bob:example.org"),
+            json!({"membership": "leave"})
+        )));
+        assert!(!ends(&delayed(
+            "m.room.member",
+            Some("@alice:example.org"),
+            json!({"membership": "join"})
+        )));
+    }
 }

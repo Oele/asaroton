@@ -732,6 +732,8 @@ pub async fn force_join(
                 appservice_id: None,
                 token: String::new(),
                 is_admin: false,
+                locked: false,
+                suspended: false,
             };
             super::rooms::join_room(&services, &sender, &room_id, &[], None, None).await?;
             Ok((StatusCode::OK, json!({ "room_id": room_id })))

@@ -195,8 +195,9 @@ impl Host for AsarotonHost {
             verify_against_dummy(password).await;
             return Ok(None);
         }
+        // A locked account signs in nowhere (v1.12), as the trait asks; a suspended one does.
         match self.services.check_password(&user_id, password).await {
-            Ok(Some(u)) if !u.is_deactivated => Ok(Some(User {
+            Ok(Some(u)) if !u.is_deactivated && !u.is_locked => Ok(Some(User {
                 user_id: u.user_id.to_string(),
                 display_name: u.display_name,
             })),
@@ -215,10 +216,12 @@ impl Host for AsarotonHost {
             .get_user(&user_id)
             .await
             .map_err(failed)?;
-        Ok(user.filter(|u| !u.is_deactivated).map(|u| User {
-            user_id: u.user_id.to_string(),
-            display_name: u.display_name,
-        }))
+        Ok(user
+            .filter(|u| !u.is_deactivated && !u.is_locked)
+            .map(|u| User {
+                user_id: u.user_id.to_string(),
+                display_name: u.display_name,
+            }))
     }
 
     async fn create_session(&self, new: NewSession) -> Result<Tokens, HostError> {
@@ -358,6 +361,19 @@ impl Host for AsarotonHost {
         display_name: Option<&str>,
     ) -> Result<(), HostError> {
         let user_id = parse_user(user_id).ok_or_else(|| failed("not a user ID"))?;
+        // From the account pages as from the API: a suspended account keeps its name (v1.13).
+        if self
+            .services
+            .store
+            .get_user(&user_id)
+            .await
+            .map_err(failed)?
+            .is_some_and(|u| u.is_suspended)
+        {
+            return Err(HostError::Refused(
+                "You cannot change your display name while your account is suspended.".into(),
+            ));
+        }
         self.services
             .set_display_name(&user_id, display_name)
             .await
@@ -400,6 +416,9 @@ impl Host for AsarotonHost {
             ) => Err(HostError::Refused(
                 "The access token is unknown or has expired.".into(),
             )),
+            Err(asaroton_auth::AuthError::Locked) => {
+                Err(HostError::Refused("This account has been locked.".into()))
+            }
             Err(e) => Err(failed(e)),
         }
     }

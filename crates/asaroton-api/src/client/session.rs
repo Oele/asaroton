@@ -11,6 +11,8 @@ use ruma::api::client::{
     uiaa::UserIdentifier,
 };
 
+use asaroton_auth::AuthError;
+
 use crate::{AppState, Error, Result, Ruma};
 
 /// With delegated authentication the service handles these endpoints itself (the reverse
@@ -50,14 +52,18 @@ pub async fn login(
             };
             let user_id = services.resolve_user_identifier(&ident)?;
             match services.check_password(&user_id, &p.password).await? {
-                Some(user) if !user.is_deactivated => user.user_id,
-                Some(_) => {
+                Some(user) if user.is_deactivated => {
                     return Err(Error::matrix(
                         ruma::api::error::ErrorKind::UserDeactivated,
                         http::StatusCode::FORBIDDEN,
                         "This account has been deactivated.",
                     ));
                 }
+                // A locked account (v1.12) gets no new session; told only to who knows
+                // the password.
+                Some(user) if user.is_locked => return Err(AuthError::Locked.into()),
+                // A suspended one does (v1.13), suspended as well.
+                Some(user) => user.user_id,
                 None => return Err(Error::forbidden("Invalid username or password.")),
             }
         }
@@ -77,9 +83,12 @@ pub async fn login(
                 _ => return Err(Error::bad_json("Missing user identifier.")),
             };
             let user_id = services.resolve_user_identifier(&ident)?;
-            services
+            let account = services
                 .ensure_appservice_user(&appservice, &user_id)
                 .await?;
+            if account.is_locked {
+                return Err(AuthError::Locked.into());
+            }
             user_id
         }
         _ => return Err(Error::unknown("Unsupported login type.")),
@@ -122,6 +131,20 @@ pub async fn refresh(
     services: AppState,
     req: Ruma<refresh_token::v3::Request>,
 ) -> Result<refresh_token::v3::Response> {
+    // A locked account's refresh is refused too (v1.12: every request but a logout), before
+    // the refresh token is used, so that it still works once the lock is lifted.
+    if let Some(rt) = services
+        .store
+        .get_refresh_token(&req.body.refresh_token)
+        .await?
+        && services
+            .store
+            .get_user(&rt.user_id)
+            .await?
+            .is_some_and(|u| u.is_locked)
+    {
+        return Err(AuthError::Locked.into());
+    }
     let session = services.refresh_session(&req.body.refresh_token).await?;
     let mut resp = refresh_token::v3::Response::new(session.access_token);
     resp.refresh_token = session.refresh_token;

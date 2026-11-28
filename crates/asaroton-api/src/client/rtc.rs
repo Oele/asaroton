@@ -74,6 +74,10 @@ pub async fn get_token(
             return Ok(json!({ "url": token.url, "jwt": token.jwt }));
         }
         let sender = authenticate_headers(&services, &headers).await?;
+        // A suspended account (v1.13) does not join calls: no SFU token.
+        if sender.suspended {
+            return Err(Error::suspended());
+        }
         let req: GetTokenRequest = parse(&body)?;
         let jwt = services.rtc_get_token(&sender.user_id, req).await?;
         Ok::<_, Error>(json!({ "jwt": jwt }))

@@ -72,6 +72,15 @@ impl Error {
             "Unrecognised access token.",
         )
     }
+    /// 403 `M_USER_SUSPENDED`: the account is suspended (Matrix v1.13) and this request is
+    /// one it may not make (see `crate::suspension`).
+    pub fn suspended() -> Self {
+        Self::matrix(
+            ErrorKind::UserSuspended,
+            StatusCode::FORBIDDEN,
+            "You cannot perform this action while suspended.",
+        )
+    }
     pub fn unauthorized(message: impl Into<String>) -> Self {
         Self::matrix(ErrorKind::Unauthorized, StatusCode::UNAUTHORIZED, message)
     }
@@ -99,7 +108,9 @@ fn service_status(e: &asaroton_service::Error) -> StatusCode {
         S::Matrix { status, .. } | S::Custom { status, .. } | S::Relayed { status, .. } => *status,
         S::InviteIgnored => StatusCode::FORBIDDEN,
         S::Auth(
-            asaroton_auth::AuthError::UnknownToken { .. } | asaroton_auth::AuthError::Expired,
+            asaroton_auth::AuthError::UnknownToken { .. }
+            | asaroton_auth::AuthError::Expired
+            | asaroton_auth::AuthError::Locked,
         ) => StatusCode::UNAUTHORIZED,
         S::Auth(asaroton_auth::AuthError::Deactivated) => StatusCode::FORBIDDEN,
         S::Auth(asaroton_auth::AuthError::Unavailable(_)) => StatusCode::SERVICE_UNAVAILABLE,
@@ -181,6 +192,12 @@ impl Error {
                 ErrorKind::UserDeactivated,
                 "This account has been deactivated.".to_owned(),
                 StatusCode::FORBIDDEN,
+            ),
+            // ruma adds `soft_logout: true`, as the spec has it for `M_USER_LOCKED`.
+            Self::Service(S::Auth(asaroton_auth::AuthError::Locked)) => (
+                ErrorKind::UserLocked,
+                "This account has been locked.".to_owned(),
+                StatusCode::UNAUTHORIZED,
             ),
             Self::Service(S::Auth(asaroton_auth::AuthError::Unavailable(m))) => (
                 ErrorKind::Unknown,

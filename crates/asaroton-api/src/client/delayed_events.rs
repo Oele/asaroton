@@ -235,6 +235,11 @@ async fn schedule_inner(
     api: DelayedApi,
 ) -> Result<String> {
     let sender = super::account::authenticate_headers(services, headers).await?;
+    // A suspended account schedules nothing (v1.13); what it scheduled before may still end a
+    // call membership (see the service's `fire_delayed`).
+    if sender.suspended {
+        return Err(Error::suspended());
+    }
     let room_id = ruma::OwnedRoomId::try_from(room_id)
         .map_err(|_| Error::invalid_param("Invalid room ID."))?;
     let body: Value = serde_json::from_slice(body).map_err(|e| Error::bad_json(e.to_string()))?;

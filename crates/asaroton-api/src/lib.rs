@@ -12,6 +12,7 @@ mod extract;
 pub mod federation;
 pub mod ratelimit;
 mod router;
+mod suspension;
 
 use std::sync::Arc;
 

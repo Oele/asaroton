@@ -66,6 +66,14 @@ enum Auth {
     Server,
 }
 
+/// Whether a locked account may make this request: only `POST /logout` and
+/// `POST /logout/all` (Matrix v1.12, "Account locking").
+fn allowed_when_locked<T: 'static>() -> bool {
+    use ruma::api::client::session::{logout, logout_all};
+    let id = TypeId::of::<T>();
+    id == TypeId::of::<logout::v3::Request>() || id == TypeId::of::<logout_all::v3::Request>()
+}
+
 fn auth_kind<T: IncomingRequest>() -> Auth
 where
     T::Authentication: 'static,
@@ -165,7 +173,8 @@ where
             (Auth::None | Auth::Server, _) => None,
             (Auth::Required | Auth::Appservice, None) => return Err(Error::missing_token()),
             (Auth::Optional | Auth::AppserviceOptional, None) => None,
-            (_, Some(token)) => match services.auth.authenticate(&token).await {
+            // A locked account's sender too, refused below unless this is a logout.
+            (_, Some(token)) => match services.auth.authenticate_allowing_locked(&token).await {
                 Ok(sender) => Some(sender),
                 Err(AuthError::UnknownToken { soft_logout }) => {
                     return Err(Error::unknown_token(soft_logout));
@@ -193,8 +202,16 @@ where
             let Some(appservice) = services.appservices.by_id(&as_id) else {
                 return Err(Error::forbidden("Unknown appservice."));
             };
-            services.ensure_appservice_user(&appservice, &user).await?;
+            let account = services.ensure_appservice_user(&appservice, &user).await?;
+            // The account acted as may be locked or suspended itself.
+            s.locked = account.is_locked;
+            s.suspended = account.is_suspended;
             s.user_id = user;
+        }
+        // A locked account may only log out; everything else is a soft logout with
+        // `M_USER_LOCKED` (Matrix v1.12). Checked here, for every endpoint at once.
+        if sender.as_ref().is_some_and(|s| s.locked) && !allowed_when_locked::<T>() {
+            return Err(AuthError::Locked.into());
         }
         // ... and as a specific device of that user via `?device_id=` (v1.17), created on
         // first use.
@@ -297,7 +314,11 @@ where
         } else {
             None
         };
-        let body = T::try_from_http_request(http_req, &path_args).map_err(map_request_error)?;
+        let mut body = T::try_from_http_request(http_req, &path_args).map_err(map_request_error)?;
+        // A suspended account (Matrix v1.13) keeps reading but does not act towards others.
+        if let Some(s) = &sender {
+            crate::suspension::check(services, s, &mut body).await?;
+        }
 
         Ok(Self {
             body,
@@ -419,6 +440,43 @@ mod tests {
         assert_eq!(exposed(None), "Retry-After");
         assert_eq!(exposed(Some("ETag")), "ETag, Retry-After");
         assert_eq!(exposed(Some("ETag, retry-after")), "ETag, retry-after");
+    }
+
+    #[test]
+    fn a_locked_account_may_only_log_out() {
+        use ruma::api::client::{account, device, session, sync};
+        assert!(super::allowed_when_locked::<session::logout::v3::Request>());
+        assert!(super::allowed_when_locked::<session::logout_all::v3::Request>());
+        assert!(!super::allowed_when_locked::<sync::sync_events::v3::Request>());
+        assert!(!super::allowed_when_locked::<account::whoami::v3::Request>());
+        assert!(!super::allowed_when_locked::<
+            device::delete_device::v3::Request,
+        >());
+        assert!(!super::allowed_when_locked::<
+            account::deactivate::v3::Request,
+        >());
+    }
+
+    #[test]
+    fn lock_and_suspension_errors_are_the_specs() {
+        use axum::response::IntoResponse;
+        let body = |e: crate::Error| {
+            let resp = e.into_response();
+            let status = resp.status();
+            let bytes =
+                futures::executor::block_on(axum::body::to_bytes(resp.into_body(), 4096)).unwrap();
+            (
+                status,
+                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+            )
+        };
+        let (status, locked) = body(asaroton_auth::AuthError::Locked.into());
+        assert_eq!(status, http::StatusCode::UNAUTHORIZED);
+        assert_eq!(locked["errcode"], "M_USER_LOCKED");
+        assert_eq!(locked["soft_logout"], true);
+        let (status, suspended) = body(crate::Error::suspended());
+        assert_eq!(status, http::StatusCode::FORBIDDEN);
+        assert_eq!(suspended["errcode"], "M_USER_SUSPENDED");
     }
 
     #[test]
