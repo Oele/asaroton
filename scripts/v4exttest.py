@@ -21,7 +21,8 @@ Alice syncs over `POST /_matrix/client/v4/sync`; Bob and Carol act. What is chec
      room Alice was removed from.
   5. typing (MSC4508): bare `user_ids`; nothing for a room Alice is banned from.
   6. Scope: a room that drops out of a list's range and comes back gets the tag, the receipt
-     and the typing of while it was out. `rooms` names subscriptions only: a room in a list
+     and the typing of while it was out; with more than 100 receipts changed while it was out
+     it gets its initial receipts instead of the backlog. `rooms` names subscriptions only: a room in a list
      that is not subscribed is not covered by it. An unknown extension is ignored.
 
 Needs what scripts/fedlab.py needs. Takes some seconds.
@@ -269,6 +270,33 @@ def run(hs, peers):
     check((on_top, "m.read", bob) in readers(r, one), f"the receipt made while it was out ({sorted(readers(r, one))})")
     check(ext(r, "typing").get("rooms", {}).get(one) == {"user_ids": [bob]}, f"and who is typing ({ext(r, 'typing').get('rooms', {}).get(one)})")
     hs.typing(b, one, bob, False)
+
+    print("-- a long backlog of receipts")
+    busy = create(a, {"name": "Busy", "preset": "public_chat"})
+    calm = create(a, {"name": "Calm", "preset": "public_chat"})
+    for room in (busy, calm):
+        act(b, room, "join")
+        act(c, room, "join")
+    seen = send(b, busy, "seen by Alice")
+    receipt(a, busy, seen)
+    far = send(b, busy, "read in many threads")
+    backlog = {"conn_id": "backlog", "lists": {"top": {"range": [0, 0], "timeline_limit": 1, "required_state": NAME}}, "extensions": {"receipts": {"enabled": True}}}
+    send(c, busy, "Busy is on top")
+    r = ok(backlog)
+    check(list(r.get("rooms", {})) == [busy] and (seen, "m.read", alice) in readers(r, busy), "Busy enters scope with Alice's own receipt")
+    send(c, calm, "now Calm is")
+    r = ok(backlog, r["pos"])
+    check(list(r.get("rooms", {})) == [calm], "then Calm")
+    # More than 100 receipts change while Busy is out: Bob reads one event in 101 threads.
+    for i in range(101):
+        st, x = hs.req("POST", f"/_matrix/client/v3/rooms/{q(busy)}/receipt/m.read/{q(far)}", {"thread_id": f"$thread{i}:sender.test"}, b)
+        assert st == 200, x
+    send(c, busy, "Busy comes back")
+    r = ok(backlog, r["pos"])
+    got = readers(r, busy)
+    check(list(r.get("rooms", {})) == [busy], "Busy comes back on top")
+    check((seen, "m.read", alice) in got and not any(ev == far for ev, _, _ in got),
+          f"with a backlog of more than 100 receipts it starts over: Alice's own receipts, none of the backlog ({sorted(got)})")
 
     print("-- rooms names subscriptions")
     named = {"conn_id": "named", "lists": lists_all, "extensions": {"receipts": {"enabled": True, "lists": [], "rooms": [two]}}}

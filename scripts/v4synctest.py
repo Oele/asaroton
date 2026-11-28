@@ -23,7 +23,8 @@ Alice syncs over `POST /_matrix/client/v4/sync`; Bob and a few others act. What 
      answer has no gap, also one that no timeline shows (staged in the table of current
      state); not when it has one, nor with a timeline limit of 0.
   8. A name or an avatar that is removed comes as `null`; `is_dm` comes as `false` when the
-     room stops being a DM.
+     room stops being a DM. A room without a name has heroes: the joined members, then the
+     invited, then those who left, also when it has an alias.
   9. The filters `tags` / `not_tags` (a favourite moves between lists when tagged) and
      `spaces` (a child with an empty `via` is no child; a space Alice has not joined names no
      rooms). A room that moves between lists comes again with its new `lists`, also when the
@@ -380,6 +381,18 @@ def run(hs, peers):
     check(stubs == [{"type": "m.room.topic", "state_key": ""}] and events == ["m.room.name"], f"an answer with more state brings the new state and the stub ({events}, {stubs})")
     r = ok(a, grow, r["pos"])
     check(again not in r.get("rooms", {}), "once")
+
+    print("-- heroes")
+    # A room without a name, with an alias: Bob is in it, Erin was invited, Carol has left.
+    nameless = create(a, {"preset": "public_chat", "room_alias_name": "nameless", "invite": [erin]})
+    act(b, nameless, "join")
+    act(c, nameless, "join")
+    act(c, nameless, "leave")
+    look = {"conn_id": "heroes", "room_subscriptions": {nameless: {"timeline_limit": 1, "required_state": {}}}}
+    heroes = [h["user_id"] for h in ok(a, look)["rooms"][nameless].get("heroes", [])]
+    check(heroes == [bob, erin, carol], f"heroes: the joined, then the invited, then who left; the alias does not matter ({heroes})")
+    st, u = hs.req("POST", UNSTABLE, {"conn_id": "heroes", "room_subscriptions": {nameless: {"timeline_limit": 1, "required_state": []}}}, a)
+    check(st == 200 and "heroes" not in u["rooms"][nameless], f"(the unstable endpoint keeps its rule: no heroes for a room with an alias: {u['rooms'][nameless].get('heroes')})")
 
 
 if __name__ == "__main__":
