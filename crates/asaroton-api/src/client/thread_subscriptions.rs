@@ -11,8 +11,8 @@ use crate::{AppState, Error, Result, Ruma, extract::add_cors};
 
 pub async fn subscribe(
     services: AppState,
-    req: Ruma<subscribe_thread::unstable::Request>,
-) -> Result<subscribe_thread::unstable::Response> {
+    req: Ruma<subscribe_thread::msc4306::Request>,
+) -> Result<subscribe_thread::msc4306::Response> {
     let sender = req.sender()?;
     services
         .subscribe_thread(
@@ -22,37 +22,37 @@ pub async fn subscribe(
             req.body.automatic.as_deref(),
         )
         .await?;
-    Ok(subscribe_thread::unstable::Response::new())
+    Ok(subscribe_thread::msc4306::Response::new())
 }
 
 pub async fn unsubscribe(
     services: AppState,
-    req: Ruma<unsubscribe_thread::unstable::Request>,
-) -> Result<unsubscribe_thread::unstable::Response> {
+    req: Ruma<unsubscribe_thread::msc4306::Request>,
+) -> Result<unsubscribe_thread::msc4306::Response> {
     let sender = req.sender()?;
     services
         .unsubscribe_thread(&sender.user_id, &req.body.room_id, &req.body.thread_root)
         .await?;
-    Ok(unsubscribe_thread::unstable::Response::new())
+    Ok(unsubscribe_thread::msc4306::Response::new())
 }
 
 pub async fn get(
     services: AppState,
-    req: Ruma<get_thread_subscription::unstable::Request>,
-) -> Result<get_thread_subscription::unstable::Response> {
+    req: Ruma<get_thread_subscription::msc4306::Request>,
+) -> Result<get_thread_subscription::msc4306::Response> {
     let sender = req.sender()?;
     let automatic = services
         .thread_subscription(&sender.user_id, &req.body.room_id, &req.body.thread_root)
         .await?
         .ok_or_else(|| Error::not_found("Not subscribed to this thread."))?;
-    Ok(get_thread_subscription::unstable::Response::new(automatic))
+    Ok(get_thread_subscription::msc4306::Response::new(automatic))
 }
 
 /// `GET /_matrix/client/unstable/io.element.msc4308/thread_subscriptions`: pages backwards
 /// from `from` (exclusive) down to `to` (exclusive), newest first.
 pub async fn changes(
     services: AppState,
-    req: Ruma<get_thread_subscriptions_changes::unstable::Request>,
+    req: Ruma<get_thread_subscriptions_changes::msc4308::Request>,
 ) -> Result<Response> {
     let sender = req.sender()?;
     let parse = |v: &Option<String>| -> Result<Option<i64>> {

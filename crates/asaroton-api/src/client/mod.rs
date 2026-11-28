@@ -156,20 +156,20 @@ pub fn routes(router: Router<AppState>) -> Router<AppState> {
         delayed_events::send_state,
     );
     // Thread subscriptions (MSC4306) and their change stream (MSC4308).
-    let r = route::<c::threads::subscribe_thread::unstable::Request, _, _>(
+    let r = route::<c::threads::subscribe_thread::msc4306::Request, _, _>(
         r,
         thread_subscriptions::subscribe,
     );
-    let r = route::<c::threads::unsubscribe_thread::unstable::Request, _, _>(
+    let r = route::<c::threads::unsubscribe_thread::msc4306::Request, _, _>(
         r,
         thread_subscriptions::unsubscribe,
     );
-    let r = route::<c::threads::get_thread_subscription::unstable::Request, _, _>(
+    let r = route::<c::threads::get_thread_subscription::msc4306::Request, _, _>(
         r,
         thread_subscriptions::get,
     );
     let r = crate::router::route_raw::<
-        c::threads::get_thread_subscriptions_changes::unstable::Request,
+        c::threads::get_thread_subscriptions_changes::msc4308::Request,
         _,
         _,
     >(r, &[], thread_subscriptions::changes);
@@ -194,7 +194,7 @@ pub fn routes(router: Router<AppState>) -> Router<AppState> {
             axum::routing::post(delayed_events::update_stable),
         );
     let r = crate::router::route_raw::<
-        c::delayed_events::get_all_delayed_events::unstable::Request,
+        c::delayed_events::get_all_delayed_events::msc4140::Request,
         _,
         _,
     >(r, &[], delayed_events::list);
@@ -598,20 +598,20 @@ pub fn routes(router: Router<AppState>) -> Router<AppState> {
         backup::delete_session_key,
     );
     let r = route::<c::keys::upload_keys::v3::Request, _, _>(r, keys::upload);
-    let r = route::<c::dehydrated_device::put_dehydrated_device::unstable::Request, _, _>(
+    let r = route::<c::dehydrated_device::put_dehydrated_device::msc3814::Request, _, _>(
         r,
         dehydrated::put,
     );
-    let r = route::<c::dehydrated_device::get_dehydrated_device::unstable::Request, _, _>(
+    let r = route::<c::dehydrated_device::get_dehydrated_device::msc3814::Request, _, _>(
         r,
         dehydrated::get,
     );
-    let r = route::<c::dehydrated_device::delete_dehydrated_device::unstable::Request, _, _>(
+    let r = route::<c::dehydrated_device::delete_dehydrated_device::msc3814::Request, _, _>(
         r,
         dehydrated::delete,
     );
     let r =
-        route::<c::dehydrated_device::get_events::unstable::Request, _, _>(r, dehydrated::events);
+        route::<c::dehydrated_device::get_events::msc3814::Request, _, _>(r, dehydrated::events);
     let r = route::<c::keys::get_keys::v3::Request, _, _>(r, keys::query);
     let r = route::<c::keys::claim_keys::v3::Request, _, _>(r, keys::claim);
     let r = route::<c::keys::get_key_changes::v3::Request, _, _>(r, keys::changes);
@@ -856,7 +856,7 @@ raw_json_handler!(
 );
 raw_json_handler!(
     sliding_sync_handler,
-    ruma::api::client::sync::sync_events::v5::Request,
+    ruma::api::client::sync::sync_events::msc4186::Request,
     sliding_sync::sliding_sync
 );
 raw_json_handler!(

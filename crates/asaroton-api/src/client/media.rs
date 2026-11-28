@@ -56,9 +56,9 @@ pub async fn config(
     _app: AppState,
     _req: Ruma<get_media_config::v3::Request>,
 ) -> Result<get_media_config::v3::Response> {
-    Ok(get_media_config::v3::Response::new(
+    Ok(get_media_config::v3::Response::new(Some(
         UInt::try_from(MAX_UPLOAD_BYTES).unwrap_or(UInt::MAX),
-    ))
+    )))
 }
 
 pub async fn config_v1(
@@ -66,9 +66,9 @@ pub async fn config_v1(
     req: Ruma<am::get_media_config::v1::Request>,
 ) -> Result<am::get_media_config::v1::Response> {
     let _ = req.sender()?;
-    Ok(am::get_media_config::v1::Response::new(
+    Ok(am::get_media_config::v1::Response::new(Some(
         UInt::try_from(MAX_UPLOAD_BYTES).unwrap_or(UInt::MAX),
-    ))
+    )))
 }
 
 pub async fn upload(

@@ -32,7 +32,7 @@ asaroton-service = { path = "crates/asaroton-service" }
 asaroton-auth = { path = "crates/asaroton-auth" }
 
 # Matrix protocol
-ruma = { version = "0.17.2", features = [
+ruma = { version = "0.18.0", features = [
   "client-api-s",
   "unstable-msc3814",
   "federation-api-s",

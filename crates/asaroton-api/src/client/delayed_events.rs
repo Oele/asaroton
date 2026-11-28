@@ -216,7 +216,7 @@ async fn schedule_inner(
 /// `GET /_matrix/client/unstable/org.matrix.msc4140/delayed_events`
 pub async fn list(
     services: AppState,
-    req: Ruma<get_all_delayed_events::unstable::Request>,
+    req: Ruma<get_all_delayed_events::msc4140::Request>,
 ) -> Result<Response> {
     let sender = req.sender()?;
     let delayed_events = services.delayed_events_for(&sender.user_id).await?;

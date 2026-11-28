@@ -8,7 +8,7 @@ use asaroton_service::sliding_sync::{
     RoomSubscriptionRequest, ScopeRoom, SlidingSyncRequest, ToDeviceRequest,
 };
 use axum::{Json, response::IntoResponse};
-use ruma::api::client::sync::sync_events::v5;
+use ruma::api::client::sync::sync_events::msc4186;
 use serde_json::{Map, Value, json};
 
 use crate::{AppState, Result, Ruma, client::rooms::client_event};
@@ -71,14 +71,14 @@ fn profiles_request(raw: Option<&Value>) -> Option<ProfilesRequest> {
 
 fn scope(
     lists: Option<&Vec<String>>,
-    rooms: Option<&Vec<v5::request::ExtensionRoomConfig>>,
+    rooms: Option<&Vec<msc4186::request::ExtensionRoomConfig>>,
 ) -> ExtensionScope {
     ExtensionScope {
         lists: lists.cloned(),
         rooms: rooms.map(|r| {
             r.iter()
                 .map(|e| match e {
-                    v5::request::ExtensionRoomConfig::Room(id) => ScopeRoom::Room(id.clone()),
+                    msc4186::request::ExtensionRoomConfig::Room(id) => ScopeRoom::Room(id.clone()),
                     _ => ScopeRoom::AllSubscribed,
                 })
                 .collect()
@@ -162,7 +162,7 @@ async fn room_json(services: &AppState, user: &ruma::UserId, r: &RoomResult) -> 
 
 pub async fn sliding_sync(
     services: AppState,
-    req: Ruma<v5::Request>,
+    req: Ruma<msc4186::Request>,
 ) -> Result<axum::response::Response> {
     let sender = req.sender()?;
     let b = &req.body;
@@ -210,18 +210,20 @@ pub async fn sliding_sync(
         .collect();
     let x = &b.extensions;
     let extensions = ExtensionsRequest {
-        to_device: (x.to_device.enabled == Some(true)).then(|| ToDeviceRequest {
+        to_device: x.to_device.enabled.then(|| ToDeviceRequest {
             since: x.to_device.since.clone(),
             limit: x.to_device.limit.map_or(0, limit),
         }),
-        e2ee: x.e2ee.enabled == Some(true),
+        e2ee: x.e2ee.enabled,
         account_data: (x.account_data.enabled == Some(true))
             .then(|| scope(x.account_data.lists.as_ref(), x.account_data.rooms.as_ref())),
         receipts: (x.receipts.enabled == Some(true))
             .then(|| scope(x.receipts.lists.as_ref(), x.receipts.rooms.as_ref())),
         typing: (x.typing.enabled == Some(true))
             .then(|| scope(x.typing.lists.as_ref(), x.typing.rooms.as_ref())),
-        thread_subscriptions: (x.thread_subscriptions.enabled == Some(true))
+        thread_subscriptions: x
+            .thread_subscriptions
+            .enabled
             .then(|| x.thread_subscriptions.limit.map_or(100, limit)),
         profiles: profiles_request(req.json.as_ref()),
     };

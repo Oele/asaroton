@@ -18,8 +18,8 @@ fn from_json<T>(value: &Value) -> Result<ruma::serde::Raw<T>> {
 
 pub async fn put(
     services: AppState,
-    req: Ruma<put_dehydrated_device::unstable::Request>,
-) -> Result<put_dehydrated_device::unstable::Response> {
+    req: Ruma<put_dehydrated_device::msc3814::Request>,
+) -> Result<put_dehydrated_device::msc3814::Response> {
     let sender = req.sender()?;
     let keys = |keys: &BTreeMap<
         ruma::OwnedOneTimeKeyId,
@@ -40,19 +40,19 @@ pub async fn put(
             &keys(&req.body.fallback_keys)?,
         )
         .await?;
-    Ok(put_dehydrated_device::unstable::Response::new(
+    Ok(put_dehydrated_device::msc3814::Response::new(
         req.body.device_id.clone(),
     ))
 }
 
 pub async fn get(
     services: AppState,
-    req: Ruma<get_dehydrated_device::unstable::Request>,
-) -> Result<get_dehydrated_device::unstable::Response> {
+    req: Ruma<get_dehydrated_device::msc3814::Request>,
+) -> Result<get_dehydrated_device::msc3814::Response> {
     let (device_id, data) = services
         .get_dehydrated_device(&req.sender()?.user_id)
         .await?;
-    Ok(get_dehydrated_device::unstable::Response::new(
+    Ok(get_dehydrated_device::msc3814::Response::new(
         device_id,
         from_json(&data)?,
     ))
@@ -60,18 +60,18 @@ pub async fn get(
 
 pub async fn delete(
     services: AppState,
-    req: Ruma<delete_dehydrated_device::unstable::Request>,
-) -> Result<delete_dehydrated_device::unstable::Response> {
+    req: Ruma<delete_dehydrated_device::msc3814::Request>,
+) -> Result<delete_dehydrated_device::msc3814::Response> {
     let device_id = services
         .delete_dehydrated_device(&req.sender()?.user_id)
         .await?;
-    Ok(delete_dehydrated_device::unstable::Response::new(device_id))
+    Ok(delete_dehydrated_device::msc3814::Response::new(device_id))
 }
 
 pub async fn events(
     services: AppState,
-    req: Ruma<get_events::unstable::Request>,
-) -> Result<get_events::unstable::Response> {
+    req: Ruma<get_events::msc3814::Request>,
+) -> Result<get_events::msc3814::Response> {
     let (events, next_batch) = services
         .dehydrated_device_events(
             &req.sender()?.user_id,
@@ -79,7 +79,7 @@ pub async fn events(
             req.body.next_batch.as_deref(),
         )
         .await?;
-    let mut response = get_events::unstable::Response::new(
+    let mut response = get_events::msc3814::Response::new(
         events.iter().map(from_json).collect::<Result<Vec<_>>>()?,
     );
     response.next_batch = Some(next_batch);
