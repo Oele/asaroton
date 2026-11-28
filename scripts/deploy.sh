@@ -55,7 +55,8 @@ echo "checking $(git log -1 --format='%h %s')"
 CHECK_LOGS="${XDG_CACHE_HOME:-$HOME/.cache}/asaroton-deploy"
 mkdir -p "$CHECK_LOGS"
 CHECK_LOG="$CHECK_LOGS/check-$(date +%Y%m%d-%H%M%S).log"
-ls -1t "$CHECK_LOGS"/check-*.log 2>/dev/null | tail -n +10 | xargs -r rm -f
+# Under pipefail a failing `ls` (no logs yet) would stop the script: find never fails here.
+find "$CHECK_LOGS" -maxdepth 1 -name 'check-*.log' -printf '%T@ %p\n' | sort -rn | tail -n +11 | cut -d' ' -f2- | xargs -r rm -f
 scripts/check.sh >"$CHECK_LOG" 2>&1 || {
   grep -E "FAIL \[|panicked|assertion|Error" "$CHECK_LOG" | head -n 40
   tail -n 20 "$CHECK_LOG"
