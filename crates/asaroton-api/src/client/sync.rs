@@ -123,6 +123,14 @@ async fn room_json(
         timeline["prev_batch"] = json!(pb);
     }
     v.insert("timeline".into(), timeline);
+    if !room.sticky.is_empty() {
+        // Under the unstable name while v1.20 is not advertised (MSC4354; matrix-js-sdk reads
+        // this one).
+        v.insert(
+            "msc4354_sticky".into(),
+            json!({ "events": events_json(services, user, &room.sticky, room, true).await? }),
+        );
+    }
     match &room.state_after {
         Some(after) => {
             v.insert(

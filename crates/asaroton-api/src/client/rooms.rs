@@ -28,21 +28,10 @@ use serde_json::{Value, json};
 
 use crate::{AppState, Error, Result, Ruma};
 
-/// Render a stored event in client format with `unsigned.age`.
+/// Render a stored event in client format with `unsigned.age` (and, for an unexpired sticky
+/// event, the time it stays sticky).
 pub fn client_event(ev: &StoredEvent) -> Value {
-    let mut v = ev.pdu.to_client_json();
-    let now = asaroton_store::now_ts();
-    let age =
-        now.saturating_sub(i64::try_from(u64::from(ev.pdu.origin_server_ts().0)).unwrap_or(0));
-    let unsigned = v.as_object_mut().and_then(|o| {
-        o.entry("unsigned")
-            .or_insert_with(|| serde_json::json!({}))
-            .as_object_mut()
-    });
-    if let Some(u) = unsigned {
-        u.insert("age".into(), serde_json::json!(age));
-    }
-    v
+    asaroton_service::rooms::relations::client_json(ev, asaroton_store::now_ts())
 }
 
 pub fn raw<T>(v: &Value) -> Result<Raw<T>> {
@@ -530,6 +519,7 @@ pub async fn joined_members(
 pub async fn send_message(
     services: AppState,
     req: Ruma<send_message_event::v3::Request>,
+    sticky: Option<asaroton_core::sticky::Sticky>,
 ) -> Result<send_message_event::v3::Response> {
     let sender = req.sender()?;
     let content = json_from_raw(&req.body.body)?;
@@ -550,6 +540,7 @@ pub async fn send_message(
             &req.body.event_type.to_string(),
             content,
             ts,
+            sticky,
         )
         .await?;
     Ok(send_message_event::v3::Response::new(event_id))

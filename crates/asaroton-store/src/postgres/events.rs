@@ -34,7 +34,7 @@ async fn persist_one(
 
     // Idempotency: an event we already have is not written twice.
     if let Some(row) = sqlx::query(
-        "SELECT stream_ordering, state_group, outlier, rejected FROM events WHERE event_id = $1",
+        "SELECT stream_ordering, state_group, outlier, rejected, received_ts FROM events WHERE event_id = $1",
     )
     .bind(pdu.event_id().as_str())
     .fetch_optional(&mut *conn)
@@ -92,6 +92,9 @@ async fn persist_one(
             if accepted_after_all {
                 index_event(&mut *conn, pdu, new_ordering, keep_plaintext).await?;
             }
+            if !ev.soft_failed && !pdu.rejected() {
+                record_sticky(&mut *conn, pdu, new_ordering, row.get("received_ts")).await?;
+            }
             let existing = PersistedEvent {
                 stream_ordering: new_ordering,
                 ..existing
@@ -118,6 +121,7 @@ async fn persist_one(
         "events_stream_seq"
     };
 
+    let received_ts = now_ts();
     let mut json_obj = pdu.raw().clone();
     json_obj.remove("unsigned");
     let json = asaroton_core::canonical::to_string(&json_obj);
@@ -177,7 +181,7 @@ async fn persist_one(
         .bind(pdu.rejected())
         .bind(ev.soft_failed)
         .bind(outlier)
-        .bind(now_ts())
+        .bind(received_ts)
         .bind(strings(pdu.prev_events()))
         .bind(strings(pdu.auth_events()))
         .bind(relates_to)
@@ -188,6 +192,13 @@ async fn persist_one(
         .await?
         .get(0);
 
+    if !outlier && !pdu.rejected() {
+        if ev.soft_failed {
+            record_soft_failed_sticky(&mut *conn, pdu, received_ts).await?;
+        } else {
+            record_sticky(&mut *conn, pdu, stream_ordering, received_ts).await?;
+        }
+    }
     if let Some(delta) = &ev.current_state_delta {
         super::state::apply_current_state_delta(&mut *conn, room_id, delta).await?;
     }
@@ -200,6 +211,85 @@ async fn persist_one(
         stream_ordering,
         state_group,
     })
+}
+
+/// The most unexpired sticky events one sender may have in a room. Beyond it the oldest stop
+/// being sticky (MSC4354 lets servers cap them), so nobody can fill every member's sync.
+pub(crate) const MAX_STICKY_PER_SENDER: i64 = 50;
+
+/// Note an accepted event that carries a sticky marker, unless it has already expired, and
+/// keep its sender within [`MAX_STICKY_PER_SENDER`].
+async fn record_sticky(
+    conn: &mut PgConnection,
+    pdu: &Pdu,
+    stream_ordering: i64,
+    received_ts: i64,
+) -> Result<()> {
+    let Some(sticky) = asaroton_core::sticky::Sticky::of_canonical(pdu.raw()) else {
+        return Ok(());
+    };
+    if pdu.state_key().is_some() {
+        return Ok(());
+    }
+    let expires_at = sticky.expires_at(uint_to_i64(pdu.origin_server_ts().0), received_ts);
+    let now = now_ts();
+    if expires_at <= now {
+        return Ok(());
+    }
+    sqlx::query(
+        "INSERT INTO sticky_events (event_id, room_id, sender, stream_ordering, expires_at)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (event_id) DO UPDATE SET stream_ordering = EXCLUDED.stream_ordering",
+    )
+    .bind(pdu.event_id().as_str())
+    .bind(pdu.room_id().as_str())
+    .bind(pdu.sender().as_str())
+    .bind(stream_ordering)
+    .bind(expires_at)
+    .execute(&mut *conn)
+    .await?;
+    sqlx::query(
+        "DELETE FROM sticky_events WHERE event_id IN (
+            SELECT event_id FROM sticky_events
+            WHERE room_id = $1 AND sender = $2 AND expires_at > $3
+            ORDER BY stream_ordering DESC OFFSET $4)",
+    )
+    .bind(pdu.room_id().as_str())
+    .bind(pdu.sender().as_str())
+    .bind(now)
+    .bind(MAX_STICKY_PER_SENDER)
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+/// Note a soft-failed event that carries a sticky marker and has time left, so that it is
+/// checked again when the room's state changes.
+async fn record_soft_failed_sticky(
+    conn: &mut PgConnection,
+    pdu: &Pdu,
+    received_ts: i64,
+) -> Result<()> {
+    let Some(sticky) = asaroton_core::sticky::Sticky::of_canonical(pdu.raw()) else {
+        return Ok(());
+    };
+    if pdu.state_key().is_some() {
+        return Ok(());
+    }
+    let expires_at = sticky.expires_at(uint_to_i64(pdu.origin_server_ts().0), received_ts);
+    if expires_at <= now_ts() {
+        return Ok(());
+    }
+    sqlx::query(
+        "INSERT INTO soft_failed_sticky (event_id, room_id, expires_at) VALUES ($1, $2, $3)
+         ON CONFLICT (event_id) DO NOTHING",
+    )
+    .bind(pdu.event_id().as_str())
+    .bind(pdu.room_id().as_str())
+    .bind(expires_at)
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
 }
 
 /// Write the relation and search index rows of an event. They are left out while an event is
@@ -408,6 +498,105 @@ fn ids_from_rows(rows: Vec<sqlx::postgres::PgRow>) -> Vec<OwnedEventId> {
 
 #[async_trait]
 impl EventStore for PostgresStore {
+    async fn sticky_events(
+        &self,
+        room_id: &RoomId,
+        now: crate::Ts,
+        after: StreamOrdering,
+        upto: StreamOrdering,
+        limit: usize,
+    ) -> Result<Vec<StoredEvent>> {
+        let sql = format!(
+            "SELECT {EVENT_COLUMNS} FROM sticky_events s
+               JOIN events e ON e.event_id = s.event_id
+               JOIN rooms r ON r.room_id = e.room_id
+              WHERE s.room_id = $1 AND s.expires_at > $2
+                AND s.stream_ordering > $3 AND s.stream_ordering <= $4
+                AND NOT e.outlier AND NOT e.rejected AND NOT e.soft_failed
+              ORDER BY s.stream_ordering ASC LIMIT $5"
+        );
+        let rows: Vec<EventRow> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
+            .bind(room_id.as_str())
+            .bind(now)
+            .bind(after)
+            .bind(upto)
+            .bind(i64::try_from(limit).unwrap_or(i64::MAX))
+            .fetch_all(&self.pool)
+            .await?;
+        rows.into_iter().map(StoredEvent::try_from).collect()
+    }
+
+    async fn prune_expired_sticky(&self, now: crate::Ts) -> Result<u64> {
+        let sticky = sqlx::query("DELETE FROM sticky_events WHERE expires_at <= $1")
+            .bind(now)
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+        let soft_failed = sqlx::query("DELETE FROM soft_failed_sticky WHERE expires_at <= $1")
+            .bind(now)
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+        Ok(sticky + soft_failed)
+    }
+
+    async fn soft_failed_sticky_events(
+        &self,
+        room_id: &RoomId,
+        now: crate::Ts,
+    ) -> Result<Vec<StoredEvent>> {
+        let sql = format!(
+            "SELECT {EVENT_COLUMNS} FROM soft_failed_sticky s
+               JOIN events e ON e.event_id = s.event_id
+               JOIN rooms r ON r.room_id = e.room_id
+              WHERE s.room_id = $1 AND s.expires_at > $2 AND e.soft_failed
+              ORDER BY e.stream_ordering ASC"
+        );
+        let rows: Vec<EventRow> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
+            .bind(room_id.as_str())
+            .bind(now)
+            .fetch_all(&self.pool)
+            .await?;
+        rows.into_iter().map(StoredEvent::try_from).collect()
+    }
+
+    async fn accept_soft_failed_sticky(&self, ev: &StoredEvent) -> Result<Option<StreamOrdering>> {
+        let streams = self.streams().await?;
+        let mut tx = self.begin().await?;
+        let mut writing = streams.writing(Stream::Events);
+        let row = sqlx::query(
+            "UPDATE events SET soft_failed = FALSE, stream_ordering = nextval('events_stream_seq')
+              WHERE event_id = $1 AND soft_failed AND NOT rejected AND NOT outlier
+              RETURNING stream_ordering, received_ts",
+        )
+        .bind(ev.event_id().as_str())
+        .fetch_optional(&mut *tx)
+        .await?;
+        sqlx::query("DELETE FROM soft_failed_sticky WHERE event_id = $1")
+            .bind(ev.event_id().as_str())
+            .execute(&mut *tx)
+            .await?;
+        let Some(row) = row else {
+            tx.commit().await?;
+            return Ok(None);
+        };
+        let stream_ordering: i64 = row.get("stream_ordering");
+        // The index rows were written with the old position.
+        for table in ["event_relations", "event_search"] {
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "UPDATE {table} SET stream_ordering = $2 WHERE event_id = $1"
+            )))
+            .bind(ev.event_id().as_str())
+            .bind(stream_ordering)
+            .execute(&mut *tx)
+            .await?;
+        }
+        record_sticky(&mut tx, &ev.pdu, stream_ordering, row.get("received_ts")).await?;
+        tx.commit().await?;
+        writing.wrote(stream_ordering);
+        Ok(Some(stream_ordering))
+    }
+
     async fn stream_positions(&self) -> Result<crate::StreamPositions> {
         self.settled_positions().await
     }

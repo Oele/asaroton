@@ -31,6 +31,7 @@ They need `cargo build`, the development database role from `.env.example`, and 
 | `scripts/createroomtest.py` | CreateRoom under pressure: several rooms at once, and a sync that shows a new room whole or not yet |
 | `scripts/clientendpointstest.py` | Small client endpoints: capabilities under r0, the empty 3pid list, /keys/changes |
 | `scripts/fedinvitetest.py` | An invitation to another server goes there once, over /invite |
+| `scripts/stickytest.py` | Sticky events (MSC4354, tracker #90) in both dialects: sending (also delayed), the marker and the time left in `unsigned`, the `/sync` section for a late joiner and incremental syncs, the sliding sync extension (MSC4480) with its per-room limit, the push to a server that joins, a soft-failed sticky event accepted after a state change |
 | `scripts/softfailtest.py` | A soft-failed event (a banned user's message that builds on older history) is kept and not shown to clients |
 | `scripts/todevicetest.py` | To-device messages all arrive, however many are waiting, over both sync flavours |
 | `scripts/devicelisttest.py` | Device lists as other servers see them: cross-signing signatures, prev_id, one stream ID per device |

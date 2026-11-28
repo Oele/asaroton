@@ -103,6 +103,19 @@ pub struct ExtensionsRequest {
     pub thread_subscriptions: Option<usize>,
     /// Profile field updates of the people one shares a room with (MSC4262).
     pub profiles: Option<ProfilesRequest>,
+    /// Sticky events (MSC4480, for MSC4354).
+    pub sticky: Option<StickyRequest>,
+}
+
+/// The most sticky events per room that one response of the extension carries.
+const STICKY_LIMIT_MAX: usize = 100;
+
+/// The sticky events extension (MSC4480): which rooms, and at most how many events per room
+/// in one response.
+#[derive(Clone, Debug, Default)]
+pub struct StickyRequest {
+    pub scope: ExtensionScope,
+    pub limit: usize,
 }
 
 /// The profiles extension (MSC4262): the members of which rooms, and which profile fields
@@ -199,6 +212,11 @@ pub struct ExtensionsResult {
     pub thread_subscriptions: Option<crate::thread_subscriptions::ThreadSubscriptionChanges>,
     /// Per user: what changed, or `None` when they no longer share a room in scope (MSC4262).
     pub profiles: BTreeMap<OwnedUserId, Option<ProfileDelta>>,
+    /// Per room, the sticky events to deliver, oldest first (MSC4480).
+    pub sticky: BTreeMap<OwnedRoomId, Vec<StoredEvent>>,
+    /// Some room had more sticky events than its limit: the rest follows in the next
+    /// responses, which therefore do not wait.
+    pub sticky_pending: bool,
 }
 
 impl ExtensionsResult {
@@ -219,6 +237,8 @@ impl ExtensionsResult {
                 .as_ref()
                 .is_none_or(crate::thread_subscriptions::ThreadSubscriptionChanges::is_empty)
             && self.profiles.is_empty()
+            && self.sticky.is_empty()
+            && !self.sticky_pending
     }
 }
 
@@ -364,6 +384,9 @@ struct ConnState {
     /// For each kick or ban of the user: whether it put them out as a member. Such rooms stay
     /// in the lists (MSC4186); what an event did never changes, so it is worked out once.
     put_out: HashMap<OwnedEventId, bool>,
+    /// For each room in scope of the sticky events extension, the stream position up to which
+    /// its sticky events were handed out (MSC4480); `None` while the extension is off.
+    sticky_upto: Option<HashMap<OwnedRoomId, i64>>,
 }
 
 /// The last state the client acknowledged, and the one produced by the latest response (which
@@ -1139,6 +1162,14 @@ impl Services {
             }
         }
 
+        let sticky_upto = match &req.extensions.sticky {
+            Some(s) => Some(
+                self.sticky_extension(s, &selections, &rooms, base, now, &ignored, &mut ext)
+                    .await?,
+            ),
+            None => None,
+        };
+
         let mut profile_users = None;
         if let Some(p) = &req.extensions.profiles {
             let (delta, users) = self
@@ -1166,8 +1197,68 @@ impl Services {
             list_counts,
             profile_users,
             put_out,
+            sticky_upto,
         };
         Ok((result, state))
+    }
+
+    /// The sticky events extension (MSC4480). For each joined room in scope: a room that
+    /// enters scope (new on the connection or to the extension, the extension just enabled,
+    /// the room `initial` again) gets all its unexpired sticky events, any other the ones since
+    /// its last position; the oldest `limit` of them, the rest in later responses. Minus those
+    /// this response's timeline carries and those of ignored users. Returns the positions to
+    /// remember; rooms that left scope are forgotten, so they get everything when they return.
+    #[allow(clippy::too_many_arguments)]
+    async fn sticky_extension(
+        &self,
+        req: &StickyRequest,
+        selections: &BTreeMap<OwnedRoomId, RoomSelection>,
+        rooms: &BTreeMap<OwnedRoomId, RoomResult>,
+        base: Option<&ConnState>,
+        now: SyncToken,
+        ignored: &HashSet<OwnedUserId>,
+        ext: &mut ExtensionsResult,
+    ) -> Result<HashMap<OwnedRoomId, i64>> {
+        let previous = base.and_then(|b| b.sticky_upto.as_ref());
+        let limit = req.limit.clamp(1, STICKY_LIMIT_MAX);
+        // Events that run out within a second are not handed out (they must have time left).
+        let alive_at = asaroton_store::now_ts() + 1000;
+        let mut upto = HashMap::new();
+        for (room_id, sel) in selections {
+            if sel.membership.membership != MembershipState::Join || !req.scope.applies(sel) {
+                continue;
+            }
+            let entering = rooms.get(room_id).is_some_and(|r| r.initial);
+            let after = match previous.and_then(|p| p.get(room_id)) {
+                Some(&at) if !entering => at,
+                _ => i64::MIN,
+            };
+            let fetched = self
+                .store
+                .sticky_events(room_id, alive_at, after, now.events, limit)
+                .await?;
+            let reached = fetched.len() >= limit;
+            let delivered = match fetched.last() {
+                Some(last) if reached => {
+                    ext.sticky_pending = true;
+                    last.stream_ordering
+                }
+                _ => now.events,
+            };
+            upto.insert(room_id.clone(), delivered);
+            let shown: HashSet<&ruma::EventId> = rooms
+                .get(room_id)
+                .map(|r| r.timeline.iter().map(StoredEvent::event_id).collect())
+                .unwrap_or_default();
+            let events: Vec<StoredEvent> = fetched
+                .into_iter()
+                .filter(|e| !shown.contains(e.event_id()) && !ignored.contains(e.pdu.sender()))
+                .collect();
+            if !events.is_empty() {
+                ext.sticky.insert(room_id.clone(), events);
+            }
+        }
+        Ok(upto)
     }
 
     /// The profiles extension (MSC4262). Who: the local members of the joined rooms in scope
@@ -1936,6 +2027,7 @@ mod tests {
             soft_failed: false,
             outlier: false,
             redacted: false,
+            received_ts: 0,
         }
     }
 
@@ -2006,6 +2098,7 @@ mod tests {
             list_counts: BTreeMap::new(),
             profile_users: None,
             put_out: HashMap::new(),
+            sticky_upto: None,
         };
         let conns = SlidingSyncConnections::default();
         let key = ConnKey {

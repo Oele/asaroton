@@ -54,6 +54,7 @@ impl Services {
         event_type: &str,
         content: Value,
         origin_server_ts: Option<ruma::MilliSecondsSinceUnixEpoch>,
+        sticky: Option<asaroton_core::sticky::Sticky>,
     ) -> Result<OwnedEventId> {
         // Transaction IDs are scoped to the device *and* the endpoint path (room + type).
         let txn_key = format!("send:{room_id}:{event_type}:{txn_id}");
@@ -83,6 +84,7 @@ impl Services {
         let mut ev = LocalEvent::new(room_id.to_owned(), sender.to_owned(), event_type.to_owned())
             .content(&content)?;
         ev.origin_server_ts = origin_server_ts;
+        ev.sticky = sticky;
         let stored = self.send_local_event(ev).await?;
         self.store
             .set_txn_event(
@@ -634,6 +636,12 @@ impl Services {
         // A user always sees their own membership changes.
         if ev.pdu.event_type() == &TimelineEventType::RoomMember
             && ev.pdu.state_key() == Some(user.as_str())
+        {
+            return Ok(true);
+        }
+        // A member sees the room's sticky events (MSC4354) while they are sticky, whatever
+        // the history visibility.
+        if currently_joined && super::relations::sticky_left(ev, asaroton_store::now_ts()).is_some()
         {
             return Ok(true);
         }

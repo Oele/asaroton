@@ -15,6 +15,7 @@ pub mod redaction;
 pub mod room_version;
 pub mod signing;
 pub mod state;
+pub mod sticky;
 
 pub use error::{Error, Result};
 pub use pdu::Pdu;

@@ -36,6 +36,9 @@ pub async fn versions(
         ("org.matrix.msc3814".to_owned(), true),
         // Profile updates in /sync.
         ("org.matrix.msc4429".to_owned(), true),
+        // Sticky events (MSC4354, v1.20), in both dialects, with the sliding sync extension of
+        // MSC4480. matrix-js-sdk sends them (MatrixRTC call membership) only when this is set.
+        ("org.matrix.msc4354".to_owned(), true),
         // /search filters by period, message kind and link (asaroton's own extension).
         ("net.oele.search_filters".to_owned(), true),
         // /search with an empty term and a filter: everything the filter lets through.

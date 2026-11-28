@@ -102,6 +102,9 @@ impl LeftOut {
     }
 }
 
+/// At most this many of our sticky events are pushed to a server that joins a room.
+const STICKY_PUSH_MAX: usize = 500;
+
 impl Federation {
     // ------------------------------------------------------------------ transactions
 
@@ -755,12 +758,131 @@ impl Federation {
         if !soft_failed {
             services.notify_room_event(&pdu, persisted.stream_ordering);
             services.rtc_on_event(&pdu);
+            self.push_sticky_to_joining_server(&room_id, &pdu).await;
+            if delta_applied && pdu.is_state() {
+                self.recheck_soft_failed_sticky(&room_id).await;
+            }
         }
         Ok(if soft_failed {
             Outcome::SoftFailed
         } else {
             Outcome::Accepted
         })
+    }
+
+    /// After the room's state changed: soft-failed sticky events that are still sticky and
+    /// pass against the current state now are accepted after all, and reach clients as if they
+    /// had just arrived (MSC4354). Once accepted, an event is never soft-failed afterwards.
+    pub(crate) async fn recheck_soft_failed_sticky(&self, room_id: &RoomId) {
+        let store = &self.services.store;
+        let candidates = match store
+            .soft_failed_sticky_events(room_id, asaroton_store::now_ts() + 1000)
+            .await
+        {
+            Ok(c) if c.is_empty() => return,
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(error = %e, %room_id, "soft-failed sticky events: lookup failed");
+                return;
+            }
+        };
+        let rules = match store.get_room(room_id).await {
+            Ok(Some(room)) => match room_version::rules(&room.room_version) {
+                Ok(r) => r,
+                Err(_) => return,
+            },
+            _ => return,
+        };
+        let current = match self.current_state_pdus(room_id).await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(error = %e, %room_id, "soft-failed sticky events: no current state");
+                return;
+            }
+        };
+        for ev in candidates {
+            if auth::check_against_state(&ev.pdu, &rules, &current).is_err() {
+                continue;
+            }
+            match store.accept_soft_failed_sticky(&ev).await {
+                Ok(Some(stream_ordering)) => {
+                    tracing::info!(event_id = %ev.event_id(), %room_id, "a soft-failed sticky event passes now and is accepted");
+                    self.services.notify_room_event(&ev.pdu, stream_ordering);
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::warn!(error = %e, event_id = %ev.event_id(), "accepting a soft-failed sticky event failed");
+                }
+            }
+        }
+    }
+
+    /// When `pdu` is the join of the first member of another server, send that server our own
+    /// sticky events in the room that are still sticky, oldest first (MSC4354: a server that
+    /// joins gets them pushed, as the room's history does not reach it by itself).
+    async fn push_sticky_to_joining_server(&self, room_id: &RoomId, pdu: &Pdu) {
+        if pdu.event_type() != &ruma::events::TimelineEventType::RoomMember {
+            return;
+        }
+        let Some(joiner) = pdu
+            .state_key()
+            .and_then(|k| ruma::OwnedUserId::try_from(k).ok())
+        else {
+            return;
+        };
+        let server = joiner.server_name().to_owned();
+        let joined = serde_json::from_str::<Value>(pdu.content().get())
+            .ok()
+            .and_then(|c| c.get("membership")?.as_str().map(|m| m == "join"))
+            .unwrap_or(false);
+        if !joined || server == self.services.config.server_name {
+            return;
+        }
+        let store = &self.services.store;
+        let first_of_its_server = match store.members(room_id, Some("join")).await {
+            Ok(members) => {
+                members
+                    .iter()
+                    .filter(|m| m.user_id.server_name() == server)
+                    .count()
+                    == 1
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "sticky events for a joining server: members failed");
+                return;
+            }
+        };
+        if !first_of_its_server {
+            return;
+        }
+        let ours: Vec<OwnedEventId> = match store
+            .sticky_events(
+                room_id,
+                asaroton_store::now_ts() + 1000,
+                i64::MIN,
+                i64::MAX,
+                STICKY_PUSH_MAX,
+            )
+            .await
+        {
+            Ok(events) => events
+                .into_iter()
+                .filter(|e| e.pdu.sender().server_name() == self.services.config.server_name)
+                .map(|e| e.event_id().to_owned())
+                .collect(),
+            Err(e) => {
+                tracing::warn!(error = %e, "sticky events for a joining server failed");
+                return;
+            }
+        };
+        if ours.is_empty() {
+            return;
+        }
+        tracing::debug!(%room_id, %server, count = ours.len(), "pushing sticky events to a joining server");
+        let fed = self.self_arc();
+        for event_id in &ours {
+            fed.queue_pdu(vec![server.clone()], event_id).await;
+        }
     }
 
     /// Look up an event in the in-memory cache or the store (blocking-free: the cache is
@@ -1822,6 +1944,7 @@ pub fn stored_from(
         soft_failed: false,
         outlier: false,
         redacted: false,
+        received_ts: asaroton_store::now_ts(),
     }
 }
 

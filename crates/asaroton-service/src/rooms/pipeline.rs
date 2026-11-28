@@ -30,6 +30,8 @@ pub struct LocalEvent {
     pub redacts: Option<OwnedEventId>,
     /// Appservices may set the timestamp (`ts` massaging).
     pub origin_server_ts: Option<MilliSecondsSinceUnixEpoch>,
+    /// Sent as a sticky event (MSC4354).
+    pub sticky: Option<asaroton_core::sticky::Sticky>,
 }
 
 impl LocalEvent {
@@ -46,6 +48,7 @@ impl LocalEvent {
             content: CanonicalJsonObject::new(),
             redacts: None,
             origin_server_ts: None,
+            sticky: None,
         }
     }
 
@@ -334,6 +337,9 @@ impl Services {
         if let Some(ts) = ev.origin_server_ts {
             builder = builder.origin_server_ts(ts);
         }
+        if let Some(sticky) = ev.sticky {
+            builder = builder.sticky(sticky);
+        }
         let is_create = ev.event_type == TimelineEventType::RoomCreate;
         if !(is_create && rules.room_id_format == ruma::room_version_rules::RoomIdFormatVersion::V2)
         {
@@ -469,6 +475,7 @@ impl Services {
             soft_failed: false,
             outlier: false,
             redacted: false,
+            received_ts: asaroton_store::now_ts(),
         })
     }
 

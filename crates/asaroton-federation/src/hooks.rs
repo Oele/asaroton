@@ -21,6 +21,10 @@ pub struct Hooks(pub Arc<Federation>);
 impl FederationHooks for Hooks {
     async fn on_new_event(&self, pdu: &Pdu) {
         let fed = &self.0;
+        // A local state change may let soft-failed sticky events in (MSC4354).
+        if pdu.is_state() {
+            fed.recheck_soft_failed_sticky(pdu.room_id()).await;
+        }
         let servers = match fed.services.store.servers_in_room(pdu.room_id()).await {
             Ok(s) => s,
             Err(e) => {

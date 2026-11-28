@@ -15,6 +15,37 @@ pub struct RelationsPage {
     pub prev_batch: Option<StreamToken>,
 }
 
+/// An event in client format with what `unsigned` says about it at `now`: its `age`, and for
+/// a sticky event that has not expired yet the time it stays sticky (MSC4354), under the name
+/// that goes with its marker. Every client-facing rendering of a stored event starts here.
+pub fn client_json(ev: &StoredEvent, now: i64) -> Value {
+    let mut v = ev.pdu.to_client_json();
+    let origin_ts = i64::try_from(u64::from(ev.pdu.origin_server_ts().0)).unwrap_or(0);
+    if let Some(u) = v.as_object_mut().and_then(|o| {
+        o.entry("unsigned")
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+    }) {
+        u.insert("age".into(), json!(now.saturating_sub(origin_ts)));
+        if let Some((sticky, left)) = sticky_left(ev, now) {
+            u.insert(sticky.marker.remaining_key().into(), json!(left));
+        }
+    }
+    v
+}
+
+/// For a sticky event (MSC4354) that has not expired at `now`: its stickiness and the
+/// milliseconds it has left. A state event or a soft-failed one is never sticky.
+pub fn sticky_left(ev: &StoredEvent, now: i64) -> Option<(asaroton_core::sticky::Sticky, i64)> {
+    if ev.pdu.state_key().is_some() || ev.soft_failed || ev.pdu.rejected() {
+        return None;
+    }
+    let sticky = asaroton_core::sticky::Sticky::of_canonical(ev.pdu.raw())?;
+    let origin_ts = i64::try_from(u64::from(ev.pdu.origin_server_ts().0)).unwrap_or(0);
+    let left = sticky.expires_at(origin_ts, ev.received_ts) - now;
+    (left > 0).then_some((sticky, left))
+}
+
 impl Services {
     /// Events relating to `event_id`, paged by stream token.
     #[allow(clippy::too_many_arguments)]
@@ -184,18 +215,7 @@ impl Services {
 
     /// Client-format JSON with `unsigned.age`, without aggregations.
     pub fn client_event_plain(&self, ev: &StoredEvent) -> Value {
-        let mut v = ev.pdu.to_client_json();
-        let now = asaroton_store::now_ts();
-        let age =
-            now.saturating_sub(i64::try_from(u64::from(ev.pdu.origin_server_ts().0)).unwrap_or(0));
-        if let Some(u) = v.as_object_mut().and_then(|o| {
-            o.entry("unsigned")
-                .or_insert_with(|| json!({}))
-                .as_object_mut()
-        }) {
-            u.insert("age".into(), json!(age));
-        }
-        v
+        client_json(ev, asaroton_store::now_ts())
     }
 
     /// Client-format JSON with `unsigned.age` and bundled aggregations.

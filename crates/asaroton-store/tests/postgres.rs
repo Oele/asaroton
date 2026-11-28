@@ -1804,3 +1804,133 @@ fn write_in_a_task(
             .unwrap()
     })
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn sticky_events_are_noted_capped_per_sender_and_forgotten_once_expired(pool: PgPool) {
+    use asaroton_core::sticky::{MAX_STICKY_MS, Sticky, StickyMarker};
+    let store = PostgresStore::from_pool(pool.clone());
+    let d = build_room(&store, &RoomVersionId::V10).await;
+    let room_id = d.room_id.clone().unwrap();
+    let group = d.state_group.unwrap();
+    let now = now_ts();
+    let sticky_message = |body: &str, sender: &str, ts: i64, marker| {
+        PduBuilder::new(
+            OwnedUserId::try_from(sender).unwrap(),
+            TimelineEventType::RoomMessage,
+        )
+        .room_id(room_id.clone())
+        .content(&json!({ "msgtype": "m.text", "body": body }))
+        .unwrap()
+        .prev_events(d.last.clone())
+        .auth_events(d.events.iter().take(3).map(|e| e.event_id().to_owned()))
+        .depth(UInt::from(50u32))
+        .origin_server_ts(asaroton_core::ruma::MilliSecondsSinceUnixEpoch(
+            UInt::try_from(ts).unwrap(),
+        ))
+        .sticky(Sticky {
+            marker,
+            duration_ms: 600_000,
+        })
+        .build(&d.rules, &d.key, server_name!("example.org"))
+        .unwrap()
+    };
+    let persist = |pdu: Pdu, soft_failed: bool| {
+        let store = store.clone();
+        async move {
+            store
+                .persist_event(PersistEvent {
+                    pdu,
+                    state: EventState::Existing(group),
+                    soft_failed,
+                    backfilled: false,
+                    stream_ordering: None,
+                    current_state_delta: None,
+                    forward_extremities: None,
+                })
+                .await
+                .unwrap()
+                .stream_ordering
+        }
+    };
+
+    // Noted, with its marker kept, and returned while it is sticky.
+    let first = sticky_message("one", "@bob:example.org", now, StickyMarker::Unstable);
+    let at = persist(first.clone(), false).await;
+    let found = store
+        .sticky_events(&room_id, now, 0, i64::MAX, 100)
+        .await
+        .unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].event_id(), first.event_id());
+    assert_eq!(found[0].stream_ordering, at);
+    assert!(found[0].received_ts >= now);
+    assert_eq!(
+        Sticky::of_canonical(found[0].pdu.raw()).map(|s| s.marker),
+        Some(StickyMarker::Unstable)
+    );
+    // Not past its expiry, nor outside the asked window.
+    assert!(
+        store
+            .sticky_events(&room_id, now + 600_001, 0, i64::MAX, 100)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        store
+            .sticky_events(&room_id, now, at, i64::MAX, 100)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    // Sent two hours ago: expired on arrival, so never noted. Soft-failed: not noted either.
+    let old = sticky_message(
+        "old",
+        "@bob:example.org",
+        now - 2 * MAX_STICKY_MS,
+        StickyMarker::Stable,
+    );
+    persist(old, false).await;
+    let failed = sticky_message("failed", "@carol:example.org", now, StickyMarker::Stable);
+    persist(failed, true).await;
+    assert_eq!(
+        store
+            .sticky_events(&room_id, now, 0, i64::MAX, 100)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // One sender keeps at most 50; the oldest go first. Another sender is not affected.
+    let mut bobs = vec![first.event_id().to_owned()];
+    for i in 0..55 {
+        let pdu = sticky_message(
+            &format!("m{i}"),
+            "@bob:example.org",
+            now,
+            StickyMarker::Stable,
+        );
+        bobs.push(pdu.event_id().to_owned());
+        persist(pdu, false).await;
+    }
+    let dave = sticky_message("dave's", "@dave:example.org", now, StickyMarker::Stable);
+    persist(dave.clone(), false).await;
+    let all = store
+        .sticky_events(&room_id, now, 0, i64::MAX, 1000)
+        .await
+        .unwrap();
+    let kept: Vec<_> = all
+        .iter()
+        .filter(|e| e.pdu.sender().as_str() == "@bob:example.org")
+        .map(|e| e.event_id().to_owned())
+        .collect();
+    assert_eq!(kept, bobs[bobs.len() - 50..].to_vec());
+    assert!(all.iter().any(|e| e.event_id() == dave.event_id()));
+
+    // Expired rows are forgotten by the prune: Bob's 50, Dave's, and Carol's soft-failed one
+    // (kept apart, to be checked again when the room's state changes).
+    assert_eq!(store.prune_expired_sticky(now + 600_001).await.unwrap(), 52);
+    assert_eq!(store.prune_expired_sticky(now + 600_001).await.unwrap(), 0);
+}

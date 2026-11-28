@@ -217,6 +217,13 @@ pub struct SyncRequest {
     pub use_state_after: bool,
 }
 
+/// At most this many sticky events per room in one sync. With at most 50 per sender a room
+/// rarely comes near it; MSC4354 recommends 100 per response but allows spreading them over
+/// several, which a stateless /sync could only do by holding back its token.
+const STICKY_PER_SYNC: usize = 500;
+/// Sticky events with less time left than this are not handed out.
+const STICKY_MARGIN_MS: i64 = 1000;
+
 /// A room timeline/state delta.
 #[derive(Debug, Default)]
 pub struct RoomSync {
@@ -225,6 +232,8 @@ pub struct RoomSync {
     /// timeline, including those the timeline carries.
     pub state_after: Option<Vec<StoredEvent>>,
     pub timeline: Vec<StoredEvent>,
+    /// Unexpired sticky events (MSC4354) that the timeline does not carry, oldest first.
+    pub sticky: Vec<StoredEvent>,
     pub limited: bool,
     pub prev_batch: Option<String>,
     pub account_data: Vec<Value>,
@@ -893,6 +902,20 @@ impl Services {
         }
         room.timeline = events;
 
+        // Sticky events (MSC4354), for rooms the user is in: a first view of the room (initial
+        // sync, just joined, full state) gets all that are still sticky, an incremental one
+        // those that came in its window; minus what the timeline shows. History visibility and
+        // the room filter do not apply to them, only the de-duplication with the timeline.
+        if leave_at.is_none() {
+            let after = match since {
+                Some(s) if !full_state => s.events,
+                _ => i64::MIN,
+            };
+            room.sticky = self
+                .sticky_for_sync(room_id, after, upper, &room.timeline, ignored)
+                .await?;
+        }
+
         // State. A room the user is no longer in is frozen at the event that took them out,
         // and only someone who left as a member gets its state at all: after a declined
         // invite or a withdrawn knock the user was never in the room, and `leave_group` stays
@@ -973,7 +996,13 @@ impl Services {
         }
         state.retain(|e| filter.state_allows(e));
         if filter.lazy_load_members && !filter.include_redundant_members {
-            let senders: HashSet<&UserId> = room.timeline.iter().map(|e| e.pdu.sender()).collect();
+            // Senders of sticky events count as timeline senders (MSC4354).
+            let senders: HashSet<&UserId> = room
+                .timeline
+                .iter()
+                .chain(&room.sticky)
+                .map(|e| e.pdu.sender())
+                .collect();
             state.retain(|e| {
                 e.pdu.event_type() != &ruma::events::TimelineEventType::RoomMember
                     || e.pdu.state_key().is_some_and(|k| {
@@ -1009,6 +1038,7 @@ impl Services {
             if since.is_some()
                 && !full_state
                 && room.timeline.is_empty()
+                && room.sticky.is_empty()
                 && room.state.is_empty()
                 && room.ephemeral.is_empty()
             {
@@ -1072,6 +1102,7 @@ impl Services {
             && !full_state
             && leave_at.is_none()
             && room.timeline.is_empty()
+            && room.sticky.is_empty()
             && room.state.is_empty()
             && room.state_after.as_ref().is_none_or(Vec::is_empty)
             && room.ephemeral.is_empty();
@@ -1079,6 +1110,32 @@ impl Services {
             return Ok(None);
         }
         Ok(Some(room))
+    }
+
+    /// The room's sticky events in `(after, upto]` for a sync, minus the ones `timeline` shows
+    /// and those of ignored users. One that runs out within a second is left out, so every
+    /// event handed out still has time left when the client reads it.
+    async fn sticky_for_sync(
+        &self,
+        room_id: &RoomId,
+        after: i64,
+        upto: i64,
+        timeline: &[StoredEvent],
+        ignored: &HashSet<OwnedUserId>,
+    ) -> Result<Vec<StoredEvent>> {
+        let mut events = self
+            .store
+            .sticky_events(
+                room_id,
+                asaroton_store::now_ts() + STICKY_MARGIN_MS,
+                after,
+                upto,
+                STICKY_PER_SYNC,
+            )
+            .await?;
+        let shown: HashSet<&ruma::EventId> = timeline.iter().map(StoredEvent::event_id).collect();
+        events.retain(|e| !shown.contains(e.event_id()) && !ignored.contains(e.pdu.sender()));
+        Ok(events)
     }
 
     /// Presence events for the sync: everyone sharing a room (initial / newly joined rooms),

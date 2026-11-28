@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use asaroton_service::sliding_sync::{
     ExtensionScope, ExtensionsRequest, ListFilters, ListRequest, ProfilesRequest, RoomResult,
-    RoomSubscriptionRequest, ScopeRoom, SlidingSyncRequest, ToDeviceRequest,
+    RoomSubscriptionRequest, ScopeRoom, SlidingSyncRequest, StickyRequest, ToDeviceRequest,
 };
 use axum::{Json, response::IntoResponse};
 use ruma::api::client::sync::sync_events::msc4186;
@@ -32,16 +32,40 @@ fn limit(v: ruma::UInt) -> usize {
     usize::try_from(u64::from(v)).unwrap_or(usize::MAX)
 }
 
-/// The profiles extension (MSC4262) under its unstable name, read from the raw body: the ruma
-/// request type predates it. `lists` and `rooms` scope it like the other extensions (`*` for
-/// the subscribed rooms); `fields` names the profile fields, all of them when absent.
-fn profiles_request(raw: Option<&Value>) -> Option<ProfilesRequest> {
-    let p = raw?.get("extensions")?.get("org.matrix.msc4262.profiles")?;
-    if p.get("enabled").and_then(Value::as_bool) != Some(true) {
+/// The names the sticky events extension (MSC4480) goes by: the unstable one matrix-js-sdk
+/// uses, and the one the proposal will have once stable. The answer uses the name asked by.
+const STICKY_EXTENSIONS: [&str; 2] = ["org.matrix.msc4354.sticky_events", "sticky_events"];
+
+/// The sticky events extension from the raw body, and the name it was asked by. Both shapes
+/// are read: MSC4480's (`enabled`, `limit`, `lists`, `rooms`) and the older one matrix-js-sdk
+/// still sends, whose `since` is ignored (the connection's `pos` says what was delivered).
+fn sticky_request(raw: Option<&Value>) -> Option<(StickyRequest, &'static str)> {
+    let extensions = raw?.get("extensions")?;
+    let (name, x) = STICKY_EXTENSIONS
+        .iter()
+        .find_map(|n| extensions.get(*n).map(|x| (*n, x)))?;
+    if x.get("enabled").and_then(Value::as_bool) != Some(true) {
         return None;
     }
+    let limit = x
+        .get("limit")
+        .and_then(Value::as_u64)
+        .and_then(|l| usize::try_from(l).ok())
+        .unwrap_or(100);
+    Some((
+        StickyRequest {
+            scope: scope_from_raw(x),
+            limit,
+        },
+        name,
+    ))
+}
+
+/// An extension's `lists` and `rooms` from its raw JSON (`*` among `rooms` stands for the
+/// subscribed rooms).
+fn scope_from_raw(x: &Value) -> ExtensionScope {
     let strings = |key: &str| {
-        p.get(key).and_then(Value::as_array).map(|a| {
+        x.get(key).and_then(Value::as_array).map(|a| {
             a.iter()
                 .filter_map(Value::as_str)
                 .map(str::to_owned)
@@ -60,12 +84,29 @@ fn profiles_request(raw: Option<&Value>) -> Option<ProfilesRequest> {
             })
             .collect()
     });
+    ExtensionScope {
+        lists: strings("lists"),
+        rooms,
+    }
+}
+
+/// The profiles extension (MSC4262) under its unstable name, read from the raw body: the ruma
+/// request type predates it. `lists` and `rooms` scope it like the other extensions (`*` for
+/// the subscribed rooms); `fields` names the profile fields, all of them when absent.
+fn profiles_request(raw: Option<&Value>) -> Option<ProfilesRequest> {
+    let p = raw?.get("extensions")?.get("org.matrix.msc4262.profiles")?;
+    if p.get("enabled").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    let fields = p.get("fields").and_then(Value::as_array).map(|a| {
+        a.iter()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    });
     Some(ProfilesRequest {
-        scope: ExtensionScope {
-            lists: strings("lists"),
-            rooms,
-        },
-        fields: strings("fields"),
+        scope: scope_from_raw(p),
+        fields,
     })
 }
 
@@ -209,6 +250,7 @@ pub async fn sliding_sync(
         })
         .collect();
     let x = &b.extensions;
+    let sticky = sticky_request(req.json.as_ref());
     let extensions = ExtensionsRequest {
         to_device: x.to_device.enabled.then(|| ToDeviceRequest {
             since: x.to_device.since.clone(),
@@ -226,6 +268,7 @@ pub async fn sliding_sync(
             .enabled
             .then(|| x.thread_subscriptions.limit.map_or(100, limit)),
         profiles: profiles_request(req.json.as_ref()),
+        sticky: sticky.as_ref().map(|(s, _)| s.clone()),
     };
     let result = services
         .sliding_sync(SlidingSyncRequest {
@@ -301,6 +344,21 @@ pub async fn sliding_sync(
             "io.element.msc4308.thread_subscriptions".into(),
             super::thread_subscriptions::changes_json(t),
         );
+    }
+    if let Some((_, name)) = &sticky
+        && !ext.sticky.is_empty()
+    {
+        let rooms: Map<String, Value> = ext
+            .sticky
+            .iter()
+            .map(|(room, events)| {
+                (
+                    room.to_string(),
+                    json!({ "events": events.iter().map(client_event).collect::<Vec<_>>() }),
+                )
+            })
+            .collect();
+        extensions.insert((*name).into(), json!({ "rooms": rooms }));
     }
     if !ext.profiles.is_empty() {
         let users: Map<String, Value> = ext

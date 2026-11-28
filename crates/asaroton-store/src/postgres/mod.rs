@@ -251,11 +251,12 @@ pub(crate) struct EventRow {
     soft_failed: bool,
     outlier: bool,
     original_json: Option<String>,
+    received_ts: i64,
 }
 
 /// Column list for `EventRow` queries; `e` is the events alias, `r` the rooms alias.
 pub(crate) const EVENT_COLUMNS: &str = "e.stream_ordering, e.event_id, r.room_version, e.json, \
-     e.state_group, e.rejected, e.soft_failed, e.outlier, e.original_json";
+     e.state_group, e.rejected, e.soft_failed, e.outlier, e.original_json, e.received_ts";
 
 impl TryFrom<EventRow> for StoredEvent {
     type Error = Error;
@@ -275,6 +276,7 @@ impl TryFrom<EventRow> for StoredEvent {
             soft_failed: row.soft_failed,
             outlier: row.outlier,
             redacted: row.original_json.is_some(),
+            received_ts: row.received_ts,
         })
     }
 }
@@ -389,6 +391,10 @@ mod tests {
             (
                 22,
                 "a9e0f230e1b93e76ac4baa91195ff981d85684881772f4b0b04abe93e00658ece93fad57cc388c7e69d489e91f69b5f7",
+            ),
+            (
+                23,
+                "b360bee6506a3bb21e17140f55e47a70ff0947269a79f82665d690fa6b48838788cc45194d462bb5d18cd68970bb8c2d",
             ),
         ];
         let actual: Vec<(i64, String)> = MIGRATOR

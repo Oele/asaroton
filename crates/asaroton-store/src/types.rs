@@ -156,6 +156,8 @@ pub struct StoredEvent {
     /// Set once the event has been redacted: the redacted PDU is what `pdu` holds, and this
     /// is the original.
     pub redacted: bool,
+    /// When this server received the event (ms; for its own, when it made it).
+    pub received_ts: Ts,
 }
 
 /// An event waiting for auth events that could not be obtained when it arrived.
@@ -354,6 +356,8 @@ pub struct DelayedEvent {
     pub txn_id: Option<String>,
     /// How it ended, once it was sent or cancelled; `None` while it is pending.
     pub finalised: Option<DelayedEventFinalised>,
+    /// Sent as a sticky event (MSC4354) when it fires.
+    pub sticky: Option<asaroton_core::sticky::Sticky>,
 }
 
 /// How a delayed event ended (kept for a while after it was sent or cancelled).

@@ -427,3 +427,55 @@ fn a_redaction_served_to_clients_names_its_target_in_both_places() {
     assert_eq!(served["redacts"], json!(msg.event_id()));
     assert_eq!(served["content"]["redacts"], json!(msg.event_id()));
 }
+
+#[test]
+fn a_sticky_event_verifies_and_loses_its_marker_when_redacted() {
+    use asaroton_core::sticky::{Sticky, StickyMarker};
+    for marker in [StickyMarker::Stable, StickyMarker::Unstable] {
+        let room = build_room(&RoomVersionId::V12);
+        let server = server_name!("example.org");
+        let sticky = Sticky {
+            marker,
+            duration_ms: 600_000,
+        };
+        let pdu = PduBuilder::new(
+            user_id!("@alice:example.org").to_owned(),
+            TimelineEventType::RoomMessage,
+        )
+        .content(&json!({"msgtype": "m.text", "body": "here"}))
+        .unwrap()
+        .room_id(room.room_id.clone().unwrap())
+        .depth(UInt::from(room.depth + 1))
+        .prev_events(room.last.clone())
+        .sticky(sticky)
+        .build(&room.rules, &room.key, server)
+        .unwrap();
+        let raw: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(&serde_json::to_string(pdu.raw()).unwrap()).unwrap();
+        assert_eq!(raw[marker.key()], json!({"duration_ms": 600_000}));
+        assert_eq!(Sticky::of(&raw), Some(sticky));
+        // The marker is covered by the content hash...
+        let keys = room.key.public_key_map(server);
+        assert_eq!(
+            signing::verify_event(&keys, pdu.raw(), &room.rules).unwrap(),
+            Verified::All
+        );
+        let mut tampered = pdu.raw().clone();
+        tampered.insert(
+            marker.key().into(),
+            Sticky {
+                marker,
+                duration_ms: 1,
+            }
+            .marker_object(),
+        );
+        assert_eq!(
+            signing::verify_event(&keys, &tampered, &room.rules).unwrap(),
+            Verified::Signatures
+        );
+        // ...but not protected from redaction.
+        let redacted = redaction::redact_pdu(&pdu, &room.rules, None).unwrap();
+        assert_eq!(Sticky::of_canonical(redacted.raw()), None);
+        assert_eq!(redacted.event_id(), pdu.event_id());
+    }
+}

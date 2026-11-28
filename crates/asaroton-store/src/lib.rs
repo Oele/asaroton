@@ -239,6 +239,30 @@ pub trait RoomStore: Send + Sync {
 /// Events and state.
 #[async_trait]
 pub trait EventStore: Send + Sync {
+    /// The room's sticky events (MSC4354) that are still sticky at `now`, with a stream
+    /// position in `(after, upto]`, oldest first, at most `limit`.
+    async fn sticky_events(
+        &self,
+        room_id: &RoomId,
+        now: Ts,
+        after: StreamOrdering,
+        upto: StreamOrdering,
+        limit: usize,
+    ) -> Result<Vec<StoredEvent>>;
+    /// Forget the sticky events that expired before `now`; returns how many.
+    async fn prune_expired_sticky(&self, now: Ts) -> Result<u64>;
+    /// The room's soft-failed sticky events that are still within their sticky time, oldest
+    /// first: to be checked again against the room's current state.
+    async fn soft_failed_sticky_events(
+        &self,
+        room_id: &RoomId,
+        now: Ts,
+    ) -> Result<Vec<StoredEvent>>;
+    /// Accept a soft-failed sticky event after all (its authorising state changed): it gets a
+    /// fresh place in the stream, as a newly arrived event would. `None` when it was no longer
+    /// soft-failed.
+    async fn accept_soft_failed_sticky(&self, ev: &StoredEvent) -> Result<Option<StreamOrdering>>;
+
     /// Persist one event with everything that goes with it, atomically.
     async fn persist_event(&self, event: PersistEvent) -> Result<PersistedEvent>;
     /// Persist several events in one transaction, in order.

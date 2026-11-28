@@ -10,7 +10,7 @@ use ruma::{
     },
 };
 
-use crate::{Error, Pdu, Result, SigningKey, canonical};
+use crate::{Error, Pdu, Result, SigningKey, canonical, sticky::Sticky};
 
 /// A reference to a prior event: its ID plus, for room versions 1-2, its content hash.
 #[derive(Clone, Debug)]
@@ -44,6 +44,7 @@ pub struct PduBuilder {
     origin_server_ts: Option<MilliSecondsSinceUnixEpoch>,
     redacts: Option<OwnedEventId>,
     unsigned: Option<CanonicalJsonObject>,
+    sticky: Option<Sticky>,
 }
 
 impl PduBuilder {
@@ -61,6 +62,7 @@ impl PduBuilder {
             origin_server_ts: None,
             redacts: None,
             unsigned: None,
+            sticky: None,
         }
     }
 
@@ -127,6 +129,14 @@ impl PduBuilder {
         self
     }
 
+    /// Makes the event sticky. The marker is a top-level field, covered by the content hash but
+    /// not by the signature (redaction drops it).
+    #[must_use]
+    pub fn sticky(mut self, sticky: Sticky) -> Self {
+        self.sticky = Some(sticky);
+        self
+    }
+
     /// Unsigned data (not signed, not hashed).
     #[must_use]
     pub fn unsigned(mut self, unsigned: CanonicalJsonObject) -> Self {
@@ -186,6 +196,9 @@ impl PduBuilder {
         );
         obj.insert("prev_events".into(), event_refs(&self.prev_events, rules));
         obj.insert("auth_events".into(), event_refs(&self.auth_events, rules));
+        if let Some(sticky) = self.sticky {
+            obj.insert(sticky.marker.key().into(), sticky.marker_object());
+        }
         if let Some(unsigned) = self.unsigned {
             obj.insert("unsigned".into(), CanonicalJsonValue::Object(unsigned));
         }

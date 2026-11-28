@@ -49,6 +49,11 @@ async fn run(services: &Services) {
         }
         Err(e) => tracing::error!(error = %e, "pruning the federation outbox failed"),
     }
+    match services.store.prune_expired_sticky(now).await {
+        Ok(0) => {}
+        Ok(rows) => tracing::debug!(rows, "forgot expired sticky events"),
+        Err(e) => tracing::error!(error = %e, "pruning expired sticky events failed"),
+    }
 }
 
 fn millis(d: Duration) -> i64 {

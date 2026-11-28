@@ -96,7 +96,11 @@ impl Services {
         delay_ms: i64,
         txn_id: Option<&str>,
         api: DelayedApi,
+        sticky: Option<asaroton_core::sticky::Sticky>,
     ) -> Result<String> {
+        if sticky.is_some() && state_key.is_some() {
+            return Err(Error::invalid_param("A state event cannot be sticky."));
+        }
         if delay_ms <= 0 {
             return Err(Error::invalid_param(
                 "The delay must be a positive number of milliseconds.",
@@ -166,6 +170,7 @@ impl Services {
             running_since: now_ts(),
             txn_id: txn_id.map(ToOwned::to_owned),
             finalised: None,
+            sticky,
         };
         self.store.add_delayed_event(&ev).await?;
         self.delayed.wake.notify_one();
@@ -365,6 +370,7 @@ impl Services {
                     &ev.event_type,
                     ev.content,
                     None,
+                    ev.sticky,
                 )
                 .await
             }

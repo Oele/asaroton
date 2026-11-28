@@ -1,3 +1,4 @@
+use asaroton_core::sticky::{Sticky, StickyMarker};
 use async_trait::async_trait;
 use ruma::{DeviceId, RoomId, UserId};
 use sqlx::Row;
@@ -5,7 +6,7 @@ use sqlx::Row;
 use super::PostgresStore;
 use crate::{DelayedEvent, DelayedEventFinalised, DelayedEventStore, Error, Result, now_ts};
 
-const COLUMNS: &str = "delay_id, user_id, device_id, room_id, event_type, state_key, content, delay_ms, running_since, txn_id, finalised_ts, finalised_event_id, finalised_error";
+const COLUMNS: &str = "delay_id, user_id, device_id, room_id, event_type, state_key, content, delay_ms, running_since, txn_id, finalised_ts, finalised_event_id, finalised_error, sticky_marker, sticky_duration_ms";
 
 fn from_row(r: &sqlx::postgres::PgRow) -> Result<DelayedEvent> {
     let corrupt = |e: ruma::IdParseError| Error::Corrupt(e.to_string());
@@ -29,6 +30,20 @@ fn from_row(r: &sqlx::postgres::PgRow) -> Result<DelayedEvent> {
                 event_id: r.get("finalised_event_id"),
                 error: r.get("finalised_error"),
             }),
+        sticky: sticky_from_row(r),
+    })
+}
+
+fn sticky_from_row(r: &sqlx::postgres::PgRow) -> Option<Sticky> {
+    let marker = match r.get::<Option<String>, _>("sticky_marker")?.as_str() {
+        m if m == StickyMarker::Stable.key() => StickyMarker::Stable,
+        m if m == StickyMarker::Unstable.key() => StickyMarker::Unstable,
+        _ => return None,
+    };
+    let duration_ms = r.get::<Option<i64>, _>("sticky_duration_ms")?;
+    (duration_ms > 0).then_some(Sticky {
+        marker,
+        duration_ms,
     })
 }
 
@@ -37,8 +52,9 @@ impl DelayedEventStore for PostgresStore {
     async fn add_delayed_event(&self, ev: &DelayedEvent) -> Result<()> {
         sqlx::query(
             "INSERT INTO delayed_events (delay_id, user_id, device_id, room_id, event_type, state_key,
-                content, delay_ms, running_since, txn_id, created_ts)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+                content, delay_ms, running_since, txn_id, created_ts, sticky_marker,
+                sticky_duration_ms)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
         )
         .bind(&ev.delay_id)
         .bind(ev.user_id.as_str())
@@ -51,6 +67,8 @@ impl DelayedEventStore for PostgresStore {
         .bind(ev.running_since)
         .bind(&ev.txn_id)
         .bind(now_ts())
+        .bind(ev.sticky.map(|s| s.marker.key()))
+        .bind(ev.sticky.map(|s| s.duration_ms))
         .execute(&self.pool)
         .await?;
         Ok(())
