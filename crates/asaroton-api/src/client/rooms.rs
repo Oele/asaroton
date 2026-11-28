@@ -460,6 +460,12 @@ pub async fn members(
                 .await?
         }
     };
+    // With `at`, or for a member who left, these can be superseded member events: an erased
+    // account's go out as their redacted copies (no display name, no avatar).
+    let state = match services.state_copies_for(&sender.user_id, &state).await? {
+        Some(copies) => copies,
+        None => state,
+    };
     let want = req.body.membership.clone();
     let not = req.body.not_membership.clone();
     let mut chunk = Vec::new();

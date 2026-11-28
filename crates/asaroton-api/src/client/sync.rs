@@ -91,7 +91,12 @@ async fn events_json(
     let mut out = if aggregations {
         services.client_events(events, Some(user)).await?
     } else {
-        events.iter().map(client_event).collect()
+        // State sections: an erased account's superseded state as its redacted copy (a
+        // limited timeline's `state` can hold an old member event with the display name).
+        match services.state_copies_for(user, events).await? {
+            Some(copies) => copies.iter().map(client_event).collect(),
+            None => events.iter().map(client_event).collect(),
+        }
     };
     for (v, e) in out.iter_mut().zip(events) {
         if let Some(txn) = room.txn_ids.get(e.pdu.event_id())

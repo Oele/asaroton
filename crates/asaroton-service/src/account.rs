@@ -353,7 +353,7 @@ impl Services {
     }
 
     /// Deactivate an account: no more logins, all sessions gone, its delayed events cancelled,
-    /// its rooms left and its invites rejected. Every way of deactivating comes here (the
+    /// its rooms left, its invites rejected and its knocks withdrawn. Every way of deactivating comes here (the
     /// client API, the admin API, MAS).
     pub async fn deactivate(&self, user_id: &UserId) -> Result<()> {
         self.store.set_password_hash(user_id, None).await?;
@@ -372,7 +372,7 @@ impl Services {
                 .finalise_delayed_event(&ev.delay_id, now_ts())
                 .await?;
         }
-        // It leaves its rooms and rejects its invites (#108): the spec only asks that it can
+        // It leaves its rooms, rejects its invites and withdraws its knocks (#108): the spec only asks that it can
         // no longer log in, but a member that will never come back would stay in every member
         // list, and its server among the room's destinations, for good.
         for m in self.store.memberships_for_user(user_id).await? {
@@ -380,6 +380,7 @@ impl Services {
                 m.membership,
                 ruma::events::room::member::MembershipState::Join
                     | ruma::events::room::member::MembershipState::Invite
+                    | ruma::events::room::member::MembershipState::Knock
             ) && let Err(e) = self.leave_room(&m.room_id, user_id, None).await
             {
                 tracing::warn!(room_id = %m.room_id, error = %e, "deactivation: could not leave the room");

@@ -103,6 +103,7 @@ pub async fn run(config: Config, args: ImportArgs) -> anyhow::Result<()> {
     imp.state().await?;
     imp.memberships_and_extremities().await?;
     imp.receipts().await?;
+    imp.erased_users().await?;
     imp.media(args.media_src.as_deref()).await?;
     imp.server_keys().await?;
     if let Some(path) = &args.signing_key {
@@ -1153,6 +1154,40 @@ impl Importer {
             .execute(&self.dst).await?.rows_affected() as usize;
         }
         println!("receipts: {n}");
+        Ok(())
+    }
+
+    /// Synapse's erased accounts (`erase` on deactivation). Synapse keeps no time of the
+    /// erasure, so the position of the account's last imported event stands in for it: a
+    /// deactivation made it leave its rooms, so that is about when it was. Whoever joins after
+    /// it gets the redacted copies, as on Synapse; who was there before keeps the originals.
+    /// Without this an import would serve an erased account's events to new members again.
+    async fn erased_users(&self) -> anyhow::Result<()> {
+        let exists: bool =
+            sqlx::query_scalar("SELECT to_regclass('public.erased_users') IS NOT NULL")
+                .fetch_one(&self.src)
+                .await?;
+        if !exists {
+            println!("erased users: none (no table)");
+            return Ok(());
+        }
+        let users: Vec<String> = sqlx::query_scalar("SELECT user_id FROM erased_users")
+            .fetch_all(&self.src)
+            .await?;
+        let mut n = 0usize;
+        for user in &users {
+            n += sqlx::query(
+                "INSERT INTO erased_users (user_id, erased_at, erased_ts)
+                 SELECT $1, COALESCE(max(stream_ordering), 0), COALESCE(max(origin_server_ts), 0)
+                 FROM events WHERE sender = $1
+                 ON CONFLICT (user_id) DO NOTHING",
+            )
+            .bind(user)
+            .execute(&self.dst)
+            .await?
+            .rows_affected() as usize;
+        }
+        println!("erased users: {n}");
         Ok(())
     }
 

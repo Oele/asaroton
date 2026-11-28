@@ -119,6 +119,10 @@ def run(hs, peers):
     control = ok(st, r, "createRoom")["room_id"]
     join(b, control)
     dave_said = text(d, control, "dave keeps his words")
+    # A room of Bob's that Alice is in, for the state of a room left (at the end).
+    st, r = hs.req("POST", "/_matrix/client/v3/createRoom", {"preset": "public_chat", "room_version": "11"}, b)
+    third = ok(st, r, "createRoom")["room_id"]
+    join(a, third)
     # Dave has a delayed message pending and an invite open when he deactivates: deactivation
     # cancels the one (tracker #107) and rejects the other (#108).
     st, r = hs.req("PUT", f"/_matrix/client/v3/rooms/{q(control)}/send/m.room.message/later-{uuid.uuid4().hex}"
@@ -249,6 +253,38 @@ def run(hs, peers):
     check(not ({first, second} & set(hits_c)), f"/search does not find her messages for Carol ({len(hits_c)} hits)")
     check({first, second} <= set(hits_b), f"but does for Bob ({len(hits_b)} hits)")
 
+    # Rendered state: /members at the point just before Alice's leave has her join, with her
+    # display name: redacted for Carol (superseded state of an erased account, like in a
+    # timeline), as it was for Bob.
+    st, r = hs.req("GET", f"/_matrix/client/v3/rooms/{q(room)}/messages?dir=b&limit=100", None, c)
+    chrono = list(reversed(ok(st, r, "messages")["chunk"]))
+    leave_at = next((i for i, e in enumerate(chrono) if e.get("type") == "m.room.member"
+                     and e.get("state_key") == alice and e.get("content", {}).get("membership") == "leave"), None)
+    check(leave_at is not None, "Carol sees Alice's leave in the timeline")
+    limit = len(chrono) - (leave_at or 0)
+    flt = {"room": {"timeline": {"limit": limit}, "rooms": [room]}}
+    st, r = hs.req("GET", "/_matrix/client/v3/sync?timeout=0&filter=" + q(json.dumps(flt)), None, c)
+    joined = r.get("rooms", {}).get("join", {}).get(room, {})
+    tl = joined.get("timeline", {}).get("events", [])
+    starts_at_leave = bool(tl) and tl[0].get("state_key") == alice and tl[0].get("content", {}).get("membership") == "leave"
+    in_state = [e for e in joined.get("state", {}).get("events", []) if e.get("type") == "m.room.member" and e.get("state_key") == alice]
+    # The `state` section leaves out what the timeline has, so for a joined room it holds only
+    # current state (served as it is); superseded state shows up for a room left, below.
+    hers_anywhere = [e.get("content", {}) for e in joined.get("state", {}).get("events", []) + tl
+                     if e.get("type") == "m.room.member" and e.get("state_key") == alice]
+    check(starts_at_leave and not in_state and all("displayname" not in c_ for c_ in hers_anywhere),
+          f"a limited /sync starting at her leave carries no display name of hers ({hers_anywhere})")
+    prev_batch = joined.get("timeline", {}).get("prev_batch")
+    st, r = hs.req("GET", f"/_matrix/client/v3/rooms/{q(room)}/members?at={q(prev_batch or '')}", None, c)
+    hers = [e for e in r.get("chunk", []) if e.get("state_key") == alice]
+    check(st == 200 and len(hers) == 1 and hers[0].get("content", {}).get("membership") == "join"
+          and "displayname" not in hers[0].get("content", {}),
+          f"/members at that point: her join, redacted ({st}, {[e.get('content') for e in hers]})")
+    st, r = hs.req("GET", f"/_matrix/client/v3/rooms/{q(room)}/members?at={q(prev_batch or '')}", None, b)
+    hers = [e for e in r.get("chunk", []) if e.get("state_key") == alice]
+    check(hers and hers[0].get("content", {}).get("displayname") == "Alice Example",
+          f"but as it was for Bob ({[e.get('content') for e in hers]})")
+
     # ---------------------------------------------------------------- other servers
     print("-- other servers")
 
@@ -288,6 +324,24 @@ def run(hs, peers):
     check(body_of(event(c, control, dave_said)) == "dave keeps his words", "also with /event")
     st, pdu = fed_event(mock, dave_said)
     check(st == 200 and body_of(pdu) == "dave keeps his words", f"and so does a server that joined after ({st})")
+
+
+    # ---------------------------------------------------------------- a room left
+    # Carol joins Bob's room after the erasure and leaves; then Bob bans Alice, which
+    # supersedes her leave. Carol's sync of the left room has the state at her leave: Alice's
+    # leave, no longer current, so the redacted copy (it keeps `membership`, and carries the
+    # redaction clients tell a copy by).
+    print("-- the state of a room Carol left")
+    join(c, third)
+    ok(*hs.req("POST", f"/_matrix/client/v3/rooms/{q(third)}/leave", {}, c), "Carol leaves")
+    ok(*hs.req("POST", f"/_matrix/client/v3/rooms/{q(third)}/ban", {"user_id": alice}, b), "Bob bans Alice afterwards")
+    flt = {"room": {"include_leave": True, "timeline": {"limit": 1}, "rooms": [third]}}
+    st, r = hs.req("GET", "/_matrix/client/v3/sync?timeout=0&filter=" + q(json.dumps(flt)), None, c)
+    left = r.get("rooms", {}).get("leave", {}).get(third, {})
+    hers = [e for e in left.get("state", {}).get("events", []) if e.get("type") == "m.room.member" and e.get("state_key") == alice]
+    check(st == 200 and len(hers) == 1 and hers[0].get("content", {}).get("membership") == "leave"
+          and hers[0].get("unsigned", {}).get("redacted_because", {}).get("sender") == alice,
+          f"sync's `state` of the left room: Alice's superseded leave as its redacted copy ({hers})")
 
 
 if __name__ == "__main__":

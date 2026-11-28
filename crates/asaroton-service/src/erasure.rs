@@ -307,6 +307,22 @@ impl Services {
     }
 
     /// `events` as `viewer` is to get them (see [`ErasureCheck::copy_of`]).
+    /// State as `user` is to get it where it is rendered as it is (sync's `state` sections,
+    /// `/members`): an erased account's superseded state as its redacted copy, like in a
+    /// timeline; current state goes out unchanged anyway. `None` when nothing changes, so the
+    /// common case clones nothing.
+    pub async fn state_copies_for(
+        &self,
+        user: &UserId,
+        events: &[StoredEvent],
+    ) -> Result<Option<Vec<StoredEvent>>> {
+        let mut check = self.erasure_check(Some(Viewer::User(user))).await?;
+        if !check.concerns(events) {
+            return Ok(None);
+        }
+        Ok(Some(check.copies(self, events.to_vec()).await?))
+    }
+
     pub async fn erasure_copies(
         &self,
         viewer: Viewer<'_>,
