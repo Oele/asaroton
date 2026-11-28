@@ -16,6 +16,7 @@ pub mod rtc;
 pub mod rtc_signal;
 pub mod session;
 pub mod sliding_sync;
+pub mod sliding_sync_v4;
 pub mod synapse_admin;
 pub mod sync;
 pub mod thread_subscriptions;
@@ -478,6 +479,10 @@ pub fn routes(router: Router<AppState>) -> Router<AppState> {
             sliding_sync::PATH,
             axum::routing::post(sliding_sync_handler),
         )
+        .route(
+            sliding_sync_v4::PATH,
+            axum::routing::post(sliding_sync_v4_handler),
+        )
         // The code from a verification mail: given back by the client, or by the link.
         .route(
             asaroton_service::threepid::SUBMIT_PATH,
@@ -858,6 +863,11 @@ raw_json_handler!(
     sliding_sync_handler,
     ruma::api::client::sync::sync_events::msc4186::Request,
     sliding_sync::sliding_sync
+);
+raw_json_handler!(
+    sliding_sync_v4_handler,
+    ruma::api::client::sync::sync_events::v4::Request,
+    sliding_sync_v4::sliding_sync
 );
 raw_json_handler!(
     profile_field_get_handler,

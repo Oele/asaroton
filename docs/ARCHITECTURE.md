@@ -33,8 +33,8 @@ that request wherever it is. For a request that reads, that is what should happe
 that writes is a row of steps that belong together (store the event, move the room on to
 it, wake those who wait, send it on, note the transaction ID it answers), so the router runs
 every request that is not a `GET` in a task of its own: the connection waits for it and does
-not take it down. Sliding sync is the exception, a `POST` that waits for news and has to end
-with its client. A client that tries again while its first attempt is still running waits
+not take it down. Sliding sync (the unstable endpoint and `/v4/sync`) is the exception, a
+`POST` that waits for news and has to end with its client. A client that tries again while its first attempt is still running waits
 its turn where transaction IDs are compared, and gets the first attempt's answer; so does
 another server that sends a transaction again.
 

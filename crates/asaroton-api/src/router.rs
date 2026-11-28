@@ -199,10 +199,11 @@ async fn see_writes_through(
     }
 }
 
-/// Whether a request that is not a GET waits for news instead of bringing some: sliding sync,
-/// which is a POST that stays open until there is something to tell.
+/// Whether a request that is not a GET waits for news instead of bringing some: sliding sync
+/// (the unstable endpoint and `/v4/sync`), which is a POST that stays open until there is
+/// something to tell.
 fn waits_for_news(path: &str) -> bool {
-    path == crate::client::sliding_sync::PATH
+    path == crate::client::sliding_sync::PATH || path == crate::client::sliding_sync_v4::PATH
 }
 
 /// Answer CORS preflight requests and stamp CORS headers on every response.
@@ -290,6 +291,9 @@ mod tests {
             hang_up(http::Method::POST, sliding_sync, "?timeout=30000&pos=5").await,
             0
         );
+        // `/v4/sync` has its `pos` and `timeout` in the body.
+        let v4 = crate::client::sliding_sync_v4::PATH;
+        assert_eq!(hang_up(http::Method::POST, v4, "").await, 0);
     }
 
     #[tokio::test]

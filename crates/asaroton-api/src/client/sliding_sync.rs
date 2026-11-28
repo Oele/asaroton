@@ -4,9 +4,9 @@
 use std::time::Duration;
 
 use asaroton_service::sliding_sync::{
-    Dialect, ExtensionScope, ExtensionsRequest, ListFilters, ListRequest, ProfilesRequest,
-    RequiredStateSpec, RoomResult, RoomSubscriptionRequest, ScopeRoom, SlidingSyncRequest,
-    StickyRequest, ToDeviceRequest,
+    Dialect, ExtensionScope, ExtensionsRequest, ExtensionsResult, ListFilters, ListRequest,
+    ProfilesRequest, RequiredStateSpec, RoomResult, RoomSubscriptionRequest, ScopeRoom,
+    SlidingSyncRequest, SlidingSyncResult, StickyRequest, ToDeviceRequest,
 };
 use axum::{Json, response::IntoResponse};
 use ruma::api::client::sync::sync_events::msc4186;
@@ -18,7 +18,7 @@ use crate::{AppState, Result, Ruma, client::rooms::client_event};
 /// that are not a GET: this one waits for news and ends when its client hangs up.
 pub(crate) const PATH: &str = "/_matrix/client/unstable/org.matrix.simplified_msc3575/sync";
 
-fn room_type_filter(f: &ruma::directory::RoomTypeFilter) -> Option<String> {
+pub(crate) fn room_type_filter(f: &ruma::directory::RoomTypeFilter) -> Option<String> {
     match serde_json::to_value(f) {
         Ok(Value::String(s)) => Some(s),
         _ => None,
@@ -31,7 +31,7 @@ fn required_state(v: &[(ruma::events::StateEventType, String)]) -> RequiredState
     RequiredStateSpec::from_unstable(pairs.iter().map(|(t, k)| (t.as_str(), *k)))
 }
 
-fn limit(v: ruma::UInt) -> usize {
+pub(crate) fn limit(v: ruma::UInt) -> usize {
     usize::try_from(u64::from(v)).unwrap_or(usize::MAX)
 }
 
@@ -42,7 +42,7 @@ const STICKY_EXTENSIONS: [&str; 2] = ["org.matrix.msc4354.sticky_events", "stick
 /// The sticky events extension from the raw body, and the name it was asked by. Both shapes
 /// are read: MSC4480's (`enabled`, `limit`, `lists`, `rooms`) and the older one matrix-js-sdk
 /// still sends, whose `since` is ignored (the connection's `pos` says what was delivered).
-fn sticky_request(raw: Option<&Value>) -> Option<(StickyRequest, &'static str)> {
+pub(crate) fn sticky_request(raw: Option<&Value>) -> Option<(StickyRequest, &'static str)> {
     let extensions = raw?.get("extensions")?;
     let (name, x) = STICKY_EXTENSIONS
         .iter()
@@ -96,7 +96,7 @@ fn scope_from_raw(x: &Value) -> ExtensionScope {
 /// The profiles extension (MSC4262) under its unstable name, read from the raw body: the ruma
 /// request type predates it. `lists` and `rooms` scope it like the other extensions (`*` for
 /// the subscribed rooms); `fields` names the profile fields, all of them when absent.
-fn profiles_request(raw: Option<&Value>) -> Option<ProfilesRequest> {
+pub(crate) fn profiles_request(raw: Option<&Value>) -> Option<ProfilesRequest> {
     let p = raw?.get("extensions")?.get("org.matrix.msc4262.profiles")?;
     if p.get("enabled").and_then(Value::as_bool) != Some(true) {
         return None;
@@ -130,6 +130,54 @@ fn scope(
     }
 }
 
+/// A room's timeline in client format, with `unsigned.transaction_id` for the events this
+/// device sent and `unsigned.delay_id` for those sent from a delayed event.
+pub(crate) async fn timeline_json(
+    services: &AppState,
+    user: &ruma::UserId,
+    r: &RoomResult,
+) -> Result<Vec<Value>> {
+    let mut timeline = services.client_events(&r.timeline, Some(user)).await?;
+    for (ev, e) in timeline.iter_mut().zip(&r.timeline) {
+        if let Some(txn) = r.txn_ids.get(e.pdu.event_id())
+            && let Some(u) = ev.get_mut("unsigned").and_then(Value::as_object_mut)
+        {
+            u.insert("transaction_id".into(), json!(txn));
+        }
+        if let Some(delay_id) = r.delay_ids.get(e.pdu.event_id())
+            && let Some(u) = ev.get_mut("unsigned").and_then(Value::as_object_mut)
+        {
+            u.insert("delay_id".into(), json!(delay_id));
+        }
+    }
+    Ok(timeline)
+}
+
+/// A room's heroes, when it has any.
+pub(crate) fn heroes_json(r: &RoomResult) -> Option<Value> {
+    if r.heroes.is_empty() {
+        return None;
+    }
+    let heroes: Vec<Value> = r
+        .heroes
+        .iter()
+        .map(|h| {
+            // MSC4186 names these as profiles do. (`name` and `avatar` were the old sliding
+            // sync proxy's names; clients built on the Rust SDK do not read them and then
+            // call a direct chat "2 people".)
+            let mut o = json!({ "user_id": h.user_id });
+            if let Some(n) = &h.name {
+                o["displayname"] = json!(n);
+            }
+            if let Some(a) = &h.avatar {
+                o["avatar_url"] = json!(a);
+            }
+            o
+        })
+        .collect();
+    Some(Value::Array(heroes))
+}
+
 async fn room_json(services: &AppState, user: &ruma::UserId, r: &RoomResult) -> Result<Value> {
     let mut v = Map::new();
     if r.initial {
@@ -149,19 +197,7 @@ async fn room_json(services: &AppState, user: &ruma::UserId, r: &RoomResult) -> 
         v.insert("invite_state".into(), json!(inv));
         return Ok(Value::Object(v));
     }
-    let mut timeline = services.client_events(&r.timeline, Some(user)).await?;
-    for (ev, e) in timeline.iter_mut().zip(&r.timeline) {
-        if let Some(txn) = r.txn_ids.get(e.pdu.event_id())
-            && let Some(u) = ev.get_mut("unsigned").and_then(Value::as_object_mut)
-        {
-            u.insert("transaction_id".into(), json!(txn));
-        }
-        if let Some(delay_id) = r.delay_ids.get(e.pdu.event_id())
-            && let Some(u) = ev.get_mut("unsigned").and_then(Value::as_object_mut)
-        {
-            u.insert("delay_id".into(), json!(delay_id));
-        }
-    }
+    let timeline = timeline_json(services, user, r).await?;
     let required_state: Vec<Value> = r.required_state.iter().map(client_event).collect();
     v.insert("required_state".into(), Value::Array(required_state));
     v.insert("timeline".into(), Value::Array(timeline));
@@ -181,25 +217,8 @@ async fn room_json(services: &AppState, user: &ruma::UserId, r: &RoomResult) -> 
         "unread_notifications".into(),
         json!({ "notification_count": r.notification_count, "highlight_count": r.highlight_count }),
     );
-    if !r.heroes.is_empty() {
-        let heroes: Vec<Value> = r
-            .heroes
-            .iter()
-            .map(|h| {
-                // MSC4186 names these as profiles do. (`name` and `avatar` were the old
-                // sliding sync proxy's names; clients built on the Rust SDK do not read them
-                // and then call a direct chat "2 people".)
-                let mut o = json!({ "user_id": h.user_id });
-                if let Some(n) = &h.name {
-                    o["displayname"] = json!(n);
-                }
-                if let Some(a) = &h.avatar {
-                    o["avatar_url"] = json!(a);
-                }
-                o
-            })
-            .collect();
-        v.insert("heroes".into(), Value::Array(heroes));
+    if let Some(heroes) = heroes_json(r) {
+        v.insert("heroes".into(), heroes);
     }
     Ok(Value::Object(v))
 }
@@ -299,12 +318,31 @@ pub async fn sliding_sync(
             room_json(&services, &sender.user_id, r).await?,
         );
     }
-    let lists: Map<String, Value> = result
+    let mut body = json!({
+        "pos": result.pos,
+        "lists": lists_json(&result),
+        "rooms": rooms,
+        "extensions": extensions_json(&result.extensions, sticky.as_ref().map(|(_, name)| *name)),
+    });
+    if let Some(txn) = &b.txn_id {
+        body["txn_id"] = json!(txn);
+    }
+    let mut resp = Json(body).into_response();
+    crate::extract::add_cors(resp.headers_mut());
+    Ok(resp)
+}
+
+/// The answer's `lists`: each list's `count`.
+pub(crate) fn lists_json(result: &SlidingSyncResult) -> Map<String, Value> {
+    result
         .lists
         .iter()
         .map(|(name, count)| (name.clone(), json!({ "count": count })))
-        .collect();
-    let ext = &result.extensions;
+        .collect()
+}
+
+/// The answer's `extensions`. `sticky` is the name the sticky events extension was asked by.
+pub(crate) fn extensions_json(ext: &ExtensionsResult, sticky: Option<&str>) -> Map<String, Value> {
     let mut extensions = Map::new();
     if let Some((next_batch, events)) = &ext.to_device {
         extensions.insert(
@@ -350,7 +388,7 @@ pub async fn sliding_sync(
             super::thread_subscriptions::changes_json(t),
         );
     }
-    if let Some((_, name)) = &sticky
+    if let Some(name) = sticky
         && !ext.sticky.is_empty()
     {
         let rooms: Map<String, Value> = ext
@@ -363,7 +401,7 @@ pub async fn sliding_sync(
                 )
             })
             .collect();
-        extensions.insert((*name).into(), json!({ "rooms": rooms }));
+        extensions.insert(name.into(), json!({ "rooms": rooms }));
     }
     if !ext.profiles.is_empty() {
         let users: Map<String, Value> = ext
@@ -382,16 +420,5 @@ pub async fn sliding_sync(
             json!({ "users": users }),
         );
     }
-    let mut body = json!({
-        "pos": result.pos,
-        "lists": lists,
-        "rooms": rooms,
-        "extensions": extensions,
-    });
-    if let Some(txn) = &b.txn_id {
-        body["txn_id"] = json!(txn);
-    }
-    let mut resp = Json(body).into_response();
-    crate::extract::add_cors(resp.headers_mut());
-    Ok(resp)
+    extensions
 }
