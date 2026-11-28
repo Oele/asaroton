@@ -612,6 +612,8 @@ async fn local_user(services: &Services, user_id: &OwnedUserId) -> Result<asarot
             is_admin: false,
             is_guest: false,
             is_deactivated: false,
+            is_locked: false,
+            is_suspended: false,
             appservice_id: None,
             created_ts: 0,
             profile_fields: v

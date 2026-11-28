@@ -66,6 +66,10 @@ pub trait UserStore: Send + Sync {
     /// Every erased account with the events stream position of its erasure.
     async fn erased_users(&self) -> Result<Vec<(OwnedUserId, StreamOrdering)>>;
     async fn set_admin(&self, user_id: &UserId, admin: bool) -> Result<()>;
+    /// Locks or unlocks an account (Matrix v1.12).
+    async fn set_locked(&self, user_id: &UserId, locked: bool) -> Result<()>;
+    /// Suspends an account or lifts its suspension (Matrix v1.13).
+    async fn set_suspended(&self, user_id: &UserId, suspended: bool) -> Result<()>;
     /// A page of users (admin listing) and the total matching count.
     async fn list_users(&self, query: &UserListQuery) -> Result<(Vec<User>, i64)>;
 

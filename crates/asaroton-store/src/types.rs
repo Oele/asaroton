@@ -32,6 +32,12 @@ pub struct User {
     pub is_admin: bool,
     pub is_guest: bool,
     pub is_deactivated: bool,
+    /// Locked by a server admin (Matrix v1.12): every client request but a logout is refused
+    /// with `M_USER_LOCKED`, and the sessions stay.
+    pub is_locked: bool,
+    /// Suspended by a server admin (Matrix v1.13): the account can read but not act towards
+    /// others (`M_USER_SUSPENDED`).
+    pub is_suspended: bool,
     pub appservice_id: Option<String>,
     pub created_ts: Ts,
     /// Custom profile fields (anything besides `displayname` and `avatar_url`).

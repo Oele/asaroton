@@ -356,6 +356,74 @@ async fn users_devices_tokens(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn account_lock_and_suspension_flags(pool: PgPool) {
+    let store = PostgresStore::from_pool(pool);
+    let alice = user_id!("@alice:example.org");
+    let created = store
+        .create_user(NewUser {
+            user_id: alice.to_owned(),
+            password_hash: None,
+            display_name: None,
+            is_admin: false,
+            is_guest: false,
+            appservice_id: None,
+        })
+        .await
+        .unwrap();
+    assert!(!created.is_locked && !created.is_suspended);
+    let flags = |u: asaroton_store::User| (u.is_locked, u.is_suspended);
+    assert_eq!(
+        flags(store.get_user(alice).await.unwrap().unwrap()),
+        (false, false),
+        "a new account is neither locked nor suspended"
+    );
+
+    store.set_locked(alice, true).await.unwrap();
+    assert_eq!(
+        flags(store.get_user(alice).await.unwrap().unwrap()),
+        (true, false)
+    );
+    store.set_suspended(alice, true).await.unwrap();
+    assert_eq!(
+        flags(store.get_user(alice).await.unwrap().unwrap()),
+        (true, true),
+        "the two are independent"
+    );
+    store.set_locked(alice, false).await.unwrap();
+    assert_eq!(
+        flags(store.get_user(alice).await.unwrap().unwrap()),
+        (false, true)
+    );
+    let (listed, _) = store
+        .list_users(&asaroton_store::UserListQuery {
+            name: None,
+            include_guests: true,
+            include_deactivated: true,
+            admins_only: false,
+            limit: 10,
+            offset: 0,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        listed.into_iter().map(flags).collect::<Vec<_>>(),
+        [(false, true)],
+        "the admin listing reads them too"
+    );
+    store.set_suspended(alice, false).await.unwrap();
+    assert_eq!(
+        flags(store.get_user(alice).await.unwrap().unwrap()),
+        (false, false)
+    );
+
+    // No account: nothing to change, and no row appears.
+    let nobody = user_id!("@nobody:example.org");
+    store.set_locked(nobody, true).await.unwrap();
+    store.set_suspended(nobody, true).await.unwrap();
+    assert!(store.get_user(nobody).await.unwrap().is_none());
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn persists_rooms_and_state(pool: PgPool) {
     let store = PostgresStore::from_pool(pool);
     for version in [

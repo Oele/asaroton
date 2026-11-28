@@ -17,6 +17,8 @@ struct UserRow {
     is_admin: bool,
     is_guest: bool,
     is_deactivated: bool,
+    is_locked: bool,
+    is_suspended: bool,
     appservice_id: Option<String>,
     created_ts: i64,
     profile_fields: serde_json::Value,
@@ -32,6 +34,8 @@ impl TryFrom<UserRow> for User {
             is_admin: r.is_admin,
             is_guest: r.is_guest,
             is_deactivated: r.is_deactivated,
+            is_locked: r.is_locked,
+            is_suspended: r.is_suspended,
             appservice_id: r.appservice_id,
             created_ts: r.created_ts,
             profile_fields: match r.profile_fields {
@@ -98,7 +102,7 @@ impl TryFrom<TokenRow> for AccessToken {
     }
 }
 
-const USER_COLUMNS: &str = "user_id, display_name, avatar_url, is_admin, is_guest, is_deactivated, appservice_id, created_ts, profile_fields";
+const USER_COLUMNS: &str = "user_id, display_name, avatar_url, is_admin, is_guest, is_deactivated, is_locked, is_suspended, appservice_id, created_ts, profile_fields";
 const DEVICE_COLUMNS: &str = "user_id, device_id, display_name, created_ts, last_seen_ts, last_seen_ip, last_seen_user_agent";
 const TOKEN_COLUMNS: &str =
     "token, user_id, device_id, created_ts, expires_ts, refresh_token, puppets_user_id";
@@ -138,6 +142,8 @@ impl UserStore for PostgresStore {
             is_admin: user.is_admin,
             is_guest: user.is_guest,
             is_deactivated: false,
+            is_locked: false,
+            is_suspended: false,
             appservice_id: user.appservice_id,
             created_ts: now,
             profile_fields: serde_json::Map::new(),
@@ -365,6 +371,24 @@ impl UserStore for PostgresStore {
         sqlx::query("UPDATE users SET is_admin = $2 WHERE user_id = $1")
             .bind(user_id.as_str())
             .bind(admin)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn set_locked(&self, user_id: &UserId, locked: bool) -> Result<()> {
+        sqlx::query("UPDATE users SET is_locked = $2 WHERE user_id = $1")
+            .bind(user_id.as_str())
+            .bind(locked)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn set_suspended(&self, user_id: &UserId, suspended: bool) -> Result<()> {
+        sqlx::query("UPDATE users SET is_suspended = $2 WHERE user_id = $1")
+            .bind(user_id.as_str())
+            .bind(suspended)
             .execute(&self.pool)
             .await?;
         Ok(())
