@@ -3,8 +3,13 @@
 Forbidden") or an error page is not the page the user linked, so there is no preview, not one
 titled after the error. An image that answers with an error is not stored as the preview image.
 
+A page larger than the server reads (1 MB of HTML) is previewed from its beginning, where the
+title and the og: tags are, not refused. A page that cannot be fetched is a 502, and the log
+names the site's host and the reason, not the URL.
+
 The lab: a small web server on localhost (allowed to the server for this test) with an article,
-a page refused with 406, a redirect to that refusal, and an article whose image is missing.
+a page refused with 406, a redirect to that refusal, an article whose image is missing, and a
+3 MB article.
 
 Needs what scripts/fedlab.py needs. Takes a few seconds.
 
@@ -49,6 +54,9 @@ class Site(BaseHTTPRequestHandler):
             self.answer(302, b"", headers={"Location": "/waf"})
         elif self.path == "/glaze":
             self.answer(200, article("Glazes for beginners", "/gone.png"))
+        elif self.path == "/big":
+            head = article("A very long catalogue", "/kiln.png").replace(b"</body></html>", b"")
+            self.answer(200, head + b"<p>" + b"clay " * (3 * 1024 * 1024 // 5) + b"</p></body></html>")
         else:
             self.answer(404, b"<html><head><title>404 Not Found</title></head></html>")
 
@@ -75,6 +83,15 @@ def run(hs, peers):
     st, r = preview("/glaze")
     check(st == 200 and r.get("og:title") == "Glazes for beginners" and "og:image" not in r,
           f"an article whose image is missing keeps its title, without an image ({st}, {r.get('og:image')})")
+    st, r = preview("/big")
+    check(st == 200 and r.get("og:title") == "A very long catalogue",
+          f"a 3 MB page is previewed from its beginning ({st}, {r.get('og:title') or r})")
+    dead = free_port()
+    url = urllib.parse.quote(f"http://127.0.0.1:{dead}/secret-path?token=abc", safe="")
+    st, r = hs.req("GET", f"/_matrix/client/v1/media/preview_url?url={url}", None, a)
+    lines = hs.log_lines("URL preview failed")
+    check(st == 502 and lines and "127.0.0.1" in lines[-1] and "secret-path" not in lines[-1] and "token" not in lines[-1],
+          f"an unreachable site: 502, logged by host without the URL ({st}, {lines[-1][-200:] if lines else None})")
 
 
 if __name__ == "__main__":

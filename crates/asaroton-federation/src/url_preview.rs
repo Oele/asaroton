@@ -14,7 +14,22 @@ const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
 
 impl Federation {
     /// Build the OpenGraph-style preview object for a URL.
+    /// The preview of `url`. A page that cannot be fetched is an error (502 to the client),
+    /// logged with the site's host and the reason, never the full URL: the weekly look at the
+    /// logs sees which causes are common.
     pub async fn preview_url(&self, url: &str) -> Result<Value> {
+        let result = self.fetch_preview(url).await;
+        if let Err(e) = &result {
+            let host = reqwest::Url::parse(url)
+                .ok()
+                .and_then(|u| u.host_str().map(str::to_owned))
+                .unwrap_or_else(|| "?".to_owned());
+            tracing::warn!(%host, error = %e, "URL preview failed");
+        }
+        result
+    }
+
+    async fn fetch_preview(&self, url: &str) -> Result<Value> {
         // The URL is the user's choice, and so is everything the page points at: all of it
         // goes through the client that only reaches public addresses.
         let parsed = self.outbound.parse(url)?;
@@ -24,7 +39,11 @@ impl Federation {
                 .header(http::header::USER_AGENT, "asaroton-url-preview")
         };
         let resp = get(parsed.clone()).send().await.map_err(|e| {
-            Error::Protocol(format!("fetching URL: {}", crate::client::error_chain(&e)))
+            // Without the URL: it is the user's, and goes into the log.
+            Error::Protocol(format!(
+                "fetching the page: {}",
+                crate::client::error_chain(&e.without_url())
+            ))
         })?;
         if is_a_gate(&parsed, resp.url()) {
             // The site did not show us the page: it sent us to another site to be let in
@@ -64,7 +83,9 @@ impl Federation {
             }
             return Ok(Value::Object(og));
         }
-        let bytes = read_limited(resp, MAX_HTML_BYTES).await?;
+        // What a preview needs sits in the page's head: a page larger than the limit is read
+        // up to it, not refused.
+        let bytes = read_prefix(resp, MAX_HTML_BYTES).await?;
         let html = String::from_utf8_lossy(&bytes);
         for (prop, content) in meta_tags(&html) {
             if prop.starts_with("og:") && !og.contains_key(&prop) {
@@ -190,6 +211,23 @@ pub(crate) fn plain_http() -> reqwest::Client {
         .user_agent("asaroton-url-preview")
         .build()
         .unwrap_or_default()
+}
+
+/// The first `max` bytes of a body (all of it when shorter); the rest is not read.
+async fn read_prefix(resp: reqwest::Response, max: usize) -> Result<Vec<u8>> {
+    use futures::StreamExt;
+    let mut out = Vec::new();
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| Error::Protocol(format!("reading the page: {e}")))?;
+        let room = max - out.len();
+        if chunk.len() >= room {
+            out.extend_from_slice(&chunk[..room]);
+            break;
+        }
+        out.extend_from_slice(&chunk);
+    }
+    Ok(out)
 }
 
 async fn read_limited(resp: reqwest::Response, max: usize) -> Result<Vec<u8>> {
