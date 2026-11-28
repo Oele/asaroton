@@ -24,6 +24,8 @@ Then she deactivates with `erase: true`, and:
   gets the original.
 - Nothing is sent: no redaction events, here or to the mock servers.
 - Dave deactivates without `erase`: Carol, joining afterwards, sees his messages as they were.
+- Deactivation itself (tracker #107, #108): Alice and Dave leave their rooms, Dave's open
+  invite is rejected, and the delayed message he scheduled before is cancelled, never sent.
 
 Needs what scripts/fedlab.py needs. Takes a few seconds.
 
@@ -117,6 +119,14 @@ def run(hs, peers):
     control = ok(st, r, "createRoom")["room_id"]
     join(b, control)
     dave_said = text(d, control, "dave keeps his words")
+    # Dave has a delayed message pending and an invite open when he deactivates: deactivation
+    # cancels the one (tracker #107) and rejects the other (#108).
+    st, r = hs.req("PUT", f"/_matrix/client/v3/rooms/{q(control)}/send/m.room.message/later-{uuid.uuid4().hex}"
+                   "?org.matrix.msc4140.delay=4000", {"msgtype": "m.text", "body": "dave from beyond"}, d)
+    check(st == 200 and r.get("delay_id"), f"Dave schedules a delayed message ({st}, {r})")
+    delay_id = r.get("delay_id")
+    st, r = hs.req("POST", "/_matrix/client/v3/createRoom", {"preset": "private_chat", "invite": [dave]}, b)
+    invited = ok(st, r, "createRoom with Dave invited")["room_id"]
 
     def alice_rows():
         return {t: query(f"SELECT count(*) FROM {t} WHERE user_id = '{alice}'")[0][0]
@@ -132,6 +142,7 @@ def run(hs, peers):
     check(st == 200 and r.get("id_server_unbind_result") == "success", f"deactivation with erase: true succeeds ({st}, {r})")
     st, r = deactivate(d, "dave", erase=False)
     check(st == 200, f"deactivation without erase succeeds ({st}, {r})")
+    deactivated_at = time.time()
     erased = query("SELECT user_id FROM erased_users")
     check(erased == [[alice]], f"Alice is marked as erased, Dave is not ({erased})")
 
@@ -140,6 +151,17 @@ def run(hs, peers):
           f"Alice's account data, push rules, filters, email addresses and pushers are gone ({after})")
     st, r = hs.req("GET", f"/_matrix/client/v3/profile/{q(alice)}", None, b)
     check("displayname" not in r and "avatar_url" not in r and "m.tz" not in r, f"her profile is empty ({st}, {r})")
+
+    def membership(room_id, user):
+        st, r = hs.req("GET", f"/_matrix/client/v3/rooms/{q(room_id)}/state/m.room.member/{q(user)}", None, b)
+        return r.get("membership") if st == 200 else st
+    m = (membership(room, alice), membership(control, dave), membership(invited, dave))
+    check(m == ("leave", "leave", "leave"), f"deactivation left Alice's and Dave's rooms and rejected Dave's invite ({m})")
+    pending = query(f"SELECT count(*) FROM delayed_events WHERE delay_id = '{delay_id}' AND finalised_ts IS NULL")
+    check(pending == [["0"]], f"Dave's delayed message is no longer pending ({pending})")
+    time.sleep(max(0.0, deactivated_at + 6 - time.time()))
+    bodies = [body_of(e) for e in messages(b, control).values()]
+    check("dave from beyond" not in bodies, f"and it is not sent when its time comes ({bodies})")
 
     # Carol joins both rooms after the erasure; so does a user of the mock server.
     join(c, room)

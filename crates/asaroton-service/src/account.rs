@@ -352,14 +352,40 @@ impl Services {
         Ok(())
     }
 
-    /// Deactivate an account: no more logins, all sessions gone.
+    /// Deactivate an account: no more logins, all sessions gone, its delayed events cancelled,
+    /// its rooms left and its invites rejected. Every way of deactivating comes here (the
+    /// client API, the admin API, MAS).
     pub async fn deactivate(&self, user_id: &UserId) -> Result<()> {
         self.store.set_password_hash(user_id, None).await?;
         // A deactivated account keeps no email addresses: they can go to another account.
         self.store.delete_user_threepids(user_id).await?;
         self.store.set_deactivated(user_id, true).await?;
         self.auth.forget_user(user_id);
-        self.logout_all(user_id).await
+        self.logout_all(user_id).await?;
+        // An account that can no longer log in sends nothing more: not a delayed event it
+        // scheduled before (tracker #107). A call's delayed leave is not needed either: the
+        // leave from the room below ends the call membership as well. Finalising is the same
+        // step a cancel takes, so a delayed event the worker is sending right now is not
+        // cancelled under it.
+        for ev in self.store.delayed_events_for_user(user_id).await? {
+            self.store
+                .finalise_delayed_event(&ev.delay_id, now_ts())
+                .await?;
+        }
+        // It leaves its rooms and rejects its invites (#108): the spec only asks that it can
+        // no longer log in, but a member that will never come back would stay in every member
+        // list, and its server among the room's destinations, for good.
+        for m in self.store.memberships_for_user(user_id).await? {
+            if matches!(
+                m.membership,
+                ruma::events::room::member::MembershipState::Join
+                    | ruma::events::room::member::MembershipState::Invite
+            ) && let Err(e) = self.leave_room(&m.room_id, user_id, None).await
+            {
+                tracing::warn!(room_id = %m.room_id, error = %e, "deactivation: could not leave the room");
+            }
+        }
+        Ok(())
     }
 
     /// Devices of a user, newest last.

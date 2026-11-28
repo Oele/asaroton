@@ -298,15 +298,6 @@ pub async fn deactivate(
             if erase {
                 services.erase_account(&id).await?;
             }
-            for m in services.store.memberships_for_user(&id).await? {
-                if matches!(
-                    m.membership,
-                    ruma::events::room::member::MembershipState::Join
-                        | ruma::events::room::member::MembershipState::Invite
-                ) {
-                    let _ = services.leave_room(&m.room_id, &id, None).await;
-                }
-            }
             Ok((
                 StatusCode::OK,
                 json!({ "id_server_unbind_result": "success" }),
