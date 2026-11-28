@@ -36,6 +36,10 @@ def b64(raw, urlsafe=False):
     return enc(raw).decode().rstrip("=")
 
 
+def unb64(text):
+    return base64.b64decode(text + "=" * (-len(text) % 4))
+
+
 def free_port():
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -59,7 +63,14 @@ SHARED_SECRET = "fedlab-shared-secret"
 
 
 class Peer:
-    """A mock homeserver. Answers /send from a script (then 200) and records what arrived."""
+    """A mock homeserver. Answers /send from a script (then 200) and records what arrived.
+
+    It can also be a room's policy server (Matrix v1.18): `POST /_matrix/policy/v1/sign` is
+    recorded in `policy_requests` and answered as `policy_mode` says. None (the default): no
+    policy server, 404 M_UNRECOGNIZED like any other unknown endpoint. "sign": signs with
+    `policy_key`, a key of its own apart from the server key. "refuse": 400 with
+    `policy_refusal`. "wrong": a well-formed signature by some other key. "hang": answers
+    only after `policy_hang` seconds."""
 
     def __init__(self, label):
         self.label = label
@@ -71,6 +82,11 @@ class Peer:
         self.routes = []
         # Extra PUT/POST routes: (compiled regex on the path, function(handler, match, body)).
         self.put_routes = []
+        self.policy_key = SigningKey.generate()
+        self.policy_mode = None
+        self.policy_refusal = {"errcode": "M_FORBIDDEN", "error": f"{label} does not like this event"}
+        self.policy_hang = 8
+        self.policy_requests = []
         peer = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -81,13 +97,16 @@ class Peer:
 
             def answer(self, status, body, headers=None, content_type="application/json"):
                 raw = body if isinstance(body, bytes) else json.dumps(body).encode()
-                self.send_response(status)
-                self.send_header("Content-Type", content_type)
-                self.send_header("Content-Length", str(len(raw)))
-                for k, v in (headers or {}).items():
-                    self.send_header(k, v)
-                self.end_headers()
-                self.wfile.write(raw)
+                try:
+                    self.send_response(status)
+                    self.send_header("Content-Type", content_type)
+                    self.send_header("Content-Length", str(len(raw)))
+                    for k, v in (headers or {}).items():
+                        self.send_header(k, v)
+                    self.end_headers()
+                    self.wfile.write(raw)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass  # the other side gave up waiting
 
             def do_GET(self):
                 if self.path.startswith("/_matrix/key/v2/server"):
@@ -104,6 +123,8 @@ class Peer:
                     m = pattern.match(self.path)
                     if m:
                         return serve(self, m, json.loads(raw or b"{}"))
+                if self.command == "POST" and self.path.split("?")[0] == "/_matrix/policy/v1/sign":
+                    return peer.policy_answer(self, json.loads(raw or b"{}"))
                 m = re.match(r"/_matrix/federation/v1/send/([^/?]+)", self.path)
                 if not m:
                     return self.answer(404, {"errcode": "M_UNRECOGNIZED", "error": "mock"})
@@ -147,6 +168,50 @@ class Peer:
     def count(self):
         with self.lock:
             return len(self.received)
+
+    # -- acting as a policy server
+
+    def policy_public_key(self):
+        return b64(bytes(self.policy_key.verify_key))
+
+    def policy_content(self):
+        """The content of an `m.room.policy` event naming this server."""
+        return {"via": self.name, "public_keys": {"ed25519": self.policy_public_key()}}
+
+    def policy_sign(self, event, key=None):
+        """This server's policy signature for a room version 11 event."""
+        return b64((key or self.policy_key).sign(canonical(redacted_v11(event))).signature)
+
+    def policy_signed(self, event):
+        """Whether `event` carries a valid policy signature of this server."""
+        sig = event.get("signatures", {}).get(self.name, {}).get("ed25519:policy_server")
+        if not sig:
+            return False
+        try:
+            self.policy_key.verify_key.verify(canonical(redacted_v11(event)), unb64(sig))
+            return True
+        except Exception:
+            return False
+
+    def policy_answer(self, handler, pdu):
+        with self.lock:
+            self.policy_requests.append(
+                {"t": time.time(), "auth": handler.headers.get("Authorization", ""), "path": handler.path, "pdu": pdu}
+            )
+            mode = self.policy_mode
+        if mode is None:
+            return handler.answer(404, {"errcode": "M_UNRECOGNIZED", "error": "mock"})
+        if mode == "refuse":
+            return handler.answer(400, self.policy_refusal)
+        if mode == "hang":
+            time.sleep(self.policy_hang)
+        key = SigningKey.generate() if mode == "wrong" else self.policy_key
+        handler.answer(200, {self.name: {"ed25519:policy_server": self.policy_sign(pdu, key)}})
+
+    def policy_asked(self, since=0):
+        """The PDUs this server was asked to sign."""
+        with self.lock:
+            return [r["pdu"] for r in self.policy_requests[since:]]
 
     def requests(self, since=0):
         with self.lock:
@@ -321,6 +386,18 @@ KEPT_CONTENT = {
     "m.room.power_levels": ("ban", "events", "events_default", "invite", "kick", "redact", "state_default", "users", "users_default"),
 }
 KEPT_TOP = ("type", "room_id", "sender", "state_key", "content", "hashes", "depth", "prev_events", "auth_events", "origin_server_ts")
+# The full room version 11 list (KEPT_CONTENT has what the scripts sign with signed_event).
+KEPT_CONTENT_V11 = {**KEPT_CONTENT, "m.room.history_visibility": ("history_visibility",), "m.room.redaction": ("redacts",)}
+
+
+def redacted_v11(event):
+    """What room version 11 keeps of an event when redacting it, without `signatures` and
+    `unsigned`: the form that is signed."""
+    redacted = {k: v for k, v in event.items() if k in KEPT_TOP}
+    keep = KEPT_CONTENT_V11.get(event["type"], ())
+    content = event.get("content", {})
+    redacted["content"] = content if keep is None else {k: v for k, v in content.items() if k in keep}
+    return redacted
 
 
 def signed_event(server, key, key_id, event):
