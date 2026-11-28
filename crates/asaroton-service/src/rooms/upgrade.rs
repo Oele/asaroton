@@ -52,6 +52,11 @@ impl Services {
             }))?,
         )?;
         let tombstone_id = tombstone.event_id().to_owned();
+        // A room with a policy server (Matrix v1.18): it has to sign the tombstone, which is
+        // sent only after the successor exists. Asking about this first form beforehand
+        // keeps a policy server that refuses or cannot be reached from leaving a successor
+        // behind without a tombstone pointing at it.
+        self.policy_sign_local(&ctx, tombstone).await?;
 
         // --- the successor --------------------------------------------------------------
         let new_rules =

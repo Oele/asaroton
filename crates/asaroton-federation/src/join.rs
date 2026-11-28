@@ -198,14 +198,19 @@ impl Federation {
         )
         .await?;
         // We tell the other servers about our join ourselves (the resident server does not
-        // forward events from other servers).
+        // forward events from other servers). In a room with a policy server, only with its
+        // signature (Matrix v1.18): we could not ask before the join, not knowing the room.
         let servers: Vec<OwnedServerName> = services
             .remote_servers_in_room(room_id)
             .await?
             .into_iter()
             .filter(|s| s != server)
             .collect();
-        if !servers.is_empty() {
+        if !servers.is_empty()
+            && self
+                .policy_signed_for_fan_out(room_id, &join_event_id, &rules)
+                .await?
+        {
             self.self_arc().queue_pdu(servers, &join_event_id).await;
         }
         services.after_user_joined(user_id, room_id).await;
@@ -491,6 +496,7 @@ impl Federation {
                 Some((key, e.pdu))
             })
             .collect();
+        let policy = asaroton_core::policy::in_use(&current);
         let mut restored: Vec<OwnedEventId> = Vec::new();
         let mut placed = 0usize;
         let mut kept = 0usize;
@@ -526,7 +532,13 @@ impl Federation {
                     .iter()
                     .all(|id| lookup(id).is_some_and(|cited| !cited.rejected()))
                 && auth::check_against_auth_events(p, rules, lookup).is_ok()
-                && auth::check_against_state(p, rules, &current).is_ok();
+                && auth::check_against_state(p, rules, &current).is_ok()
+                // In a room with a policy server, only with its signature (not asked for
+                // here: these events never got as far as being asked about).
+                && policy.as_ref().is_none_or(|policy| {
+                    !asaroton_core::policy::needs_signature(p.event_type(), p.state_key())
+                        || policy.signed(p.raw(), rules)
+                });
             if !passes {
                 kept += 1;
                 continue;
@@ -870,7 +882,7 @@ impl Federation {
             return Err(Error::Rejected("not a knock event".into()));
         }
         let pdu = self
-            .policy_sign_for_resident_endpoint(room_id, pdu, &rules)
+            .policy_sign_for_resident_endpoint(origin, room_id, pdu, &rules)
             .await?;
         if let (_, crate::receive::Outcome::Rejected(reason)) = self
             .handle_incoming_pdu(
@@ -1053,7 +1065,7 @@ impl Federation {
             return Err(Error::Rejected("not a valid join event".into()));
         }
         let pdu = self
-            .policy_sign_for_resident_endpoint(room_id, pdu, &rules)
+            .policy_sign_for_resident_endpoint(origin, room_id, pdu, &rules)
             .await?;
 
         if let (_, crate::receive::Outcome::Rejected(reason)) = self
@@ -1164,7 +1176,7 @@ impl Federation {
             return Err(Error::Rejected("not a valid leave event".into()));
         }
         let pdu = self
-            .policy_sign_for_resident_endpoint(room_id, pdu, &rules)
+            .policy_sign_for_resident_endpoint(origin, room_id, pdu, &rules)
             .await?;
         if let (_, crate::receive::Outcome::Rejected(reason)) = self
             .handle_incoming_pdu(

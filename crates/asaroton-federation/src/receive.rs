@@ -701,6 +701,7 @@ impl Federation {
         // valid signature, asked for once when missing or invalid; without one it is
         // soft-failed. A signature given now is kept with the event.
         let mut pdu = pdu;
+        let mut newly_signed_by = None;
         if !soft_failed
             && !backfilled
             && let Some(policy) = asaroton_core::policy::in_use(&current)
@@ -710,7 +711,12 @@ impl Federation {
                 .policy_signed(Some(&policy), pdu.clone(), rules)
                 .await
             {
-                Ok(signed) => pdu = signed,
+                Ok((signed, new)) => {
+                    pdu = signed;
+                    if new {
+                        newly_signed_by = Some(policy.via().to_owned());
+                    }
+                }
                 Err(refusal) => {
                     tracing::info!(event_id = %pdu.event_id(), %room_id, via = %policy.via(), %refusal, "soft-failing an event without a valid policy server signature");
                     soft_failed = true;
@@ -769,6 +775,11 @@ impl Federation {
             .await?;
         self.event_cache
             .insert(pdu.event_id().to_owned(), pdu.clone());
+        // An event stored before (an outlier, or one rejected then) keeps its old JSON above:
+        // the signature goes in by itself.
+        if let Some(via) = newly_signed_by {
+            self.keep_policy_signature(&pdu, &via).await?;
+        }
 
         if pdu.event_type() == &ruma::events::TimelineEventType::RoomRedaction && !soft_failed {
             self.apply_remote_redaction(&room_id, &pdu, rules, &current)

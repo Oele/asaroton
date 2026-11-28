@@ -64,14 +64,16 @@ impl PolicyRefusal {
         }
     }
 
-    /// What our own federation API answers to `POST /_matrix/policy/v1/sign`: this server is
-    /// no policy server. Given without a request when a room names this server.
+    /// For a room that names this server as its policy server, which it is not: given
+    /// without a request. (Other servers asking get 404 `M_UNRECOGNIZED` from our federation
+    /// API; a client is better told what is wrong.)
     pub fn not_a_policy_server() -> Self {
         Self::Answered {
-            status: http::StatusCode::NOT_FOUND,
+            status: http::StatusCode::FORBIDDEN,
             body: serde_json::json!({
-                "errcode": "M_UNRECOGNIZED",
-                "error": "This server is not a policy server.",
+                "errcode": "M_FORBIDDEN",
+                "error": "This room names this server as its policy server, and it is not one, \
+                          so no event can be sent until the room's m.room.policy is changed.",
             }),
         }
     }
@@ -81,18 +83,18 @@ impl Services {
     /// `pdu` with a valid signature of `policy`'s server: as it is when it carries one (or
     /// is the room's `m.room.policy` event, which needs none), otherwise with the signature
     /// the policy server gives when asked, once. `policy` is `None` for a room that uses no
-    /// policy server, and then nothing happens.
+    /// policy server, and then nothing happens. The flag says whether the signature is new.
     pub async fn policy_signed(
         &self,
         policy: Option<&RoomPolicy>,
         pdu: Pdu,
         rules: &RoomVersionRules,
-    ) -> std::result::Result<Pdu, PolicyRefusal> {
+    ) -> std::result::Result<(Pdu, bool), PolicyRefusal> {
         let Some(policy) = policy else {
-            return Ok(pdu);
+            return Ok((pdu, false));
         };
         if !needs_signature(pdu.event_type(), pdu.state_key()) || policy.signed(pdu.raw(), rules) {
-            return Ok(pdu);
+            return Ok((pdu, false));
         }
         let via = policy.via();
         if via == self.config.server_name {
@@ -101,7 +103,7 @@ impl Services {
         let signature = self.federation().policy_sign(via, &pdu).await?;
         let signed = pdu.with_signature(via.as_str(), KEY_ID, signature);
         if policy.signed(signed.raw(), rules) {
-            Ok(signed)
+            Ok((signed, true))
         } else {
             Err(PolicyRefusal::BadSignature)
         }
@@ -116,6 +118,7 @@ impl Services {
         let event_id = pdu.event_id().to_owned();
         self.policy_signed(Some(&policy), pdu, &ctx.rules)
             .await
+            .map(|(signed, _)| signed)
             .map_err(|refusal| {
                 tracing::info!(room_id = %ctx.room_id, %event_id, via = %policy.via(), %refusal, "the policy server did not sign a local event; it is not sent");
                 refusal.into_error(policy.via())

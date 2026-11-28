@@ -531,6 +531,84 @@ async fn persists_rooms_and_state(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn a_signature_added_later_is_kept_with_the_stored_event(pool: PgPool) {
+    // A policy server's signature, obtained after the event was first stored.
+    let store = PostgresStore::from_pool(pool.clone());
+    let d = build_room(&store, &RoomVersionId::V11).await;
+    let (hello, hi) = (&d.events[4], &d.events[6]);
+    let redacted = redaction::redact_pdu(hi, &d.rules, None).unwrap();
+    store.redact_event(hi.event_id(), &redacted).await.unwrap();
+
+    for ev in [hello, hi] {
+        for _ in 0..2 {
+            store
+                .add_event_signature(
+                    ev.event_id(),
+                    "ps.example.org",
+                    "ed25519:policy_server",
+                    "c2ln",
+                )
+                .await
+                .unwrap();
+        }
+    }
+    let signatures = |json: &str| -> serde_json::Value {
+        serde_json::from_str::<serde_json::Value>(json).unwrap()["signatures"].clone()
+    };
+    let (json, original): (String, Option<String>) =
+        sqlx::query_as("SELECT json, original_json FROM events WHERE event_id = $1")
+            .bind(hello.event_id().as_str())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(original.is_none());
+    let sigs = signatures(&json);
+    assert_eq!(sigs["ps.example.org"]["ed25519:policy_server"], "c2ln");
+    assert!(
+        sigs["example.org"].is_object(),
+        "the sender's signature stays"
+    );
+    let stored = store.get_event(hello.event_id()).await.unwrap().unwrap();
+    assert_eq!(stored.pdu.event_id(), hello.event_id());
+    assert_eq!(
+        stored.pdu.content().get(),
+        hello.content().get(),
+        "the content is untouched"
+    );
+
+    // A redacted event gets it in both copies, and stays redacted.
+    let (json, original): (String, Option<String>) =
+        sqlx::query_as("SELECT json, original_json FROM events WHERE event_id = $1")
+            .bind(hi.event_id().as_str())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        signatures(&json)["ps.example.org"]["ed25519:policy_server"],
+        "c2ln"
+    );
+    assert_eq!(
+        signatures(&original.unwrap())["ps.example.org"]["ed25519:policy_server"],
+        "c2ln"
+    );
+    assert!(
+        store
+            .get_event(hi.event_id())
+            .await
+            .unwrap()
+            .unwrap()
+            .redacted
+    );
+
+    // An event that is not there: nothing happens.
+    let unknown: OwnedEventId = "$unknown".try_into().unwrap();
+    store
+        .add_event_signature(&unknown, "ps.example.org", "ed25519:policy_server", "c2ln")
+        .await
+        .unwrap();
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn tracks_missing_prev_events_and_outliers(pool: PgPool) {
     let store = PostgresStore::from_pool(pool);
     let d = build_room(&store, &RoomVersionId::V10).await;

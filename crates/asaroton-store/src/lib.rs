@@ -371,6 +371,16 @@ pub trait EventStore: Send + Sync {
     async fn redact_event(&self, event_id: &EventId, redacted: &Pdu) -> Result<()>;
     /// Mark an outlier as a normal event with the given state group.
     async fn de_outlier(&self, event_id: &EventId, state_group: StateGroupId) -> Result<()>;
+    /// Add a signature to a stored event, beside the others (in its pre-redaction copy too):
+    /// a policy server's signature obtained after the event was first stored. Signatures
+    /// take no part in the event ID or the hashes. Nothing happens for an unknown event.
+    async fn add_event_signature(
+        &self,
+        event_id: &EventId,
+        server: &str,
+        key_id: &str,
+        signature: &str,
+    ) -> Result<()>;
 
     async fn forward_extremities(&self, room_id: &RoomId) -> Result<Vec<OwnedEventId>>;
     async fn set_forward_extremities(

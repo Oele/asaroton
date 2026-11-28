@@ -68,8 +68,8 @@ class Peer:
     It can also be a room's policy server (Matrix v1.18): `POST /_matrix/policy/v1/sign` is
     recorded in `policy_requests` and answered as `policy_mode` says. None (the default): no
     policy server, 404 M_UNRECOGNIZED like any other unknown endpoint. "sign": signs with
-    `policy_key`, a key of its own apart from the server key. "refuse": 400 with
-    `policy_refusal`. "wrong": a well-formed signature by some other key. "hang": answers
+    `policy_key`, a key of its own apart from the server key. "refuse": answers
+    `policy_refusal` with `policy_refusal_status` (400). "wrong": a well-formed signature by some other key. "hang": answers
     only after `policy_hang` seconds."""
 
     def __init__(self, label):
@@ -85,6 +85,7 @@ class Peer:
         self.policy_key = SigningKey.generate()
         self.policy_mode = None
         self.policy_refusal = {"errcode": "M_FORBIDDEN", "error": f"{label} does not like this event"}
+        self.policy_refusal_status = 400
         self.policy_hang = 8
         self.policy_requests = []
         peer = self
@@ -202,7 +203,7 @@ class Peer:
         if mode is None:
             return handler.answer(404, {"errcode": "M_UNRECOGNIZED", "error": "mock"})
         if mode == "refuse":
-            return handler.answer(400, self.policy_refusal)
+            return handler.answer(self.policy_refusal_status, self.policy_refusal)
         if mode == "hang":
             time.sleep(self.policy_hang)
         key = SigningKey.generate() if mode == "wrong" else self.policy_key

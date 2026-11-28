@@ -24,6 +24,30 @@ fn takes_a_place_in_the_stream(ev: &PersistEvent) -> bool {
     !ev.backfilled && (!matches!(ev.state, EventState::Outlier) || ev.current_state_delta.is_some())
 }
 
+/// Put `signature` into an event's `signatures` under `server` and `key_id`.
+fn add_signature(
+    event: &mut ruma::CanonicalJsonObject,
+    server: &str,
+    key_id: &str,
+    signature: &str,
+) {
+    use ruma::{CanonicalJsonObject, CanonicalJsonValue};
+    let by_server = event
+        .entry("signatures".to_owned())
+        .or_insert_with(|| CanonicalJsonValue::Object(CanonicalJsonObject::new()));
+    if let CanonicalJsonValue::Object(by_server) = by_server {
+        let keys = by_server
+            .entry(server.to_owned())
+            .or_insert_with(|| CanonicalJsonValue::Object(CanonicalJsonObject::new()));
+        if let CanonicalJsonValue::Object(keys) = keys {
+            keys.insert(
+                key_id.to_owned(),
+                CanonicalJsonValue::String(signature.to_owned()),
+            );
+        }
+    }
+}
+
 async fn persist_one(
     conn: &mut PgConnection,
     ev: PersistEvent,
@@ -1411,6 +1435,51 @@ impl EventStore for PostgresStore {
         .await?
         .rows_affected();
         Ok((usize::try_from(written).unwrap_or(0), Some(last_so)))
+    }
+
+    async fn add_event_signature(
+        &self,
+        event_id: &EventId,
+        server: &str,
+        key_id: &str,
+        signature: &str,
+    ) -> Result<()> {
+        let mut tx = self.begin().await?;
+        let Some(row) =
+            sqlx::query("SELECT json, original_json FROM events WHERE event_id = $1 FOR UPDATE")
+                .bind(event_id.as_str())
+                .fetch_optional(&mut *tx)
+                .await?
+        else {
+            return Ok(());
+        };
+        let signed = |json: &str| -> Result<Option<String>> {
+            let mut obj = asaroton_core::canonical::from_str(json)
+                .map_err(|e| Error::Corrupt(format!("event {event_id}: {e}")))?;
+            let before = asaroton_core::canonical::to_string(&obj);
+            add_signature(&mut obj, server, key_id, signature);
+            let after = asaroton_core::canonical::to_string(&obj);
+            Ok((after != before).then_some(after))
+        };
+        let json = signed(row.get::<&str, _>("json"))?;
+        let original = row
+            .get::<Option<&str>, _>("original_json")
+            .map(signed)
+            .transpose()?
+            .flatten();
+        if json.is_some() || original.is_some() {
+            sqlx::query(
+                "UPDATE events SET json = COALESCE($2, json), original_json = COALESCE($3, original_json)
+                 WHERE event_id = $1",
+            )
+            .bind(event_id.as_str())
+            .bind(json)
+            .bind(original)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
     }
 
     async fn de_outlier(&self, event_id: &EventId, state_group: i64) -> Result<()> {

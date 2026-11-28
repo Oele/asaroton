@@ -26,7 +26,9 @@ a room it has nobody in). Three rooms:
   server are signed first, or refused. Carol's messages: without a signature and refused again,
   soft-failed (not in Alice's timeline); without a signature and signed when asked, accepted
   with the signature kept; already validly signed, accepted without asking; signed wrongly,
-  asked again. The bot's own message, signed by its server and its policy key, is accepted.
+  asked again. Only the refusals the spec defines for /sign reach the client as they are (a
+  401 M_UNKNOWN_TOKEN becomes a 403 M_FORBIDDEN); an upgrade the policy server refuses makes
+  no successor room. The bot's own message, signed by its server and its policy key, is accepted.
   Last, a policy server that does not answer: the client gets a 502 after about five seconds,
   and for a while after that the policy server is not asked again (events fail at once).
 
@@ -166,6 +168,14 @@ def run(hs, peers):
     check(sent_to(ps, "spam spam spam") == [] and sent_to(other, "spam spam spam") == [], "nor sent anywhere")
     check("spam spam spam" not in timeline(room), "nor in the timeline")
 
+    # Only the answers the spec defines for /sign are passed on: an errcode that makes
+    # clients act (sign out, here) is no policy server's to give.
+    ps.policy_refusal, ps.policy_refusal_status = {"errcode": "M_UNKNOWN_TOKEN", "error": "sign out now", "soft_logout": False}, 401
+    st, r = send(room, "a hostile answer")
+    check(st == 403 and r == {"errcode": "M_FORBIDDEN", "error": "sign out now"}, f"an answer the spec does not define for /sign becomes a plain refusal ({st}, {r})")
+    check(stored_with("a hostile answer") == 0, "and the event is not stored")
+    ps.policy_refusal, ps.policy_refusal_status = {"errcode": "M_FORBIDDEN", "error": "ps does not like this event"}, 400
+
     ps.policy_mode = "wrong"
     st, r = send(room, "signed with another key")
     check(st == 403 and r.get("errcode") == "M_FORBIDDEN", f"a signature that is not valid for the room's key is refused too ({st}, {r})")
@@ -229,6 +239,14 @@ def run(hs, peers):
     ps.policy_mode = "sign"
     st, r = hs.req("POST", f"/_matrix/client/v3/rooms/{q(room)}/invite", {"user_id": frank}, token)
     check(st == 200 and len(invitations) == 1 and ps.policy_signed(invitations[0]), f"an invitation reaches it signed by the policy server ({st}, {len(invitations)})")
+
+    print("-- upgrading the room")
+    ps.policy_mode = "refuse"
+    rooms_before = int(query("SELECT count(*) FROM rooms")[0][0])
+    st, r = hs.req("POST", f"/_matrix/client/v3/rooms/{q(room)}/upgrade", {"new_version": "11"}, token)
+    check(st == 400 and r == ps.policy_refusal, f"an upgrade the policy server refuses fails with its error ({st}, {r})")
+    check(int(query("SELECT count(*) FROM rooms")[0][0]) == rooms_before, "before a successor room is made")
+    ps.policy_mode = "sign"
 
     print("-- events from another server")
     ps.policy_mode = "refuse"
