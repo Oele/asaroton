@@ -33,7 +33,11 @@ pub struct Sender {
     /// `None` for appservice senders (and MAS tokens without a device).
     pub device_id: Option<OwnedDeviceId>,
     pub is_guest: bool,
-    /// The appservice this token belongs to, if any.
+    /// The appservice whose `as_token` this is, if any. Only an `as_token` sets it: the token
+    /// of a user an appservice registered is that user's own and gives no appservice powers
+    /// (acting as other users with `?user_id=`, UIA-free device deletion, appservice-only
+    /// endpoints). Before 2026-11-28 it was copied from the user's record, which let anyone
+    /// with such a user's token act as any user in the namespace.
     pub appservice_id: Option<String>,
     /// The access token used (kept for logout).
     pub token: String,
@@ -242,7 +246,7 @@ impl Authenticator {
                     user_id: id.user_id,
                     device_id: id.device_id,
                     is_guest: false,
-                    appservice_id: user.appservice_id,
+                    appservice_id: None,
                     token: token.to_owned(),
                     is_admin: id.admin || user.is_admin,
                     locked: user.is_locked,
@@ -268,16 +272,15 @@ impl Authenticator {
             .clone()
             .unwrap_or_else(|| t.user_id.clone());
         let user = self.store.get_user(&user_id).await?;
-        let (is_guest, appservice_id, deactivated, is_admin, locked, suspended) = match &user {
+        let (is_guest, deactivated, is_admin, locked, suspended) = match &user {
             Some(u) => (
                 u.is_guest,
-                u.appservice_id.clone(),
                 u.is_deactivated,
                 u.is_admin,
                 u.is_locked,
                 u.is_suspended,
             ),
-            None => (false, None, false, false, false, false),
+            None => (false, false, false, false, false),
         };
         if deactivated {
             return Err(AuthError::Deactivated);
@@ -306,7 +309,7 @@ impl Authenticator {
                 user_id,
                 device_id: t.device_id,
                 is_guest,
-                appservice_id,
+                appservice_id: None,
                 token: token.to_owned(),
                 is_admin,
                 locked,
