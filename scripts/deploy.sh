@@ -51,7 +51,16 @@ git fetch -q origin
 [ -z "$(git status --porcelain --untracked-files=no)" ] || die "there are uncommitted changes; commit and push first"
 [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] || die "HEAD is not origin/main; push first"
 echo "checking $(git log -1 --format='%h %s')"
-scripts/check.sh >/tmp/asaroton-deploy-check.log 2>&1 || { tail -n 20 /tmp/asaroton-deploy-check.log; die "scripts/check.sh fails; not deploying"; }
+# The whole log is kept (one per run, the last few) so a failure can be read afterwards.
+CHECK_LOGS="${XDG_CACHE_HOME:-$HOME/.cache}/asaroton-deploy"
+mkdir -p "$CHECK_LOGS"
+CHECK_LOG="$CHECK_LOGS/check-$(date +%Y%m%d-%H%M%S).log"
+ls -1t "$CHECK_LOGS"/check-*.log 2>/dev/null | tail -n +10 | xargs -r rm -f
+scripts/check.sh >"$CHECK_LOG" 2>&1 || {
+  grep -E "FAIL \[|panicked|assertion|Error" "$CHECK_LOG" | head -n 40
+  tail -n 20 "$CHECK_LOG"
+  die "scripts/check.sh fails; not deploying (full log: $CHECK_LOG)"
+}
 cargo build --release 2>&1 | tail -n 1
 SHA=$(sha256sum "$BINARY" | cut -d' ' -f1)
 echo "binary ${SHA:0:12}"

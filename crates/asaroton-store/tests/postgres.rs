@@ -1352,7 +1352,7 @@ async fn a_position_is_not_reported_past_a_write_that_is_under_way(pool: PgPool)
         false,
         None,
     );
-    let free = tokio::time::timeout(std::time::Duration::from_secs(5), free)
+    let free = tokio::time::timeout(PATIENCE, free)
         .await
         .expect("a write does not wait for the one before it")
         .unwrap();
@@ -1381,7 +1381,7 @@ async fn a_position_is_not_reported_past_a_write_that_is_under_way(pool: PgPool)
 
     lock.rollback().await.unwrap();
     let held = held.await.unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(5), woken)
+    tokio::time::timeout(PATIENCE, woken)
         .await
         .expect("the wake-up for the later event goes out when the earlier one is done")
         .unwrap();
@@ -1748,8 +1748,15 @@ async fn lock_against_writing(
 }
 
 /// Waits until a query with one number as its parameter answers true.
+/// How long the tests that stage concurrent writes wait for something that should happen at
+/// once. Only an upper bound: they go on the moment it happens. A machine under heavy load
+/// (builds and other suites beside the check, statements taking seconds) needed more than the
+/// five seconds these waits once had (tracker #106).
+const PATIENCE: std::time::Duration = std::time::Duration::from_secs(30);
+
 async fn until(pool: &PgPool, sql: &'static str, n: i64) {
-    for _ in 0..500 {
+    let deadline = std::time::Instant::now() + PATIENCE;
+    while std::time::Instant::now() < deadline {
         if sqlx::query_scalar::<_, bool>(sql)
             .bind(n)
             .fetch_one(pool)
@@ -1760,7 +1767,7 @@ async fn until(pool: &PgPool, sql: &'static str, n: i64) {
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
-    panic!("timed out waiting for: {sql}");
+    panic!("timed out after {PATIENCE:?} waiting for: {sql}");
 }
 
 /// A message of Bob's in the room, building on its newest event.
