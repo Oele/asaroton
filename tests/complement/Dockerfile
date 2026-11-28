@@ -14,10 +14,16 @@ COPY . .
 # A copy taken right after linking can come out with zeroes where the binary's data should be
 # (the kernel still reports the unwritten pages as a hole and cp skips them); the server then
 # dies at its first random number. Flush the file before copying it and compare the copy.
+# The target cache is shared by every checkout that builds this image, and COPY keeps the
+# files' times: a crate built from another checkout more recently than this one's sources
+# were changed would pass for up to date, and the server would be built against it (it did:
+# "no method named ..." on 2026-11-28). The workspace's own sources get the time of this build
+# first, so they are always compiled from what was copied; the dependencies stay cached.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/src/target \
-    cargo build --release -p asaroton \
+    find crates -type f -exec touch {} + \
+    && cargo build --release -p asaroton \
     && sync target/release/asaroton \
     && cp target/release/asaroton /asaroton \
     && cmp target/release/asaroton /asaroton
